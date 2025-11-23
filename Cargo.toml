@@ -1,0 +1,19 @@
+[package]
+name = "lieui"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bitflags = "2.10.0"
+color = "0.3"
+euclid = "0.22"
+parley = "0.6"
+slotmap = "1.0.7"
+taffy = "0.9"
+vello_cpu = "0.0.4"
+winit = "0.30"
+
+
+[dev-dependencies]
