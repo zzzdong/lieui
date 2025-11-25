@@ -1,111 +1,125 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::RefCell, thread_local};
 
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontData, FontFamily, FontStack, FontWeight, GenericFamily, Glyph, InlineBox, Layout, LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontStack, FontWeight, GenericFamily,
+    Glyph, Layout, LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty, TextStyle,
 };
+use vello_cpu::{RenderContext, peniko::Brush};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextColor(vello_cpu::color::AlphaColor<vello_cpu::color::Srgb>);
 
-pub struct PaintContext {
-    render_cx: vello_cpu::RenderContext,
-    font_cx: FontContext,
-    layout_cx: LayoutContext<()>,
+impl Default for TextColor {
+    fn default() -> Self {
+        Self(vello_cpu::color::AlphaColor::<vello_cpu::color::Srgb>::BLACK)
+    }
 }
 
-impl PaintContext {
-    pub fn new(width: u16, height: u16) -> Self {
-        let render_cx = vello_cpu::RenderContext::new(width, height);
-        let font_cx = FontContext::new();
-        let layout_cx = LayoutContext::new();
+pub struct TextEngine {
+    font_cx: FontContext,
+    layout_cx: LayoutContext<TextColor>,
+}
+
+thread_local! {
+    static TEXT_ENGINE: RefCell<TextEngine> = RefCell::new(TextEngine::new());
+}
+
+impl TextEngine {
+    fn new() -> Self {
         Self {
-            render_cx,
-            font_cx,
-            layout_cx,
+            font_cx: FontContext::new(),
+            layout_cx: LayoutContext::new(),
         }
     }
 
-    pub fn paint_text(
-        &mut self,
+    pub fn with<F, R>(f: F) -> R
+    where
+        F: FnOnce(&mut TextEngine) -> R,
+    {
+        TEXT_ENGINE.with(|engine| f(&mut engine.borrow_mut()))
+    }
+
+    pub fn layout_text(
         text: &str,
-        x: f32,
-        y: f32,
-        style: StyleProperty<()>,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) {
-        let layout = self.layout_glyph_run(text, style, width, height);
+        style: &TextStyle<TextColor>,
+        max_width: Option<f32>,
+        max_height: Option<f32>,
+    ) -> Layout<TextColor> {
+        Self::with(|engine| engine.layout_glyph_run(text, style, max_width, max_height))
+    }
 
-        let width = layout.width();
-        let height = layout.height();
-
-        let mut glyphs = Vec::new();
-        let mut font = None;
-
-
-
+    pub fn paint_text(cx: &mut RenderContext, x: f32, y: f32, layout: &Layout<TextColor>) {
         for line in layout.lines() {
             for item in line.items() {
-                match item {
-                    PositionedLayoutItem::GlyphRun(run) => {
-                        font = Some(run.run().font());
-                        // Render the glyph run
-                        for glyph in run.positioned_glyphs() {
-                            glyphs.push(glyph);
-                        }
-                        
-                    }
-                    PositionedLayoutItem::InlineBox(inline_box) => {
-                        // Render the inline box
-                    }
-                };
+                if let PositionedLayoutItem::GlyphRun(run) = item {
+                    let brush = run.style().brush;
+
+                    cx.set_paint(brush.0);
+
+                    let glyphs = run.positioned_glyphs().map(|g| {
+                        println!("glyph: {:?}", g);
+                        vello_cpu::Glyph {
+                        id: g.id,
+                        x: x + g.x,
+                        y: y + g.y,
+                    }});
+
+                    cx.glyph_run(run.run().font())
+                        .font_size(run.run().font_size())
+                        .fill_glyphs(glyphs);
+                }
             }
         }
-
-        
-
-
     }
 
+    // ---------- 内部：全属性推入布局器 ----------
     fn layout_glyph_run<'a>(
         &'a mut self,
         text: &str,
-        style: StyleProperty<()>,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) -> Layout<()> {
+        style: &TextStyle<TextColor>,
+        max_width: Option<f32>,
+        max_height: Option<f32>,
+    ) -> Layout<TextColor> {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
-        builder.push_default(style);
 
-        let mut layout: Layout<()> = builder.build(text);
+        // 1. 字体族
+        builder.push_default(StyleProperty::FontStack(style.font_stack.clone()));
 
-        let max_width = width.map(|w| w as f32);
+        // 2. 字号
+        builder.push_default(StyleProperty::FontSize(style.font_size));
 
-        match (width, height) {
-            (Some(width), Some(height)) => {
-                let mut break_lines = layout.break_lines();
+        // 3. 字重
+        builder.push_default(StyleProperty::FontWeight(style.font_weight));
 
-                let mut box_width = 0.0;
-                let mut box_height = 0.0;
+        // 4. 行高
 
-                while let Some((w, h)) = break_lines.break_next(width as f32) {
-                    if box_height + h > height as f32 {
-                        break_lines.revert();
+        builder.push_default(StyleProperty::LineHeight(style.line_height));
+
+        // 5. 字间距
+        builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
+
+        // 6. 颜色（Brush 内放 Color）
+        builder.push_default(StyleProperty::<TextColor>::Brush(style.brush));
+
+        let mut layout = builder.build(text);
+
+        // 断行 & 对齐
+        match (max_width, max_height) {
+            (Some(w), Some(h)) => {
+                let mut breaker = layout.break_lines();
+                let mut used_h = 0.0;
+                while let Some((_, line_h)) = breaker.break_next(w) {
+                    if used_h + line_h > h {
+                        breaker.revert();
                         break;
                     }
-                    box_width = w.max(box_width);
-                    box_height += h;
+                    used_h += line_h;
                 }
-
-                break_lines.finish();
             }
-            (width, None) => {
-                layout.break_all_lines(max_width);
-            }
-            (None, Some(_)) => {
-                // FIXME: maybe height is not enough
-                layout.break_all_lines(None);
-            }
+            (Some(w), None) => layout.break_all_lines(Some(w)),
+            _ => layout.break_all_lines(None),
         }
 
         layout.align(max_width, Alignment::Start, AlignmentOptions::default());
@@ -113,4 +127,3 @@ impl PaintContext {
         layout
     }
 }
-

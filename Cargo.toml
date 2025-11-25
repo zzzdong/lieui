@@ -12,8 +12,8 @@ euclid = "0.22"
 parley = "0.6"
 slotmap = "1.0.7"
 taffy = "0.9"
-vello_cpu = "0.0.4"
+vello_cpu =  { version ="0.0.4", features = [] }
 winit = "0.30"
-
+hecs = { version = "0.10.5", features = ["macros"] }
 
 [dev-dependencies]
