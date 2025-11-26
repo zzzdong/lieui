@@ -213,9 +213,9 @@ fn compute_layout(
 #[cfg(test)]
 mod tests {
     use taffy::prelude::length;
-    use vello_cpu::Pixmap;
+    use vello_cpu::{Pixmap, peniko::Color};
 
-    use crate::element::{DivElement, TextElement};
+    use crate::{element::{DivElement, TextElement}, paint::TextColor};
 
     use super::*;
 
@@ -238,9 +238,13 @@ mod tests {
         let root = tree.add_node(root_node);
         tree.set_root(root);
 
+
+        let mut text = TextElement::new("Hello, 中文!".to_string());
+        text.style.brush = Color::from_rgb8(255, 0, 0).into();
+
         tree.insert_child(
             root,
-            ElementNode::new(TextElement::new("Hello, 中文!".to_string())),
+            ElementNode::new(text),
         );
 
         tree.do_layout(TaffySize::<AvailableSpace> {

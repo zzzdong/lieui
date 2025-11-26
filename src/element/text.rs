@@ -8,8 +8,8 @@ use crate::{
 };
 
 pub struct TextElement {
-    text: String,
-    style: TextStyle<'static, TextColor>,
+    pub text: String,
+    pub style: TextStyle<'static, TextColor>,
     layout: Option<parley::Layout<TextColor>>,
 }
 
@@ -29,9 +29,6 @@ impl TextElement {
 
 impl IElement for TextElement {
     fn paint(&mut self, cx: &mut RenderContext, layout: &Layout) {
-        // let text_layout = self.layout.as_ref().unwrap_or_else(|| {
-        //     &TextEngine::layout_text(&self.text, &self.style, None, None)
-        // });
         match &self.layout {
             Some(layout) => {
                 self.layout = Some(layout.clone());
@@ -42,8 +39,7 @@ impl IElement for TextElement {
             }
         }
 
-
-        TextEngine::paint_text(cx, 20.0, 20.0, self.layout.as_ref().unwrap())
+        TextEngine::paint_text(cx, 0.0, 0.0, self.layout.as_ref().unwrap())
     }
 
     fn measure(
@@ -52,14 +48,13 @@ impl IElement for TextElement {
         available: taffy::Size<taffy::AvailableSpace>,
         style: &Style,
     ) -> taffy::Size<f32> {
-        let width = match available.width {
-            AvailableSpace::Definite(w) => Some(w),
-            _ => None,
+        let width = match size.width {
+            Some(w) => Some(w),
+            None => available.width.into_option(),
         };
-
-        let height = match available.height {
-            AvailableSpace::Definite(h) => Some(h),
-            _ => None,
+        let height = match size.height {
+            Some(h) => Some(h),
+            None => available.height.into_option(),
         };
 
         let layout = TextEngine::layout_text(&self.text, &self.style, width, height);

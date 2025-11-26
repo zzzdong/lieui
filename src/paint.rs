@@ -4,16 +4,23 @@ use parley::{
     Alignment, AlignmentOptions, FontContext, FontFamily, FontStack, FontWeight, GenericFamily,
     Glyph, Layout, LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty, TextStyle,
 };
-use vello_cpu::{RenderContext, peniko::Brush};
+use vello_cpu::{RenderContext, peniko::Brush, peniko::Color};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TextColor(vello_cpu::color::AlphaColor<vello_cpu::color::Srgb>);
+pub struct TextColor(Color);
 
 impl Default for TextColor {
     fn default() -> Self {
-        Self(vello_cpu::color::AlphaColor::<vello_cpu::color::Srgb>::BLACK)
+        Self(Color::BLACK)
     }
 }
+
+impl From<Color> for TextColor {
+    fn from(color: Color) -> Self {
+        Self(color)
+    }
+}
+
 
 pub struct TextEngine {
     font_cx: FontContext,
@@ -117,6 +124,7 @@ impl TextEngine {
                     }
                     used_h += line_h;
                 }
+                breaker.finish();
             }
             (Some(w), None) => layout.break_all_lines(Some(w)),
             _ => layout.break_all_lines(None),
