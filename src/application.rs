@@ -1,12 +1,14 @@
-use std::{collections::HashMap, num::NonZeroU32, rc::Rc, time::Instant};
+use std::{collections::HashMap, marker::PhantomData, num::NonZeroU32, rc::Rc, time::Instant};
 
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, kurbo::Affine};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::ActiveEventLoop,
+    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
+    event_loop::{self, ActiveEventLoop},
     window::{self, Window, WindowAttributes, WindowId},
 };
+
+use crate::world::View;
 
 enum RenderState {
     Active {
@@ -16,20 +18,22 @@ enum RenderState {
     Suspended,
 }
 
-struct LieWindow {
+struct LieWindow<State> {
     attrs: WindowAttributes,
     render_state: RenderState,
     pixmap: Pixmap,
     renderer: RenderContext,
+    view: View<State>,
 }
 
-impl LieWindow {
-    fn new(attrs: WindowAttributes) -> Self {
+impl<State> LieWindow<State> {
+    fn new(attrs: WindowAttributes, view: View<State>) -> Self {
         Self {
             attrs,
             render_state: RenderState::Suspended,
             pixmap: Pixmap::new(0, 0),
             renderer: RenderContext::new(1, 1),
+            view,
         }
     }
 
@@ -68,6 +72,7 @@ impl LieWindow {
         event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
+        state: &mut State,
     ) {
         let RenderState::Active { window, surface } = &mut self.render_state else {
             return;
@@ -82,6 +87,8 @@ impl LieWindow {
             WindowEvent::Resized(size) => {
                 let width = size.width.max(1);
                 let height = size.height.max(1);
+
+                self.view.request_layout(width as f32, height as f32);
 
                 surface
                     .resize(
@@ -114,12 +121,16 @@ impl LieWindow {
                     },
                 ..
             } => {}
-            WindowEvent::MouseInput { state, button, .. } => {}
+            WindowEvent::MouseInput { .. } => {
+                self.view.handle_event(event, state);
+            }
             WindowEvent::CursorMoved { position, .. } => {}
             WindowEvent::MouseWheel { delta, .. } => {}
 
             WindowEvent::RedrawRequested => {
                 self.renderer.reset();
+
+                self.view.render(&mut self.renderer);
 
                 self.renderer.flush();
                 self.renderer.render_to_pixmap(&mut self.pixmap);
@@ -142,20 +153,40 @@ impl LieWindow {
     }
 }
 
-struct Application {
-    windows: HashMap<WindowId, LieWindow>,
+enum PrimaryWindow<State> {
+    Uninitialized {
+        attrs: WindowAttributes,
+        view: View<State>,
+    },
+    Initialized(WindowId),
 }
 
-impl Application {
-    pub fn new() -> Self {
+pub struct Application<State> {
+    windows: HashMap<WindowId, LieWindow<State>>,
+    state: State,
+    primary_window: PrimaryWindow<State>,
+}
+
+impl<State> Application<State> {
+    pub fn new(view: View<State>, attrs: WindowAttributes, state: State) -> Self {
         Self {
             windows: HashMap::new(),
+            state,
+            primary_window: PrimaryWindow::Uninitialized { attrs, view },
         }
     }
 
-    pub fn create_window(&mut self, attrs: WindowAttributes) -> WindowId {
-        let window = LieWindow::new(attrs);
-        let window_id = window.id().expect("Window id must be present");
+    pub fn create_window(
+        &mut self,
+        attrs: WindowAttributes,
+        view: View<State>,
+        event_loop: &ActiveEventLoop,
+    ) -> WindowId {
+        let mut window = LieWindow::new(attrs, view);
+
+        window.resumed(event_loop);
+
+        let window_id = window.id().expect("window must be initialized");
 
         self.windows.insert(window_id, window);
 
@@ -163,13 +194,27 @@ impl Application {
     }
 
     pub fn run(&mut self) {
-        let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop");
+        let event_loop = winit::event_loop::EventLoop::new().expect("failed to create event loop");
 
-        event_loop.run_app(self);
+        let _ = event_loop.run_app(self);
     }
 }
 
-impl ApplicationHandler for Application {
+impl<State> ApplicationHandler for Application<State> {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if let StartCause::Init = cause {
+            let primary_window = std::mem::replace(
+                &mut self.primary_window,
+                PrimaryWindow::Initialized(WindowId::dummy()),
+            );
+
+            if let PrimaryWindow::Uninitialized { attrs, view } = primary_window {
+                let window_id = self.create_window(attrs, view, event_loop);
+                self.primary_window = PrimaryWindow::Initialized(window_id);
+            }
+        }
+    }
+
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         for window in self.windows.values_mut() {
             window.render_state = RenderState::Suspended;
@@ -189,7 +234,27 @@ impl ApplicationHandler for Application {
         event: WindowEvent,
     ) {
         if let Some(window) = self.windows.get_mut(&window_id) {
-            window.window_event(event_loop, window_id, event);
+            window.window_event(event_loop, window_id, event, &mut self.state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::dpi::PhysicalSize;
+
+    use super::*;
+
+    #[test]
+    fn test_application() {
+        let state = String::new();
+
+        let view = View::new();
+
+        let attrs = WindowAttributes::default().with_inner_size(PhysicalSize::new(100, 100));
+
+        let mut app = Application::new(view, attrs, state);
+
+        app.run();
     }
 }

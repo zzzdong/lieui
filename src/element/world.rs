@@ -114,7 +114,7 @@ impl<State> ElementTree<State> {
         child_id
     }
 
-    pub fn do_layout(&mut self, viewport: TaffySize<AvailableSpace>) {
+    pub fn do_layout(&mut self, width: f32, height: f32) {
         match self.root {
             Some(root_id) => {
                 let layout_id = self
@@ -126,7 +126,13 @@ impl<State> ElementTree<State> {
                 // update_layout_style(&mut self.taffy, &mut self.nodes, layout_id);
 
                 // compute_layout(&mut self.taffy, &mut self.nodes, layout_id, viewport);
-                self.compute_layout(layout_id, viewport);
+                self.compute_layout(
+                    layout_id,
+                    TaffySize::<AvailableSpace> {
+                        width: AvailableSpace::from(width),
+                        height: AvailableSpace::from(height),
+                    },
+                );
 
                 self.taffy.print_tree(layout_id);
             }
@@ -402,5 +408,3 @@ fn update_layout_style<State>(
 //             .expect("compute layout failed");
 //     }
 // }
-
-

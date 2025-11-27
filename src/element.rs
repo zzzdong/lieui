@@ -105,10 +105,7 @@ mod tests {
 
         tree.insert_child(root, ElementNode::new(text));
 
-        tree.do_layout(TaffySize::<AvailableSpace> {
-            width: AvailableSpace::Definite(800.0),
-            height: AvailableSpace::Definite(600.0),
-        });
+        tree.do_layout(800.0, 600.0);
 
         let mut render_cx = RenderContext::new(800, 600);
 
