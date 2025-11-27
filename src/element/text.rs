@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use parley::{Font, FontFamily, StyleProperty, TextStyle};
 use taffy::{AvailableSpace, Layout, Style};
 use vello_cpu::RenderContext;
@@ -7,13 +9,14 @@ use crate::{
     paint::{TextColor, TextEngine},
 };
 
-pub struct TextElement {
+pub struct TextElement<State> {
     pub text: String,
     pub style: TextStyle<'static, TextColor>,
     layout: Option<parley::Layout<TextColor>>,
+    _phantom: PhantomData<State>,
 }
 
-impl TextElement {
+impl<State> TextElement<State> {
     pub fn new(text: String) -> Self {
         let mut style = TextStyle::default();
 
@@ -23,11 +26,12 @@ impl TextElement {
             text,
             style,
             layout: None,
+            _phantom: PhantomData,
         }
     }
 }
 
-impl IElement for TextElement {
+impl<State> IElement<State> for TextElement<State> {
     fn paint(&mut self, cx: &mut RenderContext, layout: &Layout) {
         match &self.layout {
             Some(layout) => {
