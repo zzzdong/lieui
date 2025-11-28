@@ -17,6 +17,8 @@ pub enum PointerEventType {
     PointerExited,
     /// 指针捕获丢失
     PointerCaptureLost,
+    /// 指针点击（鼠标左键单击/触摸单击）
+    PointerClicked,
 }
 
 /// 指针事件数据结构

@@ -5,7 +5,7 @@ use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{self, ActiveEventLoop},
-    window::{self, Window, WindowAttributes, WindowId},
+    window::{ Window, WindowAttributes, WindowId},
 };
 
 use crate::world::View;
@@ -109,23 +109,6 @@ impl<State> LieWindow<State> {
 
                 window.request_redraw();
             }
-            // WindowEvent::ModifiersChanged(new_modifiers) => {
-            //     self.modifiers = new_modifiers;
-            // }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key,
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
-            } => {}
-            WindowEvent::MouseInput { .. } => {
-                self.view.handle_event(event, state);
-            }
-            WindowEvent::CursorMoved { position, .. } => {}
-            WindowEvent::MouseWheel { delta, .. } => {}
 
             WindowEvent::RedrawRequested => {
                 self.renderer.reset();
@@ -148,7 +131,9 @@ impl<State> LieWindow<State> {
 
                 buffer.present().unwrap();
             }
-            _ => {}
+            _ => {
+                self.view.handle_event(event, state);
+            }
         }
     }
 }
@@ -245,16 +230,4 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_application() {
-        let state = String::new();
-
-        let view = View::new();
-
-        let attrs = WindowAttributes::default().with_inner_size(PhysicalSize::new(100, 100));
-
-        let mut app = Application::new(view, attrs, state);
-
-        app.run();
-    }
 }

@@ -8,56 +8,57 @@ use taffy::{
     AvailableSpace, Dimension, Layout as TaffyLayout, NodeId, NodeId as TaffyId, PrintTree,
     Size as TaffySize, Style as TaffyStyle, TaffyTree,
 };
-use vello_cpu::RenderContext;
+use vello_cpu::{
+    RenderContext,
+    kurbo::{Rect, Shape},
+};
 use winit::event::{ElementState, MouseButton, WindowEvent};
-
-use crate::event::PointerEventHandler;
 
 use super::{ElementId, IElement};
 
-pub struct ElementNode<State> {
-    pub content: Box<dyn IElement<State>>,
+pub struct ElementNode {
+    pub content: Box<dyn IElement>,
 }
 
-impl<State> ElementNode<State> {
-    pub fn new<T: IElement<State> + 'static>(content: T) -> Self {
+impl ElementNode {
+    pub fn new(content: impl IElement + 'static) -> Self {
         Self {
             content: Box::new(content),
         }
     }
 
-    pub fn into_ref(self) -> ElementRef<State> {
+    pub fn into_ref(self) -> ElementRef {
         ElementRef(Rc::new(RefCell::new(self)))
     }
 }
 
-pub struct ElementRef<State>(Rc<RefCell<ElementNode<State>>>);
+pub struct ElementRef(Rc<RefCell<ElementNode>>);
 
-impl<State> ElementRef<State> {
-    pub fn get_mut(&self) -> RefMut<ElementNode<State>> {
+impl ElementRef {
+    pub fn get_mut(&self) -> RefMut<ElementNode> {
         self.0.borrow_mut()
     }
 
-    pub fn get(&self) -> Ref<ElementNode<State>> {
+    pub fn get(&self) -> Ref<ElementNode> {
         self.0.borrow()
     }
 }
 
-impl<State> Clone for ElementRef<State> {
+impl Clone for ElementRef {
     fn clone(&self) -> Self {
         ElementRef(self.0.clone())
     }
 }
 
-pub struct ElementTree<State> {
-    nodes: HashMap<ElementId, ElementRef<State>>,
+pub struct ElementTree {
+    nodes: HashMap<ElementId, ElementRef>,
     layouts: HashMap<ElementId, TaffyId>,
     taffy: TaffyTree<ElementId>,
     root: Option<ElementId>,
     next_id: u64,
 }
 
-impl<State> ElementTree<State> {
+impl ElementTree {
     pub fn new() -> Self {
         let mut nodes = HashMap::new();
         let mut taffy = TaffyTree::new();
@@ -71,14 +72,11 @@ impl<State> ElementTree<State> {
         }
     }
 
-    pub fn set_root(&mut self, root: ElementId) {
-        self.root = Some(root);
-    }
-
-    pub fn add_node(&mut self, node: ElementNode<State>) -> ElementId {
+    pub fn add_node(&mut self, node: impl IElement + 'static) -> ElementId {
         let node_id = ElementId(self.next_id);
         self.next_id += 1;
 
+        let node = ElementNode::new(node);
         let node_ref = node.into_ref();
 
         // 创建布局节点
@@ -93,7 +91,15 @@ impl<State> ElementTree<State> {
         node_id
     }
 
-    pub fn insert_child(&mut self, parent: ElementId, child: ElementNode<State>) -> ElementId {
+    pub fn add_root(&mut self, root: impl IElement + 'static) -> ElementId {
+        let root_id = self.add_node(root);
+
+        self.root = Some(root_id);
+
+        root_id
+    }
+
+    pub fn add_child(&mut self, parent: ElementId, child: impl IElement + 'static) -> ElementId {
         let child_id = self.add_node(child);
 
         // 获取父节点的布局ID
@@ -174,16 +180,26 @@ impl<State> ElementTree<State> {
                 .expect("get node context failed");
             let ele = self.node(*ele_id);
             let layout = self.taffy.layout(child_id).expect("get layout failed");
+
+            let rect = Rect::new(
+                layout.location.x.into(),
+                layout.location.y.into(),
+                (layout.location.x + layout.size.width) as f64,
+                (layout.location.y + layout.size.height) as f64,
+            );
+
+            cx.push_clip_layer(&rect.to_path(1.0));
             ele.get_mut().content.paint(cx, layout);
+            cx.pop_layer();
         }
     }
 
     /// 根据ElementId获取节点引用
-    fn node(&self, ele_id: ElementId) -> ElementRef<State> {
+    fn node(&self, ele_id: ElementId) -> ElementRef {
         self.nodes.get(&ele_id).expect("node not found").clone()
     }
 
-    pub fn get_mut(&mut self, ele_id: ElementId) -> ElementRef<State> {
+    pub fn get_mut(&mut self, ele_id: ElementId) -> ElementRef {
         self.nodes.get_mut(&ele_id).expect("node not found").clone()
     }
 
@@ -255,36 +271,32 @@ impl<State> ElementTree<State> {
             None => return None,
         };
 
-        // 调用进入元素钩子
-        inspect_enter_fn(element_id);
-
         // 检查点是否在当前节点的边界内
         let contains_point = x >= absolute_pos.0
             && x <= absolute_pos.0 + layout.size.width
             && y >= absolute_pos.1
             && y <= absolute_pos.1 + layout.size.height;
 
-        // 如果点在当前节点内，检查停止条件
-        let mut found_element = None;
-        if contains_point {}
+        if !contains_point {
+            return None;
+        }
 
-        // 如果点在当前节点内且没有停止，继续检查子节点
-        if contains_point && found_element.is_none() {
-            // 获取子节点（从后往前遍历，因为后面的元素在视觉上层）
-            if let Ok(children) = tree.children(node_id) {
-                for child_id in children.iter().rev() {
-                    if let Some(child_element) = Self::find_element_in_layout_recursive(
-                        tree,
-                        *child_id,
-                        x,
-                        y,
-                        absolute_pos,
-                        inspect_enter_fn,
-                        inspect_exit_fn,
-                    ) {
-                        found_element = Some(child_element);
-                        break;
-                    }
+        // 调用进入元素钩子
+        inspect_enter_fn(element_id);
+
+        if let Ok(children) = tree.children(node_id) {
+            for child_id in children.iter() {
+                if let Some(child_element) = Self::find_element_in_layout_recursive(
+                    tree,
+                    *child_id,
+                    x,
+                    y,
+                    absolute_pos,
+                    inspect_enter_fn,
+                    inspect_exit_fn,
+                ) {
+                    inspect_exit_fn(element_id);
+                    return Some(child_element);
                 }
             }
         }
@@ -292,7 +304,7 @@ impl<State> ElementTree<State> {
         // 调用离开元素钩子
         inspect_exit_fn(element_id);
 
-        found_element
+        Some(element_id)
     }
 
     /// 查找包含指定坐标的元素
@@ -341,9 +353,9 @@ impl<State> ElementTree<State> {
     }
 }
 
-fn update_layout_style<State>(
+fn update_layout_style(
     tree: &mut TaffyTree<ElementId>,
-    elements: &mut HashMap<ElementId, ElementRef<State>>,
+    elements: &mut HashMap<ElementId, ElementRef>,
     layout_id: TaffyId,
 ) {
     {
@@ -360,9 +372,9 @@ fn update_layout_style<State>(
     }
 }
 
-// fn compute_layout<State>(
+// fn compute_layout(
 //     tree: &mut TaffyTree<ElementId>,
-//     elements: &mut HashMap<ElementId, ElementRef<State>>,
+//     elements: &mut HashMap<ElementId, ElementRef>,
 //     layout_id: TaffyId,
 //     viewport: TaffySize<AvailableSpace>,
 // ) {
@@ -384,7 +396,7 @@ fn update_layout_style<State>(
 
 // pub(crate) struct LayoutTree<'a, State> {
 //     tree: &'a mut TaffyTree<ElementId>,
-//     elements: &'a mut HashMap<ElementId, ElementRef<State>>,
+//     elements: &'a mut HashMap<ElementId, ElementRef>,
 //     root: TaffyId,
 // }
 

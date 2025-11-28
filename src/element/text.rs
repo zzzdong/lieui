@@ -2,36 +2,39 @@ use std::marker::PhantomData;
 
 use parley::{Font, FontFamily, StyleProperty, TextStyle};
 use taffy::{AvailableSpace, Layout, Style};
-use vello_cpu::RenderContext;
+use vello_cpu::{RenderContext, kurbo::Rect, peniko::Color};
 
 use crate::{
     element::{IElement, world::ElementRef},
     paint::{TextColor, TextEngine},
 };
 
-pub struct TextElement<State> {
+pub struct TextElement {
     pub text: String,
     pub style: TextStyle<'static, TextColor>,
     layout: Option<parley::Layout<TextColor>>,
-    _phantom: PhantomData<State>,
+    background_color: Color,
+    front_color: Color,
 }
 
-impl<State> TextElement<State> {
+impl TextElement {
     pub fn new(text: String) -> Self {
         let mut style = TextStyle::default();
 
         style.font_size = 20.0;
+        style.brush = Color::BLACK.into();
 
         Self {
             text,
             style,
             layout: None,
-            _phantom: PhantomData,
+            background_color: Color::WHITE,
+            front_color: Color::BLACK,
         }
     }
 }
 
-impl<State> IElement<State> for TextElement<State> {
+impl IElement for TextElement {
     fn paint(&mut self, cx: &mut RenderContext, layout: &Layout) {
         match &self.layout {
             Some(layout) => {
@@ -43,7 +46,22 @@ impl<State> IElement<State> for TextElement<State> {
             }
         }
 
-        TextEngine::paint_text(cx, 0.0, 0.0, self.layout.as_ref().unwrap())
+        let rect = Rect::new(
+            layout.location.x.into(),
+            layout.location.y.into(),
+            (layout.location.x + layout.size.width) as f64,
+            (layout.location.y + layout.size.height) as f64,
+        );
+
+        let paint = cx.paint().clone();
+
+        cx.set_paint(self.background_color);
+
+        cx.fill_rect(&rect);
+
+        TextEngine::paint_text(cx, 0.0, 0.0, self.layout.as_ref().unwrap());
+
+        cx.set_paint(paint);
     }
 
     fn measure(

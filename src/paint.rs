@@ -64,7 +64,6 @@ impl TextEngine {
                     cx.set_paint(brush.0);
 
                     let glyphs = run.positioned_glyphs().map(|g| {
-                        println!("glyph: {:?}", g);
                         vello_cpu::Glyph {
                         id: g.id,
                         x: x + g.x,

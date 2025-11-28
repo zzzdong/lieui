@@ -1,10 +1,32 @@
-use lieui::{application::Application, world::View};
+use lieui::{application::Application, element::{DivElement, TextElement}, world::View};
 use winit::{dpi::PhysicalSize, window::WindowAttributes};
 
 fn main() {
-    let state = String::new();
+    let state: i32 = 0;
 
-    let view = View::new();
+    let root = DivElement::new()
+        .with_width(100.0)
+        .with_height(100.0)
+        .with_background_color(color::palette::css::WHITE);
+
+    let mut view = View::new();
+
+    let root = view.add_root(root);
+
+    let child = DivElement::new()
+        .with_width(80.0)
+        .with_height(32.0)
+        .with_background_color(color::palette::css::SKY_BLUE);
+
+    let child = view.add_child(root, child);
+
+    let text = TextElement::new("Hello".to_string());
+    let text = view.add_child(child, text);
+
+    view.handle_pointer_pressed(child, |event, state| {
+        println!("counter: {:?}", *state);
+        *state += 1;
+    });
 
     let attrs = WindowAttributes::default().with_inner_size(PhysicalSize::new(800, 600));
 
