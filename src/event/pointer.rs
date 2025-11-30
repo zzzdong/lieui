@@ -4,159 +4,136 @@ use taffy::{Layout as TaffyLayout, NodeId, TaffyTree};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::ModifiersState;
 
-use super::types::{PointerEvent, PointerEventType, PointerState};
 use crate::element::world::ElementTree;
 use crate::element::{ElementId, ElementRef, IElement};
+use crate::event::world::EventResult;
 
-/// 指针事件处理器
-pub struct PointerEventHandler {
-    /// 指针状态管理器
-    pointer_state: PointerState,
-    events: VecDeque<PointerEvent>,
+
+/// 指针状态管理器
+#[derive(Debug, Clone)]
+pub struct PointerState {
+    /// 当前指针位置
+    pub current_position: (f32, f32),
+    /// 上一次指针位置
+    pub last_position: (f32, f32),
+    /// 当前悬停的元素ID
+    pub hovered_element: Vec<ElementId>,
+    /// 当前按下的元素ID
+    pub pressed_element: Vec<ElementId>,
+    /// 指针是否按下
+    pub is_pressed: bool,
 }
 
-impl PointerEventHandler {
+impl Default for PointerState {
+    fn default() -> Self {
+        Self {
+            current_position: (0.0, 0.0),
+            last_position: (0.0, 0.0),
+            hovered_element: Vec::new(),
+            pressed_element: Vec::new(),
+            is_pressed: false,
+        }
+    }
+}
+
+impl PointerState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 更新指针位置
+    pub fn update_position(&mut self, x: f32, y: f32) {
+        self.last_position = self.current_position;
+        self.current_position = (x, y);
+    }
+}
+
+
+/// 指针事件类型，参考Windows UIElement设计
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PointerEventType {
+    /// 指针按下（鼠标点击/触摸开始）
+    PointerPressed,
+    /// 指针释放（鼠标释放/触摸结束）
+    PointerReleased,
+    /// 指针移动
+    PointerMoved,
+    /// 指针进入元素边界
+    PointerEntered,
+    /// 指针离开元素边界
+    PointerExited,
+    /// 指针捕获丢失
+    PointerCaptureLost,
+    /// 指针点击（鼠标左键单击/触摸单击）
+    PointerClicked,
+}
+
+/// 指针事件数据结构
+#[derive(Debug, Clone)]
+pub struct PointerEvent {
+    /// 事件类型
+    pub event_type: PointerEventType,
+    /// 指针位置（相对窗口坐标）
+    pub position: (f32, f32),
+    /// 鼠标按钮（仅限鼠标事件）
+    pub button: Option<MouseButton>,
+    /// 修饰键状态
+    pub modifiers: ModifiersState,
+    /// 事件目标元素ID
+    pub target: Option<ElementId>,
+    /// 事件是否已处理
+    pub handled: bool,
+}
+
+impl PointerEvent {
+    pub fn new(event_type: PointerEventType, position: (f32, f32)) -> Self {
+        Self {
+            event_type,
+            position,
+            button: None,
+            modifiers: ModifiersState::empty(),
+            target: None,
+            handled: false,
+        }
+    }
+
+    pub fn with_button(mut self, button: MouseButton) -> Self {
+        self.button = Some(button);
+        self
+    }
+
+    pub fn with_modifiers(mut self, modifiers: ModifiersState) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+
+    pub fn with_target(mut self, target: ElementId) -> Self {
+        self.target = Some(target);
+        self
+    }
+}
+
+
+pub struct PointerListeners<State> {
+    pub on_pointer_pressed: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+    pub on_pointer_released: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+    pub on_pointer_clicked: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+    pub on_pointer_moved: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+    pub on_pointer_entered: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+    pub on_pointer_exited: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+    pub on_pointer_capture_lost: Option<Box<dyn FnMut(PointerEvent, &mut State) -> EventResult + Send + 'static>>,
+}
+
+impl<State> PointerListeners<State> {
     pub fn new() -> Self {
         Self {
-            pointer_state: PointerState::new(),
-            events: VecDeque::new(),
+            on_pointer_pressed: None,
+            on_pointer_released: None,
+            on_pointer_clicked: None,
+            on_pointer_moved: None,
+            on_pointer_entered: None,
+            on_pointer_exited: None,
+            on_pointer_capture_lost: None,
         }
-    }
-
-    pub fn events(&mut self) -> &mut VecDeque<PointerEvent> {
-        &mut self.events
-    }
-
-    /// 处理窗口事件，转换为指针事件并分发
-    pub fn handle_window_event(&mut self, event: &WindowEvent, elements: &mut ElementTree) {
-        match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.handle_cursor_moved(position.x as f32, position.y as f32, elements);
-            }
-            WindowEvent::MouseInput {
-                state: button_state,
-                button,
-                ..
-            } => {
-                self.handle_mouse_input(*button_state, *button, elements);
-            }
-            _ => {}
-        }
-    }
-
-    /// 处理鼠标移动事件
-    fn handle_cursor_moved(&mut self, x: f32, y: f32, elements: &mut ElementTree) {
-        // 更新指针位置
-        self.pointer_state.update_position(x, y);
-
-        // 查找当前指针位置下的元素
-        let target_element = elements.find_element_at_point(x, y);
-
-        // 检测悬停变化并生成enter/exit事件
-        self.handle_hover_change(target_element, elements);
-
-        // 生成PointerMoved事件
-        if let Some(target) = target_element {
-            let event =
-                PointerEvent::new(PointerEventType::PointerMoved, (x, y)).with_target(target);
-
-            self.events.push_back(event);
-        }
-    }
-
-    /// 处理鼠标按键事件
-    fn handle_mouse_input(
-        &mut self,
-        button_state: ElementState,
-        button: MouseButton,
-        elements: &mut ElementTree,
-    ) {
-        let (x, y) = self.pointer_state.current_position;
-        let target_element = elements.find_element_at_point(x, y);
-
-        match button_state {
-            ElementState::Pressed => {
-                // 生成PointerPressed事件
-                if let Some(target) = target_element {
-                    let event = PointerEvent::new(PointerEventType::PointerPressed, (x, y))
-                        .with_button(button)
-                        .with_target(target);
-
-                    self.events.push_back(event);
-
-                    // 更新按下状态
-                    self.pointer_state.set_pressed(true, Some(target));
-                }
-            }
-            ElementState::Released => {
-                // 生成PointerReleased事件
-                if let Some(target) = target_element {
-                    let event = PointerEvent::new(PointerEventType::PointerReleased, (x, y))
-                        .with_button(button)
-                        .with_target(target);
-
-                    self.events.push_back(event);
-                }
-
-                // 如果之前有按下的元素，也向其发送release事件
-                if let Some(pressed_element) = self.pointer_state.pressed_element {
-                    if pressed_element != target_element.unwrap_or(pressed_element) {
-                        let event = PointerEvent::new(PointerEventType::PointerReleased, (x, y))
-                            .with_button(button)
-                            .with_target(pressed_element);
-
-                        self.events.push_back(event);
-                    }
-
-                    if Some(pressed_element) == target_element {
-                        let event = PointerEvent::new(PointerEventType::PointerClicked, (x, y))
-                            .with_button(button)
-                            .with_target(pressed_element);
-                        self.events.push_back(event);
-                    }
-                }
-
-                // 更新按下状态
-                self.pointer_state.set_pressed(false, None);
-            }
-        }
-    }
-
-    /// 处理悬停变化，生成enter/exit事件
-    fn handle_hover_change(&mut self, new_hovered: Option<ElementId>, elements: &mut ElementTree) {
-        let (x, y) = self.pointer_state.current_position;
-
-        // 更新悬停元素
-        self.pointer_state.set_hovered_element(new_hovered);
-
-        // 如果有悬停变化，生成enter/exit事件
-        if self.pointer_state.hover_changed() {
-            // 处理悬停离开
-            if let Some(exited_element) = self.pointer_state.exited_element() {
-                let event = PointerEvent::new(PointerEventType::PointerExited, (x, y))
-                    .with_target(exited_element);
-
-                self.events.push_back(event);
-            }
-
-            // 处理悬停进入
-            if let Some(entered_element) = self.pointer_state.entered_element() {
-                let event = PointerEvent::new(PointerEventType::PointerEntered, (x, y))
-                    .with_target(entered_element);
-
-                self.events.push_back(event);
-            }
-        }
-    }
-
-    /// 获取当前指针状态
-    pub fn pointer_state(&self) -> &PointerState {
-        &self.pointer_state
-    }
-}
-
-impl Default for PointerEventHandler {
-    fn default() -> Self {
-        Self::new()
     }
 }

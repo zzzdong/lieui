@@ -157,7 +157,7 @@ impl<State> Application<State> {
         Self {
             windows: HashMap::new(),
             state,
-            primary_window: PrimaryWindow::Uninitialized { attrs, view },
+            primary_window: PrimaryWindow::<State>::Uninitialized { attrs, view },
         }
     }
 
@@ -167,7 +167,7 @@ impl<State> Application<State> {
         view: View<State>,
         event_loop: &ActiveEventLoop,
     ) -> WindowId {
-        let mut window = LieWindow::new(attrs, view);
+        let mut window = LieWindow::<State>::new(attrs, view);
 
         window.resumed(event_loop);
 

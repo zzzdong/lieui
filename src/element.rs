@@ -13,7 +13,6 @@ use taffy::{
 };
 use vello_cpu::{RenderContext, kurbo::Rect};
 
-use crate::event::{PointerEvent, PointerEventType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ElementId(u64);

@@ -61,41 +61,20 @@ impl IElement for DivElement {
         cx.fill_rect(&rect);
     }
 
-        fn measure(
+    fn measure(
         &mut self,
         constraint: taffy::Size<Option<f32>>,
         available: taffy::Size<taffy::AvailableSpace>,
         _style: &Style,
     ) -> taffy::Size<f32> {
-        // 1. 解码 Dimension（无 match，用 is_auto / into_option / value）
-        let own_width = match self.style.size.width.tag() {
-            taffy::style::CompactLength::LENGTH_TAG => Some(self.style.size.width.value()),
-            taffy::style::CompactLength::PERCENT_TAG => {
-                available.width.into_option().map(|w| w * self.style.size.width.value())
-            }
-            _ => None, // AUTO_TAG / MIN_CONTENT / MAX_CONTENT
-        };
+        if let taffy::Size {
+            width: Some(width),
+            height: Some(height),
+        } = constraint
+        {
+            return taffy::Size { width, height };
+        }
 
-        let own_height = match self.style.size.height.tag() {
-            taffy::style::CompactLength::LENGTH_TAG => Some(self.style.size.height.value()),
-            taffy::style::CompactLength::PERCENT_TAG => {
-                available.height.into_option().map(|h| h * self.style.size.height.value())
-            }
-            _ => None,
-        };
-
-        // 2. 父硬约束 → 可用空间兜底
-        let w = own_width
-            .or(constraint.width)
-            .or_else(|| available.width.into_option())
-            .unwrap_or(0.0)
-            .max(0.0);
-        let h = own_height
-            .or(constraint.height)
-            .or_else(|| available.height.into_option())
-            .unwrap_or(0.0)
-            .max(0.0);
-
-        taffy::Size { width: w, height: h }
+        taffy::Size::ZERO
     }
 }

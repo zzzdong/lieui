@@ -18,12 +18,12 @@ fn main() {
         .with_height(32.0)
         .with_background_color(color::palette::css::SKY_BLUE);
 
-    let child = view.add_child(root, child);
+    let button = view.add_child(root, child);
 
     let text = TextElement::new("Hello".to_string());
-    let text = view.add_child(child, text);
+    let text = view.add_child(button, text);
 
-    view.handle_pointer_pressed(child, |event, state| {
+    view.handle_pointer_pressed(button, |event, state| {
         println!("counter: {:?}", *state);
         *state += 1;
     });

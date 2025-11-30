@@ -216,12 +216,12 @@ impl ElementTree {
         &self,
         x: f32,
         y: f32,
-        inspect_enter_fn: InspectEnterFn,
-        inspect_exit_fn: InspectExitFn,
+        mut inspect_enter_fn: InspectEnterFn,
+        mut inspect_exit_fn: InspectExitFn,
     ) -> Option<ElementId>
     where
-        InspectEnterFn: Fn(ElementId),
-        InspectExitFn: Fn(ElementId),
+        InspectEnterFn: FnMut(ElementId),
+        InspectExitFn: FnMut(ElementId),
     {
         // 如果根节点不存在，直接返回None
         let root_id = self.root?;
@@ -234,8 +234,8 @@ impl ElementTree {
             x,
             y,
             (0.0, 0.0), // 根节点的绝对位置
-            &inspect_enter_fn,
-            &inspect_exit_fn,
+            &mut inspect_enter_fn,
+            &mut inspect_exit_fn,
         )
     }
 
@@ -246,12 +246,12 @@ impl ElementTree {
         x: f32,
         y: f32,
         parent_absolute_pos: (f32, f32),
-        inspect_enter_fn: &InspectEnterFn,
-        inspect_exit_fn: &InspectExitFn,
+        inspect_enter_fn: &mut InspectEnterFn,
+        inspect_exit_fn: &mut InspectExitFn,
     ) -> Option<ElementId>
     where
-        InspectEnterFn: Fn(ElementId),
-        InspectExitFn: Fn(ElementId),
+        InspectEnterFn: FnMut(ElementId),
+        InspectExitFn: FnMut(ElementId),
     {
         // 获取当前节点的布局信息
         let layout = match tree.layout(node_id) {
@@ -315,6 +315,19 @@ impl ElementTree {
             |_| {}, // 进入元素时不执行任何操作
             |_| {}, // 离开元素时不执行任何操作
         )
+    }
+
+    pub fn collect_element_path(&self, x: f32, y: f32) -> Vec<ElementId> {
+        let mut path = vec![];
+        self.find_element_in_layout(
+            x,
+            y,
+            |element_id| {
+                path.push(element_id);
+            }, // 进入元素时将元素ID添加到路径中
+            |_| {}, // 离开元素时不执行任何操作
+        );
+        path
     }
 
     /// 查找包含指定坐标的元素，并提供调试信息
