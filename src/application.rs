@@ -5,7 +5,7 @@ use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{self, ActiveEventLoop},
-    window::{ Window, WindowAttributes, WindowId},
+    window::{Window, WindowAttributes, WindowId},
 };
 
 use crate::world::View;
@@ -62,6 +62,8 @@ impl<State> LieWindow<State> {
         self.attrs = window_attrs.clone().with_inner_size(inner_size);
         self.pixmap
             .resize(inner_size.width as u16, inner_size.height as u16);
+        self.view
+            .request_layout(inner_size.width as f32, inner_size.height as f32);
 
         self.render_state = RenderState::Active { window, surface };
         self.renderer = RenderContext::new(inner_size.width as u16, inner_size.height as u16);
@@ -229,5 +231,4 @@ mod tests {
     use winit::dpi::PhysicalSize;
 
     use super::*;
-
 }

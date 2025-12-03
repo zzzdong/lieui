@@ -13,6 +13,15 @@ pub struct EventResult {
     pub prevent_default: bool,
 }
 
+impl EventResult {
+    pub fn new() -> Self {
+        Self {
+            stop_propagation: false,
+            prevent_default: false,
+        }
+    }
+}
+
 /// 指针事件处理器
 pub struct EventWorld<State> {
     /// 指针状态管理器

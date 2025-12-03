@@ -6,8 +6,11 @@ use crate::{
     element::{
         ElementId, ElementRef, IElement,
         world::{ElementNode, ElementTree},
-    }, event::{pointer::PointerEvent, world::{EventResult, EventWorld}},
-    
+    },
+    event::{
+        pointer::PointerEvent,
+        world::{EventResult, EventWorld},
+    },
 };
 
 pub struct View<State> {
@@ -36,7 +39,8 @@ impl<State> View<State> {
     }
 
     pub(crate) fn handle_event(&mut self, event: winit::event::WindowEvent, state: &mut State) {
-        self.event_world.dispatch_window_event(&event, &mut self.elements, state);
+        self.event_world
+            .dispatch_window_event(&event, &mut self.elements, state);
     }
 
     pub fn add_element<E: IElement + 'static>(mut self, element: E) -> ElementId {
@@ -67,7 +71,6 @@ impl<State> View<State> {
     ) {
         self.event_world.handle_pointer_released(element, handler);
     }
-    
 
     pub fn handle_pointer_clicked(
         &mut self,
@@ -76,7 +79,7 @@ impl<State> View<State> {
     ) {
         self.event_world.handle_pointer_clicked(element, handler);
     }
-    
+
     pub fn handle_pointer_entered(
         &mut self,
         element: ElementId,
@@ -84,7 +87,6 @@ impl<State> View<State> {
     ) {
         self.event_world.handle_pointer_entered(element, handler);
     }
-    
 
     pub fn handle_pointer_exited(
         &mut self,
@@ -93,7 +95,6 @@ impl<State> View<State> {
     ) {
         self.event_world.handle_pointer_exited(element, handler);
     }
-    
 }
 
 pub struct Builder<State> {

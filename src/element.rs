@@ -1,6 +1,10 @@
+pub mod builder;
 pub mod div;
+pub mod style;
 pub mod text;
 pub mod world;
+
+use std::any::Any;
 
 pub use div::DivElement;
 pub use text::TextElement;
@@ -13,11 +17,10 @@ use taffy::{
 };
 use vello_cpu::{RenderContext, kurbo::Rect};
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ElementId(u64);
 
-pub trait IElement {
+pub trait IElement: std::any::Any {
     fn paint(&mut self, cx: &mut RenderContext, layout: &TaffyLayout) {}
 
     fn measure(
@@ -31,6 +34,13 @@ pub trait IElement {
 
     fn layout_style(&self) -> TaffyStyle {
         TaffyStyle::default()
+    }
+
+    fn downcast_mut<T: Any + 'static>(&mut self) -> Option<&mut T>
+    where
+        Self: Sized,
+    {
+        (self as &mut dyn Any).downcast_mut::<T>()
     }
 }
 

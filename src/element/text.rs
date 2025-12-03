@@ -59,22 +59,26 @@ impl IElement for TextElement {
 
         cx.fill_rect(&rect);
 
-        TextEngine::paint_text(cx, 0.0, 0.0, self.layout.as_ref().unwrap());
+        println!("text.paint: rect: {:?}", rect);
+
+        TextEngine::paint_text(cx, rect.x0 as f32, rect.y0 as f32, self.layout.as_ref().unwrap());
 
         cx.set_paint(paint);
     }
 
     fn measure(
         &mut self,
-        size: taffy::Size<Option<f32>>,
+        constraint: taffy::Size<Option<f32>>,
         available: taffy::Size<taffy::AvailableSpace>,
         style: &Style,
     ) -> taffy::Size<f32> {
-        let width = match size.width {
+        println!("text.measure: constraint: {constraint:?}, available: {available:?}");
+
+        let width = match constraint.width {
             Some(w) => Some(w),
             None => available.width.into_option(),
         };
-        let height = match size.height {
+        let height = match constraint.height {
             Some(h) => Some(h),
             None => available.height.into_option(),
         };

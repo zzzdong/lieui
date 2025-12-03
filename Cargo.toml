@@ -15,6 +15,7 @@ serde = { version = "1.0", features = [ "derive" ] }
 slotmap = "1.0.7"
 softbuffer = "0.4.6"
 taffy = { version = "0.9", features = [ "serde" ] }
+thiserror = "1"
 vello_cpu = { version ="0.0.4", features = [] }
 winit = "0.30"
 
