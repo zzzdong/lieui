@@ -14,7 +14,8 @@ use taffy::{
 };
 use vello_cpu::{
     RenderContext,
-    kurbo::{Point, Rect, Shape}, peniko::Color,
+    kurbo::{Point, Rect, Shape},
+    peniko::Color,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 
@@ -30,10 +31,8 @@ pub struct ElementNode {
 }
 
 impl ElementNode {
-    pub fn new(content: impl IElement + 'static) -> Self {
-        Self {
-            content: Box::new(content),
-        }
+    pub fn new(content: Box<dyn IElement + 'static>) -> Self {
+        Self { content }
     }
 
     pub fn into_ref(self) -> ElementRef {
@@ -85,7 +84,11 @@ impl ElementTree {
         tree
     }
 
-    pub fn add_node(&mut self, node: impl IElement + 'static) -> ElementId {
+    pub fn builder() -> Builder {
+        Builder::new()
+    }
+
+    pub fn add_node(&mut self, node: Box<dyn IElement + 'static>) -> ElementId {
         let node_id = ElementId(self.next_id);
         self.next_id += 1;
 
@@ -110,7 +113,7 @@ impl ElementTree {
         node_id
     }
 
-    pub fn add_root(&mut self, root: impl IElement + 'static) -> ElementId {
+    pub fn add_root(&mut self, root: Box<dyn IElement + 'static>) -> ElementId {
         let node_id = self.add_node(root);
 
         self.root = Some(node_id);
@@ -118,7 +121,11 @@ impl ElementTree {
         node_id
     }
 
-    pub fn add_child(&mut self, parent: ElementId, child: impl IElement + 'static) -> ElementId {
+    pub fn add_child(
+        &mut self,
+        parent: ElementId,
+        child: Box<dyn IElement + 'static>,
+    ) -> ElementId {
         let child_id = self.add_node(child);
 
         // 获取父节点的布局ID
@@ -165,7 +172,7 @@ impl ElementTree {
                     },
                 );
 
-                self.taffy.print_tree(layout_id);
+                // self.taffy.print_tree(layout_id);
             }
             None => {
                 return;
@@ -211,6 +218,12 @@ impl ElementTree {
 
         // 3. 画 **当前节点**（在绝对坐标系里）
         cx.push_clip_layer(&abs_rect.to_path(1.0));
+
+        if let Some(style) = self.styles.get(&ele_id) {
+            cx.set_paint(style.background_color);
+            cx.fill_path(&abs_rect.to_path(1.0));
+        }
+
         node_ref.get_mut().content.paint(cx, &layout); // 注意：layout 仍是相对值，若需要绝对值可再传 abs_origin
         cx.pop_layer();
 
@@ -431,7 +444,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             tree: ElementTree::new(),
         }
@@ -441,7 +454,29 @@ impl Builder {
         self.tree
     }
 
+    pub fn load_xml(mut self, xml: &str) -> Result<Self, StyleError> {
+        let xml_element = read_xml(xml)?;
 
+        let XmlElement {
+            element,
+            style,
+            children,
+        } = xml_element;
+
+        let root = self.tree.add_root(element);
+        self.tree.set_style(root, style);
+        self.add_children(root, children);
+
+        Ok(self)
+    }
+
+    fn add_children(&mut self, parent: ElementId, children: Vec<XmlElement>) {
+        for child in children {
+            let child_id = self.tree.add_child(parent, child.element);
+            self.tree.set_style(child_id, child.style);
+            self.add_children(child_id, child.children);
+        }
+    }
 }
 
 struct XmlElement {
@@ -502,17 +537,18 @@ pub fn read_xml(xml: &str) -> Result<XmlElement, StyleError> {
                 }) = stack.last_mut()
                 {
                     if let Some(text_element) =
-                        <dyn std::any::Any>::downcast_mut::<TextElement>(element.as_mut())
+                        (element.as_mut() as &mut dyn std::any::Any).downcast_mut::<TextElement>()
                     {
                         text_element.text.push_str(&text);
                     }
                 }
             }
             Event::End(e) => {
-                if let Some(elem) = stack.pop() {
+                if let Some(mut elem) = stack.pop() {
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(elem);
                     } else {
+                        inherit_styles(&mut elem);
                         return Ok(elem);
                     }
                 }
@@ -524,7 +560,6 @@ pub fn read_xml(xml: &str) -> Result<XmlElement, StyleError> {
 
     Err(StyleError::Message("failed to parse xml".into()))
 }
-
 
 fn inherit_styles(root: &mut XmlElement) {
     fn walk(parent_style: &Style, node: &mut XmlElement) {
@@ -546,7 +581,7 @@ fn inherit_styles(root: &mut XmlElement) {
             walk(&next_parent, child);
         }
     }
-    
+
     // 虚拟根样式：黑字 14 px sans-serif
     let root_style = Style {
         color: Color::from_rgb8(0, 0, 0),
@@ -554,6 +589,6 @@ fn inherit_styles(root: &mut XmlElement) {
         font_family: "sans-serif".into(),
         ..Default::default()
     };
-    
+
     walk(&root_style, root);
 }

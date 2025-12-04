@@ -68,16 +68,16 @@ impl IElement for DivElement {
     }
 
     fn paint(&mut self, cx: &mut RenderContext, layout: &Layout) {
-        let rect = Rect::new(
-            layout.location.x.into(),
-            layout.location.y.into(),
-            (layout.location.x + layout.size.width) as f64,
-            (layout.location.y + layout.size.height) as f64,
-        );
+        // let rect = Rect::new(
+        //     layout.location.x.into(),
+        //     layout.location.y.into(),
+        //     (layout.location.x + layout.size.width) as f64,
+        //     (layout.location.y + layout.size.height) as f64,
+        // );
 
-        cx.set_paint(self.background_color);
+        // cx.set_paint(self.background_color);
 
-        cx.fill_rect(&rect);
+        // cx.fill_rect(&rect);
     }
 
     fn measure(
@@ -86,7 +86,7 @@ impl IElement for DivElement {
         available: taffy::Size<taffy::AvailableSpace>,
         _style: &Style,
     ) -> taffy::Size<f32> {
-        println!("div.measure: constraint: {constraint:?}, available: {available:?}");
+        // println!("div.measure: constraint: {constraint:?}, available: {available:?}");
 
         if let taffy::Size {
             width: Some(width),

@@ -59,7 +59,7 @@ impl IElement for TextElement {
 
         cx.fill_rect(&rect);
 
-        println!("text.paint: rect: {:?}", rect);
+        // println!("text.paint: rect: {:?}", rect);
 
         TextEngine::paint_text(cx, rect.x0 as f32, rect.y0 as f32, self.layout.as_ref().unwrap());
 
@@ -72,7 +72,7 @@ impl IElement for TextElement {
         available: taffy::Size<taffy::AvailableSpace>,
         style: &Style,
     ) -> taffy::Size<f32> {
-        println!("text.measure: constraint: {constraint:?}, available: {available:?}");
+        // println!("text.measure: constraint: {constraint:?}, available: {available:?}");
 
         let width = match constraint.width {
             Some(w) => Some(w),

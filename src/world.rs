@@ -4,8 +4,7 @@ use vello_cpu::RenderContext;
 
 use crate::{
     element::{
-        ElementId, ElementRef, IElement,
-        world::{ElementNode, ElementTree},
+        ElementId, ElementRef, IElement, style::StyleError, world::{ElementNode, ElementTree}
     },
     event::{
         pointer::PointerEvent,
@@ -44,16 +43,16 @@ impl<State> View<State> {
     }
 
     pub fn add_element<E: IElement + 'static>(mut self, element: E) -> ElementId {
-        let id = self.elements.add_node(element);
+        let id = self.elements.add_node(Box::new(element));
         id
     }
 
     pub fn add_child<E: IElement + 'static>(&mut self, parent: ElementId, child: E) -> ElementId {
-        self.elements.add_child(parent, child)
+        self.elements.add_child(parent, Box::new(child))
     }
 
     pub fn add_root<E: IElement + 'static>(&mut self, root: E) -> ElementId {
-        self.elements.add_root(root)
+        self.elements.add_root(Box::new(root))
     }
 
     pub fn handle_pointer_pressed(
@@ -110,16 +109,33 @@ impl<State> Builder<State> {
         }
     }
 
-    pub fn add_element<E: IElement + 'static>(mut self, element: E) -> ElementId {
-        let id = self.elements.add_node(element);
-        id
+    pub fn load_xml(self, xml: &str) -> Result<Self, StyleError> {
+        let tree = ElementTree::builder().load_xml(xml)?.build();
+
+
+        Ok(Self {
+            elements: tree,
+            pointer_handler: EventWorld::new(),
+        })
     }
 
-    pub fn add_child<E: IElement + 'static>(&mut self, parent: ElementId, child: E) -> ElementId {
-        self.elements.add_child(parent, child)
+    pub fn build(self) -> View<State> {
+        View {
+            elements: self.elements,
+            event_world: self.pointer_handler,
+        }
     }
 
-    pub fn add_root<E: IElement + 'static>(&mut self, root: E) -> ElementId {
-        self.elements.add_root(root)
-    }
+    // pub fn add_element<E: IElement + 'static>(mut self, element: E) -> ElementId {
+    //     let id = self.elements.add_node(element);
+    //     id
+    // }
+
+    // pub fn add_child<E: IElement + 'static>(&mut self, parent: ElementId, child: E) -> ElementId {
+    //     self.elements.add_child(parent, child)
+    // }
+
+    // pub fn add_root<E: IElement + 'static>(&mut self, root: E) -> ElementId {
+    //     self.elements.add_root(root)
+    // }
 }

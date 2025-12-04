@@ -1,11 +1,14 @@
-use std::{collections::HashMap, marker::PhantomData, num::NonZeroU32, rc::Rc, time::Instant};
+use std::{
+    collections::HashMap,
+    marker::PhantomData,
+    num::NonZeroU32,
+    rc::Rc,
+    time::{Instant, SystemTime},
+};
 
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, kurbo::Affine};
 use winit::{
-    application::ApplicationHandler,
-    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
-    event_loop::{self, ActiveEventLoop},
-    window::{Window, WindowAttributes, WindowId},
+    application::ApplicationHandler, dpi::Size, event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent}, event_loop::{self, ActiveEventLoop}, window::{Window, WindowAttributes, WindowId}
 };
 
 use crate::world::View;
@@ -24,6 +27,7 @@ struct LieWindow<State> {
     pixmap: Pixmap,
     renderer: RenderContext,
     view: View<State>,
+    last_modified: Option<SystemTime>,
 }
 
 impl<State> LieWindow<State> {
@@ -34,6 +38,7 @@ impl<State> LieWindow<State> {
             pixmap: Pixmap::new(0, 0),
             renderer: RenderContext::new(1, 1),
             view,
+            last_modified: None,
         }
     }
 
@@ -109,11 +114,29 @@ impl<State> LieWindow<State> {
                     },
                 );
 
+                self.attrs = self.attrs.clone().with_inner_size(size);
+
                 window.request_redraw();
             }
 
             WindowEvent::RedrawRequested => {
                 self.renderer.reset();
+
+                // reload view from xml
+                let last_modified = std::fs::metadata("view.xml").unwrap().modified().unwrap();
+                if self.last_modified.is_none() || last_modified > self.last_modified.unwrap() {
+                    self.last_modified = Some(last_modified);
+                    if let Ok(view) = std::fs::read_to_string("view.xml").and_then(|xml| {
+                        View::builder().load_xml(&xml).map_err(|err| {
+                            std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+                        })
+                    }) {
+                        self.view = view.build();
+                        if let Some(size) = self.attrs.inner_size {
+                            self.view.request_layout(size.to_physical::<u32>(1.0).width as f32, size.to_physical::<u32>(1.0).height as f32);
+                        }
+                    }
+                }
 
                 self.view.render(&mut self.renderer);
 
@@ -130,6 +153,8 @@ impl<State> LieWindow<State> {
                     // Our pixmap is premultiplied RGBA
                     *buffer_pixel = u32::from_le_bytes([pixel.b, pixel.g, pixel.r, 0]);
                 }
+
+                window.pre_present_notify();
 
                 buffer.present().unwrap();
             }
@@ -182,6 +207,8 @@ impl<State> Application<State> {
 
     pub fn run(&mut self) {
         let event_loop = winit::event_loop::EventLoop::new().expect("failed to create event loop");
+
+        // event_loop.set_control_flow(event_loop::ControlFlow::Poll);
 
         let _ = event_loop.run_app(self);
     }
