@@ -4,7 +4,32 @@ use parley::{
     Alignment, AlignmentOptions, FontContext, FontFamily, FontStack, FontWeight, GenericFamily,
     Glyph, Layout, LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty, TextStyle,
 };
-use vello_cpu::{RenderContext, peniko::Brush, peniko::Color};
+use vello_cpu::{RenderContext, kurbo::Rect, peniko::{Brush, Color}};
+
+use crate::element::style::Style;
+
+
+
+pub struct PaintContext<'a> {
+    pub painter: &'a mut RenderContext,
+    pub style: Style,
+    pub rect: Rect,
+}
+
+impl<'a> PaintContext<'a> {
+    pub fn new(painter: &'a mut RenderContext, style: Style, rect: Rect) -> Self {
+        Self { painter, style, rect }
+    }
+}
+
+
+
+
+
+
+
+
+
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextColor(Color);
@@ -55,22 +80,22 @@ impl TextEngine {
         Self::with(|engine| engine.layout_glyph_run(text, style, max_width, max_height))
     }
 
-    pub fn paint_text(cx: &mut RenderContext, x: f32, y: f32, layout: &Layout<TextColor>) {
+    pub fn paint_text(cx: &mut PaintContext, layout: &Layout<TextColor>) {
         for line in layout.lines() {
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(run) = item {
                     let brush = run.style().brush;
 
-                    cx.set_paint(brush.0);
+                    cx.painter.set_paint(cx.style.color);
 
                     let glyphs = run.positioned_glyphs().map(|g| {
                         vello_cpu::Glyph {
                         id: g.id,
-                        x: x + g.x,
-                        y: y + g.y,
+                        x: cx.rect.x0 as f32 + g.x,
+                        y: cx.rect.y0 as f32 + g.y,
                     }});
 
-                    cx.glyph_run(run.run().font())
+                    cx.painter.glyph_run(run.run().font())
                         .font_size(run.run().font_size())
                         .fill_glyphs(glyphs);
                 }

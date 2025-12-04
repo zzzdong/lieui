@@ -1,28 +1,26 @@
 use std::f32;
 
 use taffy::{
-    AlignItems, AvailableSpace, Dimension, Display, JustifyContent, Layout, Size as TaffySize, Style, prelude::TaffyMaxContent
+    AlignItems, AvailableSpace, Dimension, Display, JustifyContent, Layout, Size as TaffySize, Style as TaffyStyle, prelude::TaffyMaxContent
 };
 use vello_cpu::{RenderContext, kurbo::Rect, peniko::Color};
 
-use crate::element::{ElementId, IElement, world::ElementRef};
+use crate::{element::{ElementId, IElement, style::Style, world::ElementRef}, paint::PaintContext};
 
 pub struct DivElement {
-    pub style: Style,
+    pub style: TaffyStyle,
     pub children: Vec<ElementId>,
-    pub background_color: Color,
 }
 
 impl DivElement {
     pub fn new() -> Self {
         Self {
-            style: Style::default(),
+            style: TaffyStyle::default(),
             children: Vec::new(),
-            background_color: Color::WHITE,
         }
     }
 
-    pub fn with_style(mut self, style: Style) -> Self {
+    pub fn with_style(mut self, style: TaffyStyle) -> Self {
         self.style = style;
         self
     }
@@ -42,11 +40,6 @@ impl DivElement {
         self
     }
 
-    pub fn with_background_color(mut self, color: Color) -> Self {
-        self.background_color = color;
-        self
-    }
-
     pub fn with_justify_content(mut self, justify_content: JustifyContent) -> Self {
         self.style.justify_content = Some(justify_content);
         self
@@ -57,27 +50,16 @@ impl DivElement {
         self
     }
 
-    pub fn layout_style(&self) -> Style {
+    pub fn layout_style(&self) -> TaffyStyle {
         self.style.clone()
     }
 }
 
 impl IElement for DivElement {
-    fn layout_style(&self) -> Style {
-        self.style.clone()
-    }
 
-    fn paint(&mut self, cx: &mut RenderContext, layout: &Layout) {
-        // let rect = Rect::new(
-        //     layout.location.x.into(),
-        //     layout.location.y.into(),
-        //     (layout.location.x + layout.size.width) as f64,
-        //     (layout.location.y + layout.size.height) as f64,
-        // );
-
-        // cx.set_paint(self.background_color);
-
-        // cx.fill_rect(&rect);
+    fn paint(&mut self, cx: &mut PaintContext) {
+        cx.painter.set_paint(cx.style.background_color);
+        cx.painter.fill_rect(&cx.rect);
     }
 
     fn measure(
@@ -93,7 +75,6 @@ impl IElement for DivElement {
             height: Some(height),
         } = constraint
         {
-            
             return taffy::Size { width, height };
         }
 

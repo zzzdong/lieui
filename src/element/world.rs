@@ -14,14 +14,17 @@ use taffy::{
 };
 use vello_cpu::{
     RenderContext,
-    kurbo::{Point, Rect, Shape},
+    kurbo::{Point, Rect, Shape, Size},
     peniko::Color,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 
-use crate::element::{
-    DivElement, TextElement,
-    style::{Style, StyleError},
+use crate::{
+    element::{
+        DivElement, TextElement,
+        style::{Style, StyleError},
+    },
+    paint::PaintContext,
 };
 
 use super::{ElementId, IElement};
@@ -92,8 +95,6 @@ impl ElementTree {
         let node_id = ElementId(self.next_id);
         self.next_id += 1;
 
-        let node_style = node.layout_style();
-
         let node = ElementNode::new(node);
         let node_ref = node.into_ref();
 
@@ -102,10 +103,6 @@ impl ElementTree {
             .taffy
             .new_leaf_with_context(TaffyStyle::default(), node_id)
             .expect("failed to create layout node");
-
-        self.taffy
-            .set_style(layout_id, node_style)
-            .expect("set layout style failed");
 
         self.nodes.insert(node_id, node_ref);
         self.layouts.insert(node_id, layout_id);
@@ -197,35 +194,37 @@ impl ElementTree {
             .expect("layout id not found");
 
         // 1. 拿到 **相对于父节点** 的布局
-        let mut layout = self
+        let layout = self
             .taffy
             .layout(layout_id)
             .cloned()
             .expect("get layout failed");
 
         // 2. 计算 **绝对矩形**
-        let abs_x = abs_origin.x + layout.location.x as f64;
-        let abs_y = abs_origin.y + layout.location.y as f64;
-        let abs_rect = Rect::new(
-            abs_x,
-            abs_y,
-            abs_x + layout.size.width as f64,
-            abs_y + layout.size.height as f64,
+        let content_size = Size::new(
+            layout.content_box_size().width as f64,
+            layout.content_box_size().height as f64,
         );
-
-        layout.location.x = abs_x as f32;
-        layout.location.y = abs_y as f32;
+        let abs_rect = content_size
+            .to_rect()
+            .with_origin((layout.location.x, layout.location.y));
 
         // 3. 画 **当前节点**（在绝对坐标系里）
+        let old_paint = cx.paint().clone();
         cx.push_clip_layer(&abs_rect.to_path(1.0));
 
         if let Some(style) = self.styles.get(&ele_id) {
             cx.set_paint(style.background_color);
-            cx.fill_path(&abs_rect.to_path(1.0));
+            cx.fill_rect(&abs_rect);
         }
 
-        node_ref.get_mut().content.paint(cx, &layout); // 注意：layout 仍是相对值，若需要绝对值可再传 abs_origin
+        let style = self.styles.get(&ele_id).cloned().unwrap_or_default();
+
+        let mut paint_cx = PaintContext::new(cx, style, abs_rect);
+
+        node_ref.get_mut().content.paint(&mut paint_cx); // 注意：layout 仍是相对值，若需要绝对值可再传 abs_origin
         cx.pop_layer();
+        cx.set_paint(old_paint);
 
         // 4. 递归子节点：把 **当前绝对原点** 传下去
         for child_layout_id in self.taffy.children(layout_id).expect("get children failed") {
@@ -397,45 +396,39 @@ impl ElementTree {
     }
 
     fn compute_layout(&mut self, layout_id: TaffyId, viewport: TaffySize<AvailableSpace>) {
-        update_layout_style(&mut self.taffy, &mut self.nodes, layout_id);
-
-        // self.taffy.compute_layout(layout_id, viewport).expect("compute layout failed");
+        self.update_layout_style(layout_id);
 
         self.taffy
             .compute_layout_with_measure(
                 layout_id,
                 viewport,
                 |size, available, _node_id, cx, style| match cx {
-                    Some(ele) => self
-                        .nodes
-                        .get_mut(ele)
-                        .expect("element not found")
-                        .get_mut()
-                        .content
-                        .measure(size, available, style),
+                    Some(ele) => {
+                        let style = self.styles.get(&ele).cloned().unwrap_or_default();
+                        self.nodes
+                            .get_mut(ele)
+                            .expect("element not found")
+                            .get_mut()
+                            .content
+                            .measure(size, available, &style)
+                    }
                     None => TaffySize::ZERO,
                 },
             )
             .expect("compute layout failed");
     }
-}
 
-fn update_layout_style(
-    tree: &mut TaffyTree<ElementId>,
-    elements: &mut HashMap<ElementId, ElementRef>,
-    layout_id: TaffyId,
-) {
-    {
-        let ele = tree
-            .get_node_context(layout_id)
-            .expect("get node context failed");
-        let ele = elements.get(ele).expect("element not found").get_mut();
-        // tree.set_style(layout_id, ele.content.layout_style().clone())
-        //     .expect("set style failed");
-    }
+    fn update_layout_style(&mut self, layout_id: TaffyId) {
+        let ele = self.taffy.get_node_context(layout_id).unwrap();
+        if let Some(style) = self.styles.get(&ele).cloned() {
+            self.taffy
+                .set_style(layout_id, style.to_taffy_style())
+                .expect("set style failed");
+        }
 
-    for child in tree.children(layout_id).expect("get children failed") {
-        update_layout_style(tree, elements, child);
+        for child_id in self.taffy.children(layout_id).unwrap() {
+            self.update_layout_style(child_id);
+        }
     }
 }
 

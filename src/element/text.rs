@@ -1,41 +1,37 @@
-use std::marker::PhantomData;
+use std::{borrow::Cow, marker::PhantomData};
 
 use parley::{Font, FontFamily, StyleProperty, TextStyle};
-use taffy::{AvailableSpace, Layout, Style};
+use taffy::{AvailableSpace, Layout};
 use vello_cpu::{RenderContext, kurbo::Rect, peniko::Color};
 
 use crate::{
-    element::{IElement, world::ElementRef},
-    paint::{TextColor, TextEngine},
+    element::{IElement, style::Style, world::ElementRef},
+    paint::{PaintContext, TextColor, TextEngine},
 };
 
 pub struct TextElement {
     pub text: String,
     pub style: TextStyle<'static, TextColor>,
     layout: Option<parley::Layout<TextColor>>,
-    background_color: Color,
-    front_color: Color,
 }
 
 impl TextElement {
     pub fn new(text: String) -> Self {
         let mut style = TextStyle::default();
 
-        style.font_size = 20.0;
+        style.font_size = 16.0;
         style.brush = Color::BLACK.into();
 
         Self {
             text,
             style,
             layout: None,
-            background_color: Color::WHITE,
-            front_color: Color::BLACK,
         }
     }
 }
 
 impl IElement for TextElement {
-    fn paint(&mut self, cx: &mut RenderContext, layout: &Layout) {
+    fn paint(&mut self, cx: &mut PaintContext) {
         match &self.layout {
             Some(layout) => {
                 self.layout = Some(layout.clone());
@@ -45,25 +41,16 @@ impl IElement for TextElement {
                 self.layout = Some(layout);
             }
         }
+        let old_paint = cx.painter.paint().clone();
 
-        let rect = Rect::new(
-            layout.location.x.into(),
-            layout.location.y.into(),
-            (layout.location.x + layout.size.width) as f64,
-            (layout.location.y + layout.size.height) as f64,
-        );
+        cx.painter.set_paint(cx.style.background_color);
+        cx.painter.fill_rect(&cx.rect);
 
-        let paint = cx.paint().clone();
+        cx.painter.set_paint(cx.style.color);
 
-        cx.set_paint(self.background_color);
+        TextEngine::paint_text(cx, self.layout.as_ref().unwrap());
 
-        cx.fill_rect(&rect);
-
-        // println!("text.paint: rect: {:?}", rect);
-
-        TextEngine::paint_text(cx, rect.x0 as f32, rect.y0 as f32, self.layout.as_ref().unwrap());
-
-        cx.set_paint(paint);
+        cx.painter.set_paint(old_paint);
     }
 
     fn measure(
@@ -73,6 +60,12 @@ impl IElement for TextElement {
         style: &Style,
     ) -> taffy::Size<f32> {
         // println!("text.measure: constraint: {constraint:?}, available: {available:?}");
+
+        self.style.font_size = style.font_size as f32;
+        self.style.brush = style.color.into();
+        self.style.font_stack = parley::FontStack::List(Cow::Owned(vec![FontFamily::Named(
+            style.font_family.clone().into(),
+        )]));
 
         let width = match constraint.width {
             Some(w) => Some(w),

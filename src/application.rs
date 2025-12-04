@@ -208,7 +208,7 @@ impl<State> Application<State> {
     pub fn run(&mut self) {
         let event_loop = winit::event_loop::EventLoop::new().expect("failed to create event loop");
 
-        // event_loop.set_control_flow(event_loop::ControlFlow::Poll);
+        event_loop.set_control_flow(event_loop::ControlFlow::Poll);
 
         let _ = event_loop.run_app(self);
     }

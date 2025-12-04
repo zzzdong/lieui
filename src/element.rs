@@ -17,23 +17,21 @@ use taffy::{
 };
 use vello_cpu::{RenderContext, kurbo::Rect};
 
+use crate::{element::style::Style, paint::PaintContext};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ElementId(u64);
 
 pub trait IElement: std::any::Any {
-    fn paint(&mut self, cx: &mut RenderContext, layout: &TaffyLayout) {}
+    fn paint(&mut self, cx: &mut PaintContext) {}
 
     fn measure(
         &mut self,
         size: TaffySize<Option<f32>>,
         available: TaffySize<AvailableSpace>,
-        style: &TaffyStyle,
+        style: &Style,
     ) -> TaffySize<f32> {
         TaffySize::ZERO
-    }
-
-    fn layout_style(&self) -> TaffyStyle {
-        TaffyStyle::default()
     }
 
     fn downcast_mut<T: Any + 'static>(&mut self) -> Option<&mut T>

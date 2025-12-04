@@ -12,7 +12,6 @@ fn main() {
     let root = DivElement::new()
         .with_width(taffy::Dimension::percent(1.0))
         .with_height(taffy::Dimension::percent(1.0))
-        .with_background_color(color::palette::css::WHITE)
         .with_display(taffy::Display::Flex)
         .with_align_items(taffy::AlignItems::Center)
         .with_justify_content(taffy::JustifyContent::Center);
@@ -25,7 +24,6 @@ fn main() {
         let child = DivElement::new()
             .with_width(taffy::Dimension::length(80.0))
             .with_height(taffy::Dimension::length(48.0))
-            .with_background_color(color::palette::css::SKY_BLUE)
             .with_display(taffy::Display::Flex)
             .with_align_items(taffy::AlignItems::Center)
             .with_justify_content(taffy::JustifyContent::Center);

@@ -47,7 +47,7 @@ pub struct Style {
     pub background_color: Color,
     pub border_color: Color,
     pub color: Color,
-    pub font_size: f64,
+    pub font_size: f32,
     pub font_family: String,
 }
 
@@ -137,6 +137,18 @@ impl Style {
 
         Ok(style)
     }
+
+    pub fn to_taffy_style(&self) -> taffy::Style {
+        let mut taffy_style = taffy::Style::default();
+        taffy_style.display = self.display;
+        taffy_style.size = self.size;
+        taffy_style.min_size = self.min_size;
+        taffy_style.max_size = self.max_size;
+        taffy_style.margin = self.margin;
+        taffy_style.padding = self.padding;
+        taffy_style.border = self.border;
+        taffy_style
+    }
 }
 
 impl Default for Style {
@@ -150,7 +162,7 @@ impl Default for Style {
             padding: TaffyRect::zero(),
             border: TaffyRect::zero(),
             border_radius: 0.0,
-            background_color: Color::BLACK,
+            background_color: Color::TRANSPARENT,
             border_color: Color::TRANSPARENT,
             color: Color::BLACK,
             font_size: 12.0,
