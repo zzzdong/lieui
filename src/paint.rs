@@ -81,6 +81,8 @@ impl TextEngine {
     }
 
     pub fn paint_text(cx: &mut PaintContext, layout: &Layout<TextColor>) {
+        // println!("rect: {:?}", cx.rect);
+
         for line in layout.lines() {
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(run) = item {

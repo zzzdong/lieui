@@ -59,7 +59,6 @@ impl IElement for TextElement {
         available: taffy::Size<taffy::AvailableSpace>,
         style: &Style,
     ) -> taffy::Size<f32> {
-        // println!("text.measure: constraint: {constraint:?}, available: {available:?}");
 
         self.style.font_size = style.font_size as f32;
         self.style.brush = style.color.into();

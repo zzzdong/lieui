@@ -3,12 +3,16 @@ use std::{
     marker::PhantomData,
     num::NonZeroU32,
     rc::Rc,
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, kurbo::Affine};
 use winit::{
-    application::ApplicationHandler, dpi::Size, event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent}, event_loop::{self, ActiveEventLoop}, window::{Window, WindowAttributes, WindowId}
+    application::ApplicationHandler,
+    dpi::Size,
+    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
+    event_loop::{self, ActiveEventLoop},
+    window::{Window, WindowAttributes, WindowId},
 };
 
 use crate::world::View;
@@ -45,6 +49,14 @@ impl<State> LieWindow<State> {
     fn id(&self) -> Option<WindowId> {
         if let RenderState::Active { window, .. } = &self.render_state {
             Some(window.id())
+        } else {
+            None
+        }
+    }
+
+    fn window(&self) -> Option<&Window> {
+        if let RenderState::Active { window, .. } = &self.render_state {
+            Some(window)
         } else {
             None
         }
@@ -133,7 +145,10 @@ impl<State> LieWindow<State> {
                     }) {
                         self.view = view.build();
                         if let Some(size) = self.attrs.inner_size {
-                            self.view.request_layout(size.to_physical::<u32>(1.0).width as f32, size.to_physical::<u32>(1.0).height as f32);
+                            self.view.request_layout(
+                                size.to_physical::<u32>(1.0).width as f32,
+                                size.to_physical::<u32>(1.0).height as f32,
+                            );
                         }
                     }
                 }
@@ -177,6 +192,7 @@ pub struct Application<State> {
     windows: HashMap<WindowId, LieWindow<State>>,
     state: State,
     primary_window: PrimaryWindow<State>,
+    last_update: Instant,
 }
 
 impl<State> Application<State> {
@@ -185,6 +201,7 @@ impl<State> Application<State> {
             windows: HashMap::new(),
             state,
             primary_window: PrimaryWindow::<State>::Uninitialized { attrs, view },
+            last_update: Instant::now(),
         }
     }
 
@@ -250,6 +267,36 @@ impl<State> ApplicationHandler for Application<State> {
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.window_event(event_loop, window_id, event, &mut self.state);
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now - self.last_update > Duration::from_secs_f32(0.01) {
+            self.last_update = now;
+            for window in self.windows.values_mut() {
+                if let Some(window) = window.window() {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+}
+
+struct ViewModel {
+    pub title: String,
+    pub counter: i32,
+}
+
+impl ViewModel {
+    pub fn new() -> Self {
+        Self {
+            title: "Hello, world!".to_string(),
+            counter: 0,
+        }
+    }
+
+    pub fn increment(&mut self) {
+        self.counter += 1;
     }
 }
 

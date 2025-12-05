@@ -1,12 +1,16 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
     collections::HashMap,
+    hash::Hash,
     rc::Rc,
 };
 
 use quick_xml::{
     Reader,
-    events::{Event, attributes::AttrError},
+    events::{
+        Event,
+        attributes::{AttrError, Attribute},
+    },
 };
 use taffy::{
     AvailableSpace, Dimension, Layout as TaffyLayout, NodeId, NodeId as TaffyId, PrintTree,
@@ -17,7 +21,7 @@ use vello_cpu::{
     kurbo::{Point, Rect, Shape, Size},
     peniko::Color,
 };
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{self, ElementState, MouseButton, WindowEvent};
 
 use crate::{
     element::{
@@ -200,27 +204,58 @@ impl ElementTree {
             .cloned()
             .expect("get layout failed");
 
-        // 2. 计算 **绝对矩形**
+        let style = self.styles.get(&ele_id).cloned().unwrap_or_default();
+        let old_paint = cx.paint().clone();
+
+        // 2. 绘制背景颜色和边框
+
+        // 计算边框矩形的尺寸关系：
+        // - 边框矩形：包含边框的完整矩形
+        // - 内容矩形：不包含边框的内容区域
+        let border_rect_size = Size::new(layout.size.width as f64, layout.size.height as f64);
+        let border_rect = border_rect_size.to_rect().with_origin(Point::new(
+            abs_origin.x + layout.location.x as f64,
+            abs_origin.y + layout.location.y as f64,
+        ));
+
+        // 绘制背景颜色（填充整个区域，包括内边距和内容区域）
+        if style.border_radius > 0.0 {
+            cx.set_paint(style.border_color);
+            cx.fill_blurred_rounded_rect(&border_rect, style.border_radius as f32, 1.0);
+
+            cx.set_paint(style.background_color);
+            cx.fill_blurred_rounded_rect(
+                &border_rect.inset(layout.border.left as f64),
+                style.border_radius as f32,
+                1.0,
+            );
+        } else {
+            cx.set_paint(style.border_color);
+            cx.fill_rect(&border_rect);
+            cx.set_paint(style.background_color);
+            cx.fill_rect(&border_rect.inset(layout.border.left as f64));
+        }
+
+        // 3. 计算内容矩形（考虑padding）
         let content_size = Size::new(
             layout.content_box_size().width as f64,
             layout.content_box_size().height as f64,
         );
-        let abs_rect = content_size
-            .to_rect()
-            .with_origin((layout.location.x, layout.location.y));
+        let content_rect = content_size.to_rect().with_origin(Point::new(
+            abs_origin.x
+                + layout.location.x as f64
+                + layout.border.left as f64
+                + layout.padding.left as f64,
+            abs_origin.y
+                + layout.location.y as f64
+                + layout.border.top as f64
+                + layout.padding.top as f64,
+        ));
 
         // 3. 画 **当前节点**（在绝对坐标系里）
-        let old_paint = cx.paint().clone();
-        cx.push_clip_layer(&abs_rect.to_path(1.0));
+        cx.push_clip_layer(&content_rect.to_path(1.0));
 
-        if let Some(style) = self.styles.get(&ele_id) {
-            cx.set_paint(style.background_color);
-            cx.fill_rect(&abs_rect);
-        }
-
-        let style = self.styles.get(&ele_id).cloned().unwrap_or_default();
-
-        let mut paint_cx = PaintContext::new(cx, style, abs_rect);
+        let mut paint_cx = PaintContext::new(cx, style, content_rect);
 
         node_ref.get_mut().content.paint(&mut paint_cx); // 注意：layout 仍是相对值，若需要绝对值可再传 abs_origin
         cx.pop_layer();
@@ -454,6 +489,7 @@ impl Builder {
             element,
             style,
             children,
+            ..
         } = xml_element;
 
         let root = self.tree.add_root(element);
@@ -472,17 +508,58 @@ impl Builder {
     }
 }
 
+#[derive(Debug, Default)]
+struct EventHandler {
+    pub on_click: Option<String>,
+    pub on_mouse_move: Option<String>,
+    pub on_mouse_enter: Option<String>,
+    pub on_mouse_leave: Option<String>,
+    pub on_mouse_down: Option<String>,
+    pub on_mouse_up: Option<String>,
+    pub on_key_down: Option<String>,
+    pub on_key_up: Option<String>,
+}
+
+impl EventHandler {
+    pub fn from_attrs(attrs: Vec<Attribute>) -> Result<Self, StyleError> {
+        let mut event_handler = EventHandler::default();
+
+        for attr in attrs {
+            let key = std::str::from_utf8(attr.key.as_ref())?.to_lowercase();
+            let val = std::str::from_utf8(attr.value.as_ref())?.to_string();
+
+            if key.starts_with('@') {
+                match key.as_str() {
+                    "@click" => event_handler.on_click = Some(val),
+                    "@mousemove" => event_handler.on_mouse_move = Some(val),
+                    "@mouseenter" => event_handler.on_mouse_enter = Some(val),
+                    "@mouseleave" => event_handler.on_mouse_leave = Some(val),
+                    "@mousedown" => event_handler.on_mouse_down = Some(val),
+                    "@mouseup" => event_handler.on_mouse_up = Some(val),
+                    "@keydown" => event_handler.on_key_down = Some(val),
+                    "@keyup" => event_handler.on_key_up = Some(val),
+                    _ => return Err(StyleError::Message(format!("unknown event: {}", key))),
+                }
+            }
+        }
+
+        Ok(event_handler)
+    }
+}
+
 struct XmlElement {
     element: Box<dyn IElement + 'static>,
     style: Style,
+    event_handler: EventHandler,
     children: Vec<XmlElement>,
 }
 
 impl XmlElement {
-    fn new(element: Box<dyn IElement>, style: Style) -> Self {
+    fn new(element: Box<dyn IElement>, style: Style, event_handler: EventHandler) -> Self {
         Self {
             element,
             style,
+            event_handler,
             children: Vec::new(),
         }
     }
@@ -505,30 +582,42 @@ pub fn read_xml(xml: &str) -> Result<XmlElement, StyleError> {
                         .collect::<std::result::Result<Vec<_>, AttrError>>()?,
                 )?;
 
+                let event_handler = EventHandler::from_attrs(
+                    e.attributes()
+                        .collect::<std::result::Result<Vec<_>, AttrError>>()?,
+                )?;
+
                 match tag.as_str() {
                     "view" => {
-                        stack.push(XmlElement::new(Box::new(DivElement::new()), style));
+                        stack.push(XmlElement::new(
+                            Box::new(DivElement::new()),
+                            style,
+                            event_handler,
+                        ));
                     }
                     "div" => {
-                        stack.push(XmlElement::new(Box::new(DivElement::new()), style));
+                        stack.push(XmlElement::new(
+                            Box::new(DivElement::new()),
+                            style,
+                            event_handler,
+                        ));
                     }
                     "text" => {
-                        stack.push(XmlElement::new(
-                            Box::new(TextElement::new("".into())),
-                            style,
-                        ));
+                        let text_element = read_text_element(&mut reader)?;
+                        if let Some(ele) = stack.last_mut() {
+                            ele.children.push(XmlElement::new(
+                                Box::new(text_element),
+                                style,
+                                event_handler,
+                            ));
+                        }
                     }
                     _ => {}
                 }
             }
             Event::Text(e) => {
                 let text = e.decode()?;
-                if let Some(XmlElement {
-                    element,
-                    style,
-                    children,
-                }) = stack.last_mut()
-                {
+                if let Some(XmlElement { element, .. }) = stack.last_mut() {
                     if let Some(text_element) =
                         (element.as_mut() as &mut dyn std::any::Any).downcast_mut::<TextElement>()
                     {
@@ -554,6 +643,28 @@ pub fn read_xml(xml: &str) -> Result<XmlElement, StyleError> {
     Err(StyleError::Message("failed to parse xml".into()))
 }
 
+fn read_text_element(reader: &mut Reader<&[u8]>) -> Result<TextElement, StyleError> {
+    let mut text = String::new();
+
+    loop {
+        match reader.read_event()? {
+            Event::Start(e) => {
+                return Err(StyleError::Message(format!(
+                    "unexpected start tag: {:?}",
+                    e.name().as_ref()
+                )));
+            }
+            Event::Text(e) => {
+                text.push_str(&e.decode()?);
+            }
+            Event::End(_) => break,
+            _ => {}
+        }
+    }
+
+    Ok(TextElement::new(text))
+}
+
 fn inherit_styles(root: &mut XmlElement) {
     fn walk(parent_style: &Style, node: &mut XmlElement) {
         // 仅继承"可继承"字段
@@ -563,7 +674,7 @@ fn inherit_styles(root: &mut XmlElement) {
         if node.style.font_size == 0.0 {
             node.style.font_size = parent_style.font_size;
         }
-        if node.style.font_family == "sans-serif" {
+        if node.style.font_family.is_empty() {
             node.style.font_family = parent_style.font_family.clone();
         }
         // background/border/margin 不继承，保持本地或默认值
@@ -578,7 +689,7 @@ fn inherit_styles(root: &mut XmlElement) {
     // 虚拟根样式：黑字 14 px sans-serif
     let root_style = Style {
         color: Color::from_rgb8(0, 0, 0),
-        font_size: 14.0,
+        font_size: 16.0,
         font_family: "sans-serif".into(),
         ..Default::default()
     };

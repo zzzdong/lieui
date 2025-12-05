@@ -43,6 +43,10 @@ pub struct Style {
     pub margin: TaffyRect<LengthPercentageAuto>,
     pub padding: TaffyRect<LengthPercentage>,
     pub border: TaffyRect<LengthPercentage>,
+    pub flex_direction: taffy::FlexDirection,
+    pub justify_content: Option<taffy::JustifyContent>,
+    pub align_items: Option<taffy::AlignItems>,
+    pub align_content: Option<taffy::AlignContent>,
     pub border_radius: f64,
     pub background_color: Color,
     pub border_color: Color,
@@ -82,10 +86,10 @@ impl Style {
 
                 // LengthPercentage 系列
                 "boarder" => boarder = parse_length_percent(val)?,
-                "border-left" => style.border.left = parse_length_percent(val)?,
-                "border-top" => style.border.top = parse_length_percent(val)?,
-                "border-right" => style.border.right = parse_length_percent(val)?,
-                "border-bottom" => style.border.bottom = parse_length_percent(val)?,
+                // "border-left" => style.border.left = parse_length_percent(val)?,
+                // "border-top" => style.border.top = parse_length_percent(val)?,
+                // "border-right" => style.border.right = parse_length_percent(val)?,
+                // "border-bottom" => style.border.bottom = parse_length_percent(val)?,
                 "padding" => padding = parse_length_percent(val)?,
                 "padding-left" => style.padding.left = parse_length_percent(val)?,
                 "padding-top" => style.padding.top = parse_length_percent(val)?,
@@ -111,24 +115,87 @@ impl Style {
                 // String 系列
                 "font-family" => style.font_family = val.into(),
 
+                // taffy 系列
+                "flex-direction" => {
+                    style.flex_direction = match val {
+                        "row" => taffy::FlexDirection::Row,
+                        "column" => taffy::FlexDirection::Column,
+                        "row-reverse" => taffy::FlexDirection::RowReverse,
+                        "column-reverse" => taffy::FlexDirection::ColumnReverse,
+                        _ => {
+                            return Err(StyleError::Message(format!(
+                                "unknown flex-direction: {}",
+                                val
+                            )));
+                        }
+                    };
+                }
+
+                "justify-content" => {
+                    style.justify_content = match val {
+                        "flex-start" => Some(taffy::JustifyContent::FlexStart),
+                        "flex-end" => Some(taffy::JustifyContent::FlexEnd),
+                        "center" => Some(taffy::JustifyContent::Center),
+                        "space-between" => Some(taffy::JustifyContent::SpaceBetween),
+                        "space-around" => Some(taffy::JustifyContent::SpaceAround),
+                        "space-evenly" => Some(taffy::JustifyContent::SpaceEvenly),
+                        _ => {
+                            return Err(StyleError::Message(format!(
+                                "unknown justify-content: {}",
+                                val
+                            )));
+                        }
+                    };
+                }
+                "align-content" => {
+                    style.align_content = match val {
+                        "flex-start" => Some(taffy::AlignContent::FlexStart),
+                        "flex-end" => Some(taffy::AlignContent::FlexEnd),
+                        "center" => Some(taffy::AlignContent::Center),
+                        "stretch" => Some(taffy::AlignContent::Stretch),
+                        "space-between" => Some(taffy::AlignContent::SpaceBetween),
+                        "space-around" => Some(taffy::AlignContent::SpaceAround),
+                        _ => {
+                            return Err(StyleError::Message(format!(
+                                "unknown align-content: {}",
+                                val
+                            )));
+                        }
+                    };
+                }
+                "align-items" => {
+                    style.align_items = match val {
+                        "flex-start" => Some(taffy::AlignItems::FlexStart),
+                        "flex-end" => Some(taffy::AlignItems::FlexEnd),
+                        "center" => Some(taffy::AlignItems::Center),
+                        "stretch" => Some(taffy::AlignItems::Stretch),
+                        _ => {
+                            return Err(StyleError::Message(format!(
+                                "unknown align-items: {}",
+                                val
+                            )));
+                        }
+                    };
+                }
+
                 _ => {} // 忽略不认识
             }
         }
 
         // 展开缩写：单边没写就用统一的值
-        if margin.is_auto() {
+        if !margin.is_auto() {
             style.margin.left = margin;
             style.margin.top = margin;
             style.margin.right = margin;
             style.margin.bottom = margin;
         }
-        if padding == LengthPercentage::length(0.0) {
+        if padding != LengthPercentage::length(0.0) {
             style.padding.left = padding;
             style.padding.top = padding;
             style.padding.right = padding;
             style.padding.bottom = padding;
         }
-        if boarder == LengthPercentage::length(0.0) {
+        if boarder != LengthPercentage::length(0.0) {
             style.border.left = boarder;
             style.border.top = boarder;
             style.border.right = boarder;
@@ -147,6 +214,10 @@ impl Style {
         taffy_style.margin = self.margin;
         taffy_style.padding = self.padding;
         taffy_style.border = self.border;
+        taffy_style.flex_direction = self.flex_direction;
+        taffy_style.justify_content = self.justify_content;
+        taffy_style.align_items = self.align_items;
+        taffy_style.align_content = self.align_content;
         taffy_style
     }
 }
@@ -160,6 +231,10 @@ impl Default for Style {
             max_size: TaffySize::auto(),
             margin: TaffyRect::zero(),
             padding: TaffyRect::zero(),
+            flex_direction: taffy::FlexDirection::Row,
+            justify_content: None,
+            align_items: None,
+            align_content: None,
             border: TaffyRect::zero(),
             border_radius: 0.0,
             background_color: Color::TRANSPARENT,
