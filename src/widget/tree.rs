@@ -2,13 +2,16 @@
 //! Widget 树管理
 
 use std::any::Any;
+use std::cell::RefMut;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 use crate::core::WidgetId;
 use crate::widget::Widget;
 
 /// Widget 的包装类型，用于类型擦除
-pub type WidgetBox = Box<dyn Widget>;
+pub type WidgetBox = Rc<RefCell<Box<dyn Widget>>>;
 
 /// Widget 树
 ///
@@ -32,7 +35,8 @@ impl WidgetTree {
     /// 创建并添加 Widget 到树中
     pub fn create<W: Widget>(&mut self, widget: W) -> WidgetId {
         let id = WidgetId::new();
-        self.widgets.insert(id, Box::new(widget));
+        let widget_box: WidgetBox = Rc::new(RefCell::new(Box::new(widget)));
+        self.widgets.insert(id, widget_box);
         id
     }
 
@@ -48,33 +52,31 @@ impl WidgetTree {
 
     /// 添加子节点关系
     pub fn add_child(&mut self, parent_id: WidgetId, child_id: WidgetId) {
-        if let Some(parent) = self.widgets.get_mut(&parent_id) {
-            parent.children_mut().push(child_id);
+        if let Some(parent) = self.widgets.get(&parent_id) {
+            parent.borrow_mut().children_mut().push(child_id);
         }
     }
 
-    /// 获取指定类型的 Widget 引用
-    pub fn get<W: Any>(&self, id: WidgetId) -> Option<&W> {
-        self.widgets.get(&id)?.as_ref().as_any().downcast_ref::<W>()
+    /// 获取指定类型的 Widget 可变引用
+    /// 
+    /// 注意：由于使用 Rc<RefCell<>>，返回的是运行时借用守卫
+    pub fn get<W: Any>(&self, id: WidgetId) -> Option<RefMut<'_, W>> {
+        let widget_rc = self.widgets.get(&id)?;
+        let widget_ref = widget_rc.borrow_mut();
+        // 尝试 downcast
+        RefMut::filter_map(widget_ref, |w| {
+            w.as_any_mut().downcast_mut::<W>()
+        }).ok()
     }
 
-    /// 获取指定类型的 Widget 可变引用
-    pub fn get_mut<W: Any>(&mut self, id: WidgetId) -> Option<&mut W> {
-        self.widgets
-            .get_mut(&id)?
-            .as_mut()
-            .as_any_mut()
-            .downcast_mut::<W>()
+    /// 获取 Widget 的 Rc 克隆（用于事件处理等场景）
+    pub fn get_widget_rc(&self, id: WidgetId) -> Option<WidgetBox> {
+        self.widgets.get(&id).cloned()
     }
 
     /// 获取 Widget 引用（用于 trait 方法调用）
-    pub fn get_widget(&self, id: WidgetId) -> Option<&dyn Widget> {
-        self.widgets.get(&id).map(|w| w.as_ref())
-    }
-
-    /// 获取 Widget 可变引用（用于 trait 方法调用）
-    pub fn get_widget_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
-        self.widgets.get_mut(&id).map(|w| w.as_mut())
+    pub fn get_widget(&self, id: WidgetId) -> Option<RefMut<'_, Box<dyn Widget>>> {
+        self.widgets.get(&id).map(|w| w.borrow_mut())
     }
 
     /// 检查是否存在
@@ -91,8 +93,8 @@ impl WidgetTree {
 
     /// 获取父节点（通过遍历查找）
     pub fn parent_of(&self, child_id: WidgetId) -> Option<WidgetId> {
-        for (id, widget) in &self.widgets {
-            if widget.children().contains(&child_id) {
+        for (id, widget_rc) in &self.widgets {
+            if widget_rc.borrow().children().contains(&child_id) {
                 return Some(*id);
             }
         }
@@ -113,9 +115,12 @@ impl WidgetTree {
     where
         F: FnMut(WidgetId, &dyn Widget),
     {
-        if let Some(widget) = self.get_widget(id) {
-            f(id, widget);
-            for &child_id in widget.children() {
+        if let Some(widget_rc) = self.widgets.get(&id) {
+            let widget = widget_rc.borrow();
+            f(id, widget.as_ref());
+            let children: Vec<WidgetId> = widget.children().to_vec();
+            drop(widget); // 释放借用
+            for child_id in children {
                 self.traverse_recursive(child_id, f);
             }
         }
@@ -142,8 +147,11 @@ impl WidgetTree {
             return true;
         }
 
-        if let Some(widget) = self.get_widget(current_id) {
-            for &child_id in widget.children() {
+        if let Some(widget_rc) = self.widgets.get(&current_id) {
+            let widget = widget_rc.borrow();
+            let children: Vec<WidgetId> = widget.children().to_vec();
+            drop(widget);
+            for child_id in children {
                 if self.find_path_recursive(child_id, target_id, path) {
                     return true;
                 }

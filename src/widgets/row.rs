@@ -4,7 +4,7 @@
 
 use crate::core::WidgetId;
 use crate::geometry::Rect;
-use crate::layout::{AlignItems, FlexStyle, LayoutNode};
+use crate::layout::{AlignItems, FlexStyle, JustifyContent, LayoutNode};
 use crate::prelude::ViewContext;
 use crate::render::RenderNode;
 use crate::widget::Widget;
@@ -38,8 +38,13 @@ impl Widget for Row {
     }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {
-        // Row 使用 Flex 布局，水平方向，子元素居中
-        LayoutNode::new(id).with_flex(FlexStyle::row().align(AlignItems::Center).gap(self.spacing))
+        // Row 使用 Flex 布局，水平方向，子元素在主轴和交叉轴都居中
+        LayoutNode::new(id).with_flex(
+            FlexStyle::row()
+                .align(AlignItems::Center)
+                .justify(JustifyContent::Center)
+                .gap(self.spacing),
+        )
     }
 
     fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {

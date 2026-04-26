@@ -1,5 +1,5 @@
 use crate::core::WidgetId;
-use crate::event::{Event, EventDispatcher, MouseButton};
+use crate::event::{Event, EventDispatcher, Key, Modifiers, MouseButton};
 use crate::geometry::Point;
 use crate::layout::LayoutNode;
 
@@ -23,6 +23,11 @@ impl EventHandler {
     /// 获取当前按下的 widget
     pub fn pressed(&self) -> Option<WidgetId> {
         self.dispatcher.pressed()
+    }
+
+    /// 获取当前焦点的 widget
+    pub fn focused(&self) -> Option<WidgetId> {
+        self.dispatcher.focused()
     }
 
     /// 处理鼠标移动，返回需要触发的事件列表 (widget_id, event)
@@ -114,6 +119,74 @@ impl EventHandler {
         }
 
         self.dispatcher.set_pressed(None);
+        events
+    }
+
+    /// 处理鼠标滚轮，返回需要触发的事件列表
+    pub fn handle_mouse_wheel(
+        &mut self,
+        delta_x: f32,
+        delta_y: f32,
+        point: Point,
+        layout_root: &LayoutNode,
+    ) -> Vec<(WidgetId, Event)> {
+        let mut events = Vec::new();
+
+        if let Some(target) = self.dispatcher.hit_test(point, layout_root) {
+            events.push((
+                target,
+                Event::MouseWheel {
+                    delta_x,
+                    delta_y,
+                    x: point.x,
+                    y: point.y,
+                },
+            ));
+        }
+
+        events
+    }
+
+    /// 处理键盘按下，返回需要触发的事件列表
+    pub fn handle_key_down(&mut self, key: Key, modifiers: Modifiers) -> Vec<(WidgetId, Event)> {
+        let mut events = Vec::new();
+
+        if let Some(target) = self.dispatcher.focused() {
+            events.push((target, Event::KeyDown { key, modifiers }));
+        }
+
+        events
+    }
+
+    /// 处理键盘释放，返回需要触发的事件列表
+    pub fn handle_key_up(&mut self, key: Key, modifiers: Modifiers) -> Vec<(WidgetId, Event)> {
+        let mut events = Vec::new();
+
+        if let Some(target) = self.dispatcher.focused() {
+            events.push((target, Event::KeyUp { key, modifiers }));
+        }
+
+        events
+    }
+
+    /// 设置焦点到指定 widget，返回焦点变化事件列表
+    pub fn handle_focus_change(&mut self, new_focus: Option<WidgetId>) -> Vec<(WidgetId, Event)> {
+        let mut events = Vec::new();
+        let old_focus = self.dispatcher.focused();
+
+        if old_focus == new_focus {
+            return events;
+        }
+
+        if let Some(old_id) = old_focus {
+            events.push((old_id, Event::FocusOut));
+        }
+
+        if let Some(new_id) = new_focus {
+            events.push((new_id, Event::FocusIn));
+        }
+
+        self.dispatcher.set_focused(new_focus);
         events
     }
 }

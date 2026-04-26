@@ -45,14 +45,24 @@ pub trait Widget: Any {
 
     /// 处理事件
     ///
-    /// 返回 EventResult 控制事件传播：
-    /// - Continue: 继续传播到父节点
-    /// - Stop: 停止传播
-    /// - PreventDefault: 阻止默认行为但继续传播
+    /// 参数：
+    /// - event: 事件数据
+    /// - ctx: 视图上下文，可用于请求重渲染等操作
     ///
-    /// 默认实现返回 Continue，表示不拦截事件
-    fn handle_event(&mut self, _event: &Event) -> EventResult {
-        EventResult::Continue
+    /// 返回 (EventResult, bool)：
+    /// - EventResult: 控制事件传播
+    ///   - Continue: 继续传播到父节点
+    ///   - Stop: 停止传播
+    ///   - PreventDefault: 阻止默认行为但继续传播
+    /// - bool: 是否需要重渲染
+    ///
+    /// 默认实现返回 (Continue, false)，表示不拦截事件，不重渲染
+    fn handle_event(
+        &mut self,
+        _event: &Event,
+        _ctx: &mut crate::core::ViewContext,
+    ) -> (EventResult, bool) {
+        (EventResult::Continue, false)
     }
 
     fn children(&self) -> &[WidgetId] {

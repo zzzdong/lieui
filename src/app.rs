@@ -3,12 +3,16 @@ use std::rc::Rc;
 
 use vello_cpu::Pixmap;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, Modifiers as WinitModifiers, MouseButton as WinitMouseButton,
+    MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key as WinitKey, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::core::ViewContext;
-use crate::event::MouseButton;
+use crate::event::{Key, Modifiers, MouseButton};
 use crate::geometry::{Point, Size};
 use crate::render::VelloRenderer;
 
@@ -20,6 +24,8 @@ pub struct App {
     renderer: VelloRenderer,
     /// 当前鼠标位置
     mouse_position: Point,
+    /// 当前键盘修饰键状态
+    modifiers: WinitModifiers,
 }
 
 impl App {
@@ -33,6 +39,7 @@ impl App {
             surface: None,
             renderer,
             mouse_position: Point::zero(),
+            modifiers: WinitModifiers::default(),
         }
     }
 
@@ -190,11 +197,62 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (delta_x, delta_y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 20.0, y * 20.0),
+                    MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                };
+                self.view
+                    .handle_mouse_wheel(delta_x, delta_y, self.mouse_position);
+            }
+
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                self.modifiers = new_modifiers;
+            }
+
+            WindowEvent::KeyboardInput { event, .. } => {
+                let key = winit_key_to_key(&event);
+                let modifiers = winit_modifiers_to_modifiers(self.modifiers);
+                match event.state {
+                    ElementState::Pressed => self.view.handle_key_down(key, modifiers),
+                    ElementState::Released => self.view.handle_key_up(key, modifiers),
+                }
+            }
+
             WindowEvent::RedrawRequested => {
                 self.render_and_present();
             }
 
             _ => {}
         }
+    }
+}
+
+fn winit_key_to_key(event: &KeyEvent) -> Key {
+    match &event.logical_key {
+        WinitKey::Named(NamedKey::Enter) => Key::Enter,
+        WinitKey::Named(NamedKey::Escape) => Key::Escape,
+        WinitKey::Named(NamedKey::Backspace) => Key::Backspace,
+        WinitKey::Named(NamedKey::Tab) => Key::Tab,
+        WinitKey::Named(NamedKey::Space) => Key::Space,
+        WinitKey::Named(NamedKey::ArrowUp) => Key::ArrowUp,
+        WinitKey::Named(NamedKey::ArrowDown) => Key::ArrowDown,
+        WinitKey::Named(NamedKey::ArrowLeft) => Key::ArrowLeft,
+        WinitKey::Named(NamedKey::ArrowRight) => Key::ArrowRight,
+        WinitKey::Named(NamedKey::Shift) => Key::Shift,
+        WinitKey::Named(NamedKey::Control) => Key::Ctrl,
+        WinitKey::Named(NamedKey::Alt) => Key::Alt,
+        WinitKey::Named(NamedKey::Meta) => Key::Meta,
+        WinitKey::Character(c) => Key::Character(c.chars().next().unwrap_or('\0')),
+        _ => Key::Unknown,
+    }
+}
+
+fn winit_modifiers_to_modifiers(modifiers: WinitModifiers) -> Modifiers {
+    Modifiers {
+        shift: modifiers.state().shift_key(),
+        ctrl: modifiers.state().control_key(),
+        alt: modifiers.state().alt_key(),
+        meta: modifiers.state().super_key(),
     }
 }

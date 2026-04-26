@@ -5,6 +5,7 @@
 //! 按钮组件，内部使用 Text 渲染文本。
 
 use crate::core::WidgetId;
+use crate::event::{Event, EventResult};
 use crate::geometry::{Color, Rect, Size};
 use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
 use crate::prelude::ViewContext;
@@ -27,8 +28,11 @@ const COLOR_HOVERED: Color = Color(AlphaColor::from_rgb8(21, 101, 192));
 const COLOR_PRESSED: Color = Color(AlphaColor::from_rgb8(13, 71, 161));
 const COLOR_DISABLED: Color = Color(AlphaColor::from_rgb8(189, 189, 189));
 
-/// 点击回调类型
+/// 点击回调类型 - 只操作 Button 自身
 pub type ClickCallback = Box<dyn FnMut(&mut Button)>;
+
+/// 底层事件回调类型 - 统一签名
+pub type ButtonEventCallback = Box<dyn FnMut(WidgetId, &Event, &mut ViewContext)>;
 
 pub struct Button {
     bounds: Rect,
@@ -36,8 +40,10 @@ pub struct Button {
     is_hovered: bool,
     is_pressed: bool,
     is_disabled: bool,
-    /// 点击回调（在创建时注册到 ViewContext）
+    /// 点击回调（内部包装后注册到 ViewContext）
     on_click: Option<ClickCallback>,
+    /// 底层事件回调（直接注册到 ViewContext）
+    event_callback: Option<ButtonEventCallback>,
 }
 
 impl Button {
@@ -52,6 +58,7 @@ impl Button {
             is_pressed: false,
             is_disabled: false,
             on_click: None,
+            event_callback: None,
         }
     }
 
@@ -71,18 +78,45 @@ impl Button {
         self.text_widget = self.text_widget.clone().content(text);
     }
 
-    /// 设置点击回调（链式调用）
-    pub fn on_click<F>(mut self, f: F) -> Self
+    /// 设置点击回调（链式调用）- 只操作 Button 自身
+    ///
+    /// 内部会包装成底层事件回调，只处理 MouseUp 事件（点击）
+    pub fn on_click<F>(mut self, mut f: F) -> Self
     where
         F: FnMut(&mut Button) + 'static,
     {
-        self.on_click = Some(Box::new(f));
+        self.on_click = Some(Box::new(move |btn| f(btn)));
+        self
+    }
+
+    /// 设置事件回调（链式调用）- 底层签名，可处理任意事件
+    pub fn on_event<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(WidgetId, &Event, &mut ViewContext) + 'static,
+    {
+        self.event_callback = Some(Box::new(f));
         self
     }
 
     /// 获取点击回调（供 ViewContext 在创建时注册）
-    pub fn take_click_callback(&mut self) -> Option<ClickCallback> {
-        self.on_click.take()
+    ///
+    /// 返回包装后的底层事件回调，只处理 Click 事件
+    pub fn take_click_callback(&mut self) -> Option<ButtonEventCallback> {
+        self.on_click.take().map(|mut callback| {
+            Box::new(move |id: WidgetId, event: &Event, ctx: &mut ViewContext| {
+                // wrap：只处理 Click 事件
+                if matches!(event, Event::Click { .. }) {
+                    if let Some(mut btn) = ctx.get::<Button>(id) {
+                        callback(&mut btn);
+                    }
+                }
+            }) as ButtonEventCallback
+        })
+    }
+
+    /// 获取底层事件回调
+    pub fn take_event_callback(&mut self) -> Option<ButtonEventCallback> {
+        self.event_callback.take()
     }
 
     fn bg_color(&self) -> Color {
@@ -194,6 +228,42 @@ impl Widget for Button {
             // 如果还没有计算，返回空节点
             RenderNode::div(Rect::zero())
         }
+    }
+
+    fn can_focus(&self) -> bool {
+        !self.is_disabled
+    }
+
+    fn handle_event(&mut self, event: &Event, _ctx: &mut ViewContext) -> (EventResult, bool) {
+        match event {
+            Event::MouseEnter => {
+                if !self.is_disabled && !self.is_hovered {
+                    self.is_hovered = true;
+                    return (EventResult::Continue, true);
+                }
+            }
+            Event::MouseLeave => {
+                if self.is_hovered || self.is_pressed {
+                    self.is_hovered = false;
+                    self.is_pressed = false;
+                    return (EventResult::Continue, true);
+                }
+            }
+            Event::MouseDown { .. } => {
+                if !self.is_disabled && !self.is_pressed {
+                    self.is_pressed = true;
+                    return (EventResult::Continue, true);
+                }
+            }
+            Event::MouseUp { .. } => {
+                if self.is_pressed {
+                    self.is_pressed = false;
+                    return (EventResult::Continue, true);
+                }
+            }
+            _ => {}
+        }
+        (EventResult::Continue, false)
     }
 
     fn bounds(&self) -> Option<Rect> {
