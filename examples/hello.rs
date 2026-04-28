@@ -3,6 +3,8 @@ use lieui::core::ViewContext;
 use lieui::geometry::Size;
 use lieui::prelude::Color;
 use lieui::widgets::{Button, Column, Container, Text};
+use std::cell::RefCell;
+use std::rc::Rc;
 use winit::event_loop::EventLoop;
 
 fn main() {
@@ -26,17 +28,23 @@ fn main() {
     let subtitle = ctx.create(Text::new("A minimal Rust GUI library").font_size(16.0));
     ctx.add_child(column, subtitle);
 
-    // 创建按钮并注册点击回调 - 链式调用 API
-    let button_id = ctx.create(Button::new("Click Me!").on_click(|btn| {
-        println!("Button clicked! Current text: {}", btn.text_content());
-        btn.set_text("Clicked!");
+    // 创建按钮并注册点击回调 - 新的简化 API
+    // 使用 Rc<RefCell<>> 来共享可变状态
+    let click_count = Rc::new(RefCell::new(0i32));
+    let click_count_clone = Rc::clone(&click_count);
+
+    let button_id = ctx.create(Button::new("Click Me!").on_click(move || {
+        let mut count = click_count_clone.borrow_mut();
+        *count += 1;
+        println!("Button clicked! Count: {}", *count);
     }));
     ctx.add_child(column, button_id);
 
     // 创建第二个按钮
-    let button2_id = ctx.create(Button::new("Reset").on_click(|btn| {
-        println!("Reset clicked!");
-        btn.set_text("Reset Done");
+    let button2_id = ctx.create(Button::new("Reset").on_click(move || {
+        let mut count = click_count.borrow_mut();
+        *count = 0;
+        println!("Reset clicked! Count reset to 0");
     }));
     ctx.add_child(column, button2_id);
 

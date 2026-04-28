@@ -87,7 +87,7 @@ impl App {
         // Render to pixmap
         if let Some(render_tree) = self.view.render() {
             if self.view.debug_render_tree {
-                println!("{}", render_tree.to_xml(0));
+                log::debug!("{}", render_tree.to_xml(0));
             }
             self.renderer.render(&render_tree, &mut self.pixmap);
         }

@@ -881,6 +881,7 @@ name = "lieui"
 version = "0.1.0"
 dependencies = [
  "kurbo",
+ "log",
  "parley",
  "softbuffer",
  "vello_cpu",

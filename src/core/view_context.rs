@@ -1,33 +1,25 @@
 // src/core/view_context.rs
 
 use std::any::Any;
-use std::collections::HashMap;
 
 use crate::core::WidgetId;
-use crate::event::{
-    Event, EventCallback, EventCallbackManager, EventContext, EventHandler, EventResult, EventType,
-    Key, Modifiers, MouseButton,
-};
+use crate::event::{EventManager, Key, Modifiers, MouseButton};
 use crate::geometry::{Point, Size};
 use crate::layout::{LayoutContext, LayoutNode};
 use crate::render::RenderNode;
 use crate::widget::{Widget, WidgetTree};
-use crate::widgets::Button;
 
 pub struct ViewContext {
     /// Widget 树
     widget_tree: WidgetTree,
     viewport: Size,
-    focused: Option<WidgetId>,
     needs_layout: bool,
     needs_render: bool,
     pub debug_render_tree: bool,
     /// 布局上下文
     layout_ctx: LayoutContext,
-    /// 事件处理器
-    event_handler: EventHandler,
-    /// 事件回调存储：widget_id -> (event_type -> callbacks)
-    callbacks: HashMap<WidgetId, HashMap<EventType, Vec<EventCallback>>>,
+    /// 事件管理器
+    event_manager: EventManager,
 }
 
 impl ViewContext {
@@ -35,13 +27,11 @@ impl ViewContext {
         Self {
             widget_tree: WidgetTree::new(),
             viewport,
-            focused: None,
             needs_layout: true,
             needs_render: true,
             debug_render_tree: false,
             layout_ctx: LayoutContext::new(),
-            event_handler: EventHandler::new(),
-            callbacks: HashMap::new(),
+            event_manager: EventManager::new(),
         }
     }
 
@@ -61,37 +51,9 @@ impl ViewContext {
     }
 
     pub fn create<W: Widget>(&mut self, widget: W) -> WidgetId {
-        // 先创建 widget 获取真实 id
-        let id = self.widget_tree.create(widget);
-
-        // 特殊处理 Button：自动注册点击回调（使用真实 id）
-        // 先取出回调，避免借用冲突
-        let click_callback = self
-            .get::<Button>(id)
-            .and_then(|mut btn| btn.take_click_callback());
-        let event_callback = self
-            .get::<Button>(id)
-            .and_then(|mut btn| btn.take_event_callback());
-
-        // 处理 on_click（已包装成底层事件回调）
-        if let Some(mut callback) = click_callback {
-            self.register(id, EventType::Click, move |widget_id, event, ctx| {
-                callback(widget_id, event, ctx);
-                ctx.invalidate_render();
-                EventResult::Continue
-            });
-        }
-
-        // 处理 on_event（底层事件回调）
-        if let Some(mut callback) = event_callback {
-            self.register(id, EventType::Click, move |widget_id, event, ctx| {
-                callback(widget_id, event, ctx);
-                ctx.invalidate_render();
-                EventResult::Continue
-            });
-        }
-
-        id
+        // 直接创建 widget，无需特殊处理
+        // 组件内部回调由组件自己管理
+        self.widget_tree.create(widget)
     }
 
     pub fn set_root(&mut self, root_id: WidgetId) {
@@ -112,24 +74,6 @@ impl ViewContext {
     /// 获取 widget（用于布局）
     pub fn get_widget(&self, id: WidgetId) -> Option<std::cell::RefMut<'_, Box<dyn Widget>>> {
         self.widget_tree.get_widget(id)
-    }
-
-    /// 调用指定 widget 的事件处理方法
-    ///
-    /// 使用 Rc<RefCell<>> 避免借用冲突
-    pub(crate) fn invoke_widget_event(&mut self, id: WidgetId, event: &Event) -> EventResult {
-        // 获取 Widget 的 Rc 克隆，不持有 widget_tree 的借用
-        if let Some(widget_rc) = self.widget_tree.get_widget_rc(id) {
-            // 现在可以安全地借用 self
-            let mut widget_ref = widget_rc.borrow_mut();
-            let (result, needs_render) = widget_ref.handle_event(event, self);
-            if needs_render {
-                self.invalidate_render();
-            }
-            result
-        } else {
-            EventResult::Continue
-        }
     }
 
     /// 执行布局（新布局系统）
@@ -191,15 +135,41 @@ impl ViewContext {
     }
 
     pub fn render(&mut self) -> Option<RenderNode> {
+        // 扫描 Widget 脏标记，自动触发布局/渲染
+        self.scan_dirty_flags();
+
         if self.needs_layout {
             self.perform_layout();
         }
 
         if self.needs_render {
             self.needs_render = false;
-            self.build_render_tree()
+            let tree = self.build_render_tree();
+            self.clear_dirty_flags();
+            tree
         } else {
             None
+        }
+    }
+
+    /// 扫描所有 Widget 的脏标记，自动设置布局/渲染需求
+    fn scan_dirty_flags(&mut self) {
+        let has_dirty = self
+            .widget_tree
+            .widgets
+            .values()
+            .any(|widget_ref| widget_ref.try_borrow().map_or(false, |w| w.is_dirty()));
+        if has_dirty {
+            self.invalidate_layout(); // dirty 总是触发重新布局（也隐含重渲染）
+        }
+    }
+
+    /// 清除所有 Widget 的脏标记
+    fn clear_dirty_flags(&self) {
+        for (_, widget_ref) in &self.widget_tree.widgets {
+            if let Ok(mut widget) = widget_ref.try_borrow_mut() {
+                widget.clear_dirty();
+            }
         }
     }
 
@@ -210,37 +180,16 @@ impl ViewContext {
     pub fn invalidate_render(&mut self) {
         self.needs_render = true;
     }
-}
 
-impl EventCallbackManager for ViewContext {
-    fn register_callback(&mut self, id: WidgetId, event_type: EventType, callback: EventCallback) {
-        self.callbacks
-            .entry(id)
-            .or_default()
-            .entry(event_type)
-            .or_default()
-            .push(callback);
-    }
-
-    fn take_callbacks(&mut self, id: WidgetId, event_type: EventType) -> Vec<EventCallback> {
-        self.callbacks
-            .get_mut(&id)
-            .and_then(|m| m.remove(&event_type))
-            .unwrap_or_default()
+    /// 确保布局已计算（如果 needed）
+    fn ensure_layout(&mut self) {
+        if self.needs_layout {
+            self.perform_layout();
+        }
     }
 }
 
 impl ViewContext {
-    /// 注册事件回调（兼容旧 API）
-    ///
-    /// 回调签名统一为：FnMut(WidgetId, &Event, &mut ViewContext) -> EventResult
-    pub fn register<F>(&mut self, id: WidgetId, event: EventType, f: F)
-    where
-        F: FnMut(WidgetId, &Event, &mut ViewContext) -> EventResult + 'static,
-    {
-        self.register_callback(id, event, Box::new(f));
-    }
-
     /// 获取布局树根节点
     pub fn layout_root(&self) -> Option<&LayoutNode> {
         self.layout_ctx.root.as_ref()
@@ -248,106 +197,83 @@ impl ViewContext {
 
     /// 处理鼠标移动事件
     pub fn handle_mouse_move(&mut self, point: Point) {
-        if self.needs_layout {
-            self.perform_layout();
-        }
-
+        self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            // 使用 EventHandler 生成 MouseEnter/MouseLeave 事件
-            let events = self.event_handler.handle_mouse_move(point, &layout_root);
-            for (_, event) in events {
-                EventContext::dispatch(self, &event, point, &layout_root);
-            }
+            self.event_manager
+                .handle_mouse_move(point, &layout_root, &self.widget_tree);
         }
+        self.invalidate_render();
     }
 
     /// 处理鼠标按下事件
     pub fn handle_mouse_down(&mut self, point: Point, button: MouseButton) {
-        if self.needs_layout {
-            self.perform_layout();
-        }
-
+        self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            let events = self
-                .event_handler
-                .handle_mouse_down(point, button, &layout_root);
-            for (_, event) in events {
-                EventContext::dispatch(self, &event, point, &layout_root);
-            }
+            self.event_manager
+                .handle_mouse_down(button, point, &layout_root, &self.widget_tree);
         }
+        self.invalidate_render();
     }
 
     /// 处理鼠标释放事件
     pub fn handle_mouse_up(&mut self, point: Point, button: MouseButton) {
-        if self.needs_layout {
-            self.perform_layout();
-        }
-
+        self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            let events = self
-                .event_handler
-                .handle_mouse_up(point, button, &layout_root);
-            for (_, event) in events {
-                EventContext::dispatch(self, &event, point, &layout_root);
-            }
+            self.event_manager
+                .handle_mouse_up(button, point, &layout_root, &self.widget_tree);
         }
+        self.invalidate_render();
     }
 
     /// 处理鼠标滚轮事件
     pub fn handle_mouse_wheel(&mut self, delta_x: f32, delta_y: f32, point: Point) {
-        if self.needs_layout {
-            self.perform_layout();
-        }
-
+        self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            let events =
-                self.event_handler
-                    .handle_mouse_wheel(delta_x, delta_y, point, &layout_root);
-            for (_, event) in events {
-                EventContext::dispatch(self, &event, point, &layout_root);
-            }
+            self.event_manager.handle_mouse_wheel(
+                delta_x,
+                delta_y,
+                point,
+                &layout_root,
+                &self.widget_tree,
+            );
         }
+        self.invalidate_render();
     }
 
     /// 处理键盘按下事件
     pub fn handle_key_down(&mut self, key: Key, modifiers: Modifiers) {
-        if self.focused.is_some() {
-            let event = Event::KeyDown { key, modifiers };
-            if let Some(ref layout_root) = self.layout_ctx.root.clone() {
-                EventContext::dispatch(self, &event, Point::ZERO, &layout_root);
-            }
-        }
+        self.event_manager
+            .handle_key_down(key, modifiers, &self.widget_tree);
+        self.invalidate_render();
     }
 
     /// 处理键盘释放事件
     pub fn handle_key_up(&mut self, key: Key, modifiers: Modifiers) {
-        if self.focused.is_some() {
-            let event = Event::KeyUp { key, modifiers };
-            if let Some(ref layout_root) = self.layout_ctx.root.clone() {
-                EventContext::dispatch(self, &event, Point::ZERO, &layout_root);
-            }
-        }
+        self.event_manager
+            .handle_key_up(key, modifiers, &self.widget_tree);
+        self.invalidate_render();
+    }
+
+    /// 处理窗口失焦（清除焦点状态）
+    pub fn handle_window_unfocus(&mut self) {
+        self.event_manager.handle_window_unfocus(&self.widget_tree);
+        self.invalidate_render();
     }
 
     /// 设置焦点到指定 widget
     pub fn set_focus(&mut self, widget_id: Option<WidgetId>) {
-        let events = self.event_handler.handle_focus_change(widget_id);
-        self.focused = widget_id;
-
-        if let Some(ref layout_root) = self.layout_ctx.root.clone() {
-            for (_, event) in events {
-                EventContext::dispatch(self, &event, Point::ZERO, layout_root);
-            }
-        }
+        self.event_manager
+            .handle_focus_change(widget_id, &self.widget_tree);
+        self.invalidate_render();
     }
 
     /// 获取当前焦点的 widget
     pub fn focused_widget(&self) -> Option<WidgetId> {
-        self.event_handler.focused()
+        self.event_manager.focused()
     }
 
     /// 获取当前悬停的 widget
     pub fn hovered_widget(&self) -> Option<WidgetId> {
-        self.event_handler.hovered()
+        self.event_manager.hovered()
     }
 }

@@ -21,6 +21,7 @@ use crate::widget::Widget;
 pub struct Text {
     content: String,
     style: TextStyle,
+    dirty: bool,
 }
 
 impl Text {
@@ -29,18 +30,21 @@ impl Text {
         Self {
             content: content.into(),
             style: TextStyle::default(),
+            dirty: false,
         }
     }
 
     /// 设置文本内容
     pub fn content(mut self, content: impl Into<String>) -> Self {
         self.content = content.into();
+        self.dirty = true;
         self
     }
 
     /// 设置文本内容（可变）
     pub fn set_content(&mut self, content: impl Into<String>) {
         self.content = content.into();
+        self.dirty = true;
     }
 
     pub fn font_size(mut self, size: f32) -> Self {
@@ -75,6 +79,13 @@ impl Widget for Text {
 
     fn type_name(&self) -> &'static str {
         "Text"
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
     }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {

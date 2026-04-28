@@ -2,23 +2,23 @@
 //! Widget 树管理
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::cell::RefMut;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 use crate::core::WidgetId;
 use crate::widget::Widget;
 
 /// Widget 的包装类型，用于类型擦除
-pub type WidgetBox = Rc<RefCell<Box<dyn Widget>>>;
+pub type WidgetRef = Rc<RefCell<Box<dyn Widget>>>;
 
 /// Widget 树
 ///
 /// 负责管理所有 Widget 的生命周期和树结构关系
 pub struct WidgetTree {
-    /// 所有 Widget 的存储
-    widgets: HashMap<WidgetId, WidgetBox>,
+    /// 所有 Widget 的存储（pub以便EventContext访问）
+    pub widgets: HashMap<WidgetId, WidgetRef>,
     /// 根节点 ID
     root: Option<WidgetId>,
 }
@@ -35,7 +35,7 @@ impl WidgetTree {
     /// 创建并添加 Widget 到树中
     pub fn create<W: Widget>(&mut self, widget: W) -> WidgetId {
         let id = WidgetId::new();
-        let widget_box: WidgetBox = Rc::new(RefCell::new(Box::new(widget)));
+        let widget_box: WidgetRef = Rc::new(RefCell::new(Box::new(widget)));
         self.widgets.insert(id, widget_box);
         id
     }
@@ -58,19 +58,17 @@ impl WidgetTree {
     }
 
     /// 获取指定类型的 Widget 可变引用
-    /// 
+    ///
     /// 注意：由于使用 Rc<RefCell<>>，返回的是运行时借用守卫
     pub fn get<W: Any>(&self, id: WidgetId) -> Option<RefMut<'_, W>> {
         let widget_rc = self.widgets.get(&id)?;
         let widget_ref = widget_rc.borrow_mut();
         // 尝试 downcast
-        RefMut::filter_map(widget_ref, |w| {
-            w.as_any_mut().downcast_mut::<W>()
-        }).ok()
+        RefMut::filter_map(widget_ref, |w| w.as_any_mut().downcast_mut::<W>()).ok()
     }
 
     /// 获取 Widget 的 Rc 克隆（用于事件处理等场景）
-    pub fn get_widget_rc(&self, id: WidgetId) -> Option<WidgetBox> {
+    pub fn get_widget_ref(&self, id: WidgetId) -> Option<WidgetRef> {
         self.widgets.get(&id).cloned()
     }
 

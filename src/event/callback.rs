@@ -1,26 +1,13 @@
-// src/event/callback.rs
+//! 事件回调系统
+//!
+//! 提供 Widget 内部的事件回调注册机制
 
-use crate::core::{ViewContext, WidgetId};
-use crate::event::{Event, EventResult, EventType};
+use crate::event::{Event, EventType, Propagation};
 
 /// 统一的事件回调类型
 ///
-/// 参数：
-/// - id: 当前处理事件的 Widget ID
-/// - event: 事件数据
-/// - ctx: 可修改 Widget 树的上下文
-///
-/// 返回 EventResult 控制传播：
-/// - Continue: 继续传播
-/// - Stop: 停止传播
-/// - PreventDefault: 阻止默认行为但继续传播
-pub type EventCallback = Box<dyn FnMut(WidgetId, &Event, &mut ViewContext) -> EventResult>;
+/// 回调接收事件引用和传播控制器，可通过 propagation.stop() 停止事件传播
+pub type EventCallback = Box<dyn FnMut(&Event, &mut Propagation)>;
 
-/// 事件回调管理 trait
-pub trait EventCallbackManager {
-    /// 注册事件回调
-    fn register_callback(&mut self, id: WidgetId, event_type: EventType, callback: EventCallback);
-
-    /// 取出回调（避免借用冲突）
-    fn take_callbacks(&mut self, id: WidgetId, event_type: EventType) -> Vec<EventCallback>;
-}
+/// 回调存储类型（用于 Widget 内部）
+pub type CallbackMap = std::collections::HashMap<EventType, Vec<EventCallback>>;

@@ -192,9 +192,12 @@ impl VelloRenderer {
     ) {
         let transform = Affine::translate((bounds.x as f64, bounds.y as f64));
 
-        println!(
+        log::debug!(
             "render text at ({}, {}), w: {}, h: {}",
-            bounds.x, bounds.y, bounds.width, bounds.height
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height
         );
 
         for line in layout.lines() {

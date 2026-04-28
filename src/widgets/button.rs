@@ -5,7 +5,7 @@
 //! 按钮组件，内部使用 Text 渲染文本。
 
 use crate::core::WidgetId;
-use crate::event::{Event, EventResult};
+use crate::event::{Event, EventResult, EventType, Propagation};
 use crate::geometry::{Color, Rect, Size};
 use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
 use crate::prelude::ViewContext;
@@ -13,6 +13,7 @@ use crate::render::{BoxShadow, RenderNode};
 use crate::text::TextColor;
 use crate::widget::Widget;
 use crate::widgets::text::Text;
+use std::collections::HashMap;
 use vello_cpu::color::AlphaColor;
 
 /// Material Design 3 Contained Button 规范
@@ -28,11 +29,9 @@ const COLOR_HOVERED: Color = Color(AlphaColor::from_rgb8(21, 101, 192));
 const COLOR_PRESSED: Color = Color(AlphaColor::from_rgb8(13, 71, 161));
 const COLOR_DISABLED: Color = Color(AlphaColor::from_rgb8(189, 189, 189));
 
-/// 点击回调类型 - 只操作 Button 自身
-pub type ClickCallback = Box<dyn FnMut(&mut Button)>;
-
-/// 底层事件回调类型 - 统一签名
-pub type ButtonEventCallback = Box<dyn FnMut(WidgetId, &Event, &mut ViewContext)>;
+/// 用户回调类型 - 简化签名，无需参数
+/// 用户通过闭包捕获所需的 WidgetRef 或状态
+type UserCallback = Box<dyn FnMut()>;
 
 pub struct Button {
     bounds: Rect,
@@ -40,10 +39,10 @@ pub struct Button {
     is_hovered: bool,
     is_pressed: bool,
     is_disabled: bool,
-    /// 点击回调（内部包装后注册到 ViewContext）
-    on_click: Option<ClickCallback>,
-    /// 底层事件回调（直接注册到 ViewContext）
-    event_callback: Option<ButtonEventCallback>,
+    /// 脏标记
+    dirty: bool,
+    /// 用户回调，按事件类型分组
+    callbacks: std::collections::HashMap<EventType, Vec<UserCallback>>,
 }
 
 impl Button {
@@ -57,8 +56,8 @@ impl Button {
             is_hovered: false,
             is_pressed: false,
             is_disabled: false,
-            on_click: None,
-            event_callback: None,
+            dirty: false,
+            callbacks: HashMap::new(),
         }
     }
 
@@ -78,45 +77,73 @@ impl Button {
         self.text_widget = self.text_widget.clone().content(text);
     }
 
-    /// 设置点击回调（链式调用）- 只操作 Button 自身
-    ///
-    /// 内部会包装成底层事件回调，只处理 MouseUp 事件（点击）
-    pub fn on_click<F>(mut self, mut f: F) -> Self
+    /// 注册点击事件回调
+    pub fn on_click<F>(mut self, f: F) -> Self
     where
-        F: FnMut(&mut Button) + 'static,
+        F: FnMut() + 'static,
     {
-        self.on_click = Some(Box::new(move |btn| f(btn)));
+        self.callbacks
+            .entry(EventType::Click)
+            .or_default()
+            .push(Box::new(f));
         self
     }
 
-    /// 设置事件回调（链式调用）- 底层签名，可处理任意事件
-    pub fn on_event<F>(mut self, f: F) -> Self
+    /// 注册鼠标进入回调
+    pub fn on_mouse_enter<F>(mut self, f: F) -> Self
     where
-        F: FnMut(WidgetId, &Event, &mut ViewContext) + 'static,
+        F: FnMut() + 'static,
     {
-        self.event_callback = Some(Box::new(f));
+        self.callbacks
+            .entry(EventType::MouseEnter)
+            .or_default()
+            .push(Box::new(f));
         self
     }
 
-    /// 获取点击回调（供 ViewContext 在创建时注册）
-    ///
-    /// 返回包装后的底层事件回调，只处理 Click 事件
-    pub fn take_click_callback(&mut self) -> Option<ButtonEventCallback> {
-        self.on_click.take().map(|mut callback| {
-            Box::new(move |id: WidgetId, event: &Event, ctx: &mut ViewContext| {
-                // wrap：只处理 Click 事件
-                if matches!(event, Event::Click { .. }) {
-                    if let Some(mut btn) = ctx.get::<Button>(id) {
-                        callback(&mut btn);
-                    }
-                }
-            }) as ButtonEventCallback
-        })
+    /// 注册鼠标离开回调
+    pub fn on_mouse_leave<F>(mut self, f: F) -> Self
+    where
+        F: FnMut() + 'static,
+    {
+        self.callbacks
+            .entry(EventType::MouseLeave)
+            .or_default()
+            .push(Box::new(f));
+        self
     }
 
-    /// 获取底层事件回调
-    pub fn take_event_callback(&mut self) -> Option<ButtonEventCallback> {
-        self.event_callback.take()
+    /// 注册鼠标按下回调
+    pub fn on_mouse_down<F>(mut self, f: F) -> Self
+    where
+        F: FnMut() + 'static,
+    {
+        self.callbacks
+            .entry(EventType::MouseDown)
+            .or_default()
+            .push(Box::new(f));
+        self
+    }
+
+    /// 注册鼠标释放回调
+    pub fn on_mouse_up<F>(mut self, f: F) -> Self
+    where
+        F: FnMut() + 'static,
+    {
+        self.callbacks
+            .entry(EventType::MouseUp)
+            .or_default()
+            .push(Box::new(f));
+        self
+    }
+
+    /// 触发指定事件类型的用户回调
+    fn fire_callbacks(&mut self, event_type: EventType) {
+        if let Some(cbs) = self.callbacks.get_mut(&event_type) {
+            for cb in cbs {
+                cb();
+            }
+        }
     }
 
     fn bg_color(&self) -> Color {
@@ -170,6 +197,13 @@ impl Widget for Button {
         "Button"
     }
 
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
+
     fn layout(&self, id: WidgetId) -> LayoutNode {
         // 创建文本子节点 - 使用一个新的子节点ID
         let text_id = WidgetId::new();
@@ -194,7 +228,8 @@ impl Widget for Button {
 
     fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
         if let Some(computed) = &layout.computed {
-            let bounds = computed.content_box;
+            // 使用 padding_box 作为按钮背景边界，使按钮在布局中正确居中
+            let bounds = computed.padding_box;
 
             // 按钮背景
             let mut node = RenderNode::div(bounds)
@@ -207,15 +242,16 @@ impl Widget for Button {
             }
 
             // 渲染文本 - 在按钮内容区域居中
-            let text_layout = self.text_widget.do_layout(Some(bounds.width));
+            let content_bounds = computed.content_box;
+            let text_layout = self.text_widget.do_layout(Some(content_bounds.width));
             let text_size = Size::new(text_layout.width(), text_layout.height());
 
-            // 计算文本居中位置（相对于按钮）
-            let text_x = (bounds.width - text_size.width) / 2.0;
-            let text_y = (bounds.height - text_size.height) / 2.0;
+            // 计算文本居中位置（相对于内容区域）
+            let text_x = (content_bounds.width - text_size.width) / 2.0;
+            let text_y = (content_bounds.height - text_size.height) / 2.0;
             let text_bounds = Rect::new(
-                bounds.x + text_x,
-                bounds.y + text_y,
+                content_bounds.x + text_x,
+                content_bounds.y + text_y,
                 text_size.width,
                 text_size.height,
             );
@@ -234,36 +270,51 @@ impl Widget for Button {
         !self.is_disabled
     }
 
-    fn handle_event(&mut self, event: &Event, _ctx: &mut ViewContext) -> (EventResult, bool) {
+    fn handle_event(&mut self, event: &Event, _propagation: &mut Propagation) -> EventResult {
         match event {
+            // ===== 内部行为 =====
             Event::MouseEnter => {
                 if !self.is_disabled && !self.is_hovered {
                     self.is_hovered = true;
-                    return (EventResult::Continue, true);
+                    self.dirty = true;
                 }
+                // 触发用户回调
+                self.fire_callbacks(EventType::MouseEnter);
             }
             Event::MouseLeave => {
                 if self.is_hovered || self.is_pressed {
                     self.is_hovered = false;
                     self.is_pressed = false;
-                    return (EventResult::Continue, true);
+                    self.dirty = true;
                 }
+                // 触发用户回调
+                self.fire_callbacks(EventType::MouseLeave);
             }
             Event::MouseDown { .. } => {
                 if !self.is_disabled && !self.is_pressed {
                     self.is_pressed = true;
-                    return (EventResult::Continue, true);
+                    self.dirty = true;
                 }
+                // 触发用户回调
+                self.fire_callbacks(EventType::MouseDown);
             }
             Event::MouseUp { .. } => {
                 if self.is_pressed {
                     self.is_pressed = false;
-                    return (EventResult::Continue, true);
+                    self.dirty = true;
                 }
+                // 触发用户回调
+                self.fire_callbacks(EventType::MouseUp);
+            }
+            Event::Click { .. } => {
+                // Click 事件在 MouseUp 中已经处理了 is_pressed
+                // 触发用户回调（可能改变其他 Widget 的状态，由 dirty flag 系统自动检测）
+                self.fire_callbacks(EventType::Click);
             }
             _ => {}
         }
-        (EventResult::Continue, false)
+
+        EventResult::Continue
     }
 
     fn bounds(&self) -> Option<Rect> {

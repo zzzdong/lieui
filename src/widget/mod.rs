@@ -1,16 +1,26 @@
 use std::any::Any;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::core::WidgetId;
-use crate::event::{Event, EventResult};
+use crate::event::{Event, EventResult, Propagation};
 use crate::geometry::{Point, Rect};
 use crate::layout::LayoutNode;
 use crate::render::RenderNode;
 
 pub mod tree;
-pub use tree::{WidgetBox, WidgetTree};
+pub use tree::WidgetTree;
+
+pub type WidgetRef = Rc<RefCell<Box<dyn Widget>>>;
 
 pub trait Widget: Any {
     fn type_name(&self) -> &'static str;
+
+    /// 脏标记：Widget 的状态发生了变化，需要重新布局和渲染
+    fn is_dirty(&self) -> bool {
+        false
+    }
+    fn clear_dirty(&mut self) {}
 
     /// 返回布局节点（仅约束，不计算位置）
     ///
@@ -47,22 +57,15 @@ pub trait Widget: Any {
     ///
     /// 参数：
     /// - event: 事件数据
-    /// - ctx: 视图上下文，可用于请求重渲染等操作
+    /// - propagation: 传播控制器，可通过 propagation.stop() 停止事件传播
     ///
-    /// 返回 (EventResult, bool)：
-    /// - EventResult: 控制事件传播
-    ///   - Continue: 继续传播到父节点
-    ///   - Stop: 停止传播
-    ///   - PreventDefault: 阻止默认行为但继续传播
-    /// - bool: 是否需要重渲染
+    /// 返回 EventResult：
+    /// - Continue: 继续传播到父节点
+    /// - Stop: 停止传播
     ///
-    /// 默认实现返回 (Continue, false)，表示不拦截事件，不重渲染
-    fn handle_event(
-        &mut self,
-        _event: &Event,
-        _ctx: &mut crate::core::ViewContext,
-    ) -> (EventResult, bool) {
-        (EventResult::Continue, false)
+    /// 默认实现返回 Continue，表示不拦截事件
+    fn handle_event(&mut self, _event: &Event, _propagation: &mut Propagation) -> EventResult {
+        EventResult::Continue
     }
 
     fn children(&self) -> &[WidgetId] {

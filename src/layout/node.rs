@@ -70,7 +70,7 @@ impl LayoutNode {
             flex_style: None,
             intrinsic_size: IntrinsicSize::Fixed(Size::ZERO),
             flex_grow: 0.0,
-            flex_shrink: 1.0,
+            flex_shrink: 0.0,
             flex_basis: None,
             children: Vec::new(),
             computed: None,
@@ -103,6 +103,18 @@ impl LayoutNode {
     /// 设置 flex_grow
     pub fn with_flex_grow(mut self, grow: f32) -> Self {
         self.flex_grow = grow;
+        self
+    }
+
+    /// 设置 flex_shrink
+    pub fn with_flex_shrink(mut self, shrink: f32) -> Self {
+        self.flex_shrink = shrink;
+        self
+    }
+
+    /// 设置 flex_basis
+    pub fn with_flex_basis(mut self, basis: f32) -> Self {
+        self.flex_basis = Some(basis);
         self
     }
 

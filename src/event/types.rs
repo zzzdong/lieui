@@ -103,3 +103,19 @@ pub struct Modifiers {
     pub alt: bool,
     pub meta: bool,
 }
+
+/// 事件处理结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventResult {
+    /// 继续传播
+    Continue,
+    /// 停止传播
+    Stop,
+}
+
+impl EventResult {
+    /// 是否停止传播
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, EventResult::Stop)
+    }
+}

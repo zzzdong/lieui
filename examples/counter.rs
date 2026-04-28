@@ -1,7 +1,7 @@
 use lieui::app::App;
 use lieui::core::ViewContext;
-use lieui::event::{EventResult, EventType};
 use lieui::geometry::Size;
+use lieui::layout::JustifyContent;
 use lieui::prelude::Color;
 use lieui::widgets::{Button, Column, Container, Row, Text};
 use std::cell::RefCell;
@@ -17,73 +17,85 @@ fn main() {
     // 共享计数状态
     let count = Rc::new(RefCell::new(0i32));
 
-    // 根容器
+    // 根容器 - 浅灰色背景
     let root =
         ctx.create(Container::new().background(Color::from_hex("#F5F5F5").unwrap_or(Color::BLACK)));
 
-    // 垂直居中列
-    let column = ctx.create(Column::new().spacing(24.0).expand(true));
-    ctx.add_child(root, column);
+    // 使用 Column 居中显示内容
+    let center_column = ctx.create(
+        Column::new()
+            .spacing(0.0)
+            .expand(true)
+            .justify(JustifyContent::Center),
+    );
+    ctx.add_child(root, center_column);
+
+    // 内容容器 - 包裹所有控件，不扩展
+    let content = ctx.create(Column::new().spacing(16.0).justify(JustifyContent::Start));
+    ctx.add_child(center_column, content);
 
     // 标题
     let title = ctx.create(Text::new("Counter").font_size(48.0));
-    ctx.add_child(column, title);
+    ctx.add_child(content, title);
 
     // 计数显示
     let count_text = ctx.create(Text::new("0").font_size(72.0));
-    ctx.add_child(column, count_text);
+    ctx.add_child(content, count_text);
 
-    // 按钮行
+    // 按钮行 - 不扩展，只包裹内容
     let button_row = ctx.create(Row::new().spacing(16.0));
-    ctx.add_child(column, button_row);
+    ctx.add_child(content, button_row);
 
-    // 减号按钮
-    let btn_minus = ctx.create(Button::new("-"));
+    // 减号按钮 - 使用 on_click 注册回调
+    let count_minus = Rc::clone(&count);
+    let count_text_minus = Rc::clone(&ctx.widget_tree().get_widget_ref(count_text).unwrap());
+    let btn_minus = ctx.create(Button::new("-").on_click(move || {
+        let mut c = count_minus.borrow_mut();
+        let old_c = *c;
+        *c -= 1;
+        // 修改 Text 的内容
+        if let Ok(mut text) = count_text_minus.try_borrow_mut() {
+            if let Some(text_widget) = text.as_any_mut().downcast_mut::<Text>() {
+                text_widget.set_content(c.to_string());
+            }
+        }
+        println!("Minus clicked: {} -> {}", old_c, *c);
+    }));
     ctx.add_child(button_row, btn_minus);
 
-    let count_minus = Rc::clone(&count);
-    ctx.register(btn_minus, EventType::Click, move |_id, _event, ctx| {
-        let mut c = count_minus.borrow_mut();
-        *c -= 1;
-        if let Some(mut text) = ctx.get::<Text>(count_text) {
-            text.set_content(c.to_string());
-        }
-        ctx.invalidate_render();
-        println!("Count: {}", *c);
-        EventResult::Continue
-    });
-
     // 加号按钮
-    let btn_plus = ctx.create(Button::new("+"));
+    let count_plus = Rc::clone(&count);
+    let count_text_plus = Rc::clone(&ctx.widget_tree().get_widget_ref(count_text).unwrap());
+    let btn_plus = ctx.create(Button::new("+").on_click(move || {
+        let mut c = count_plus.borrow_mut();
+        let old_c = *c;
+        *c += 1;
+        // 修改 Text 的内容
+        if let Ok(mut text) = count_text_plus.try_borrow_mut() {
+            if let Some(text_widget) = text.as_any_mut().downcast_mut::<Text>() {
+                text_widget.set_content(c.to_string());
+            }
+        }
+        println!("Plus clicked: {} -> {}", old_c, *c);
+    }));
     ctx.add_child(button_row, btn_plus);
 
-    let count_plus = Rc::clone(&count);
-    ctx.register(btn_plus, EventType::Click, move |_id, _event, ctx| {
-        let mut c = count_plus.borrow_mut();
-        *c += 1;
-        if let Some(mut text) = ctx.get::<Text>(count_text) {
-            text.set_content(c.to_string());
-        }
-        ctx.invalidate_render();
-        println!("Count: {}", *c);
-        EventResult::Continue
-    });
-
     // 重置按钮
-    let btn_reset = ctx.create(Button::new("Reset"));
-    ctx.add_child(column, btn_reset);
-
     let count_reset = Rc::clone(&count);
-    ctx.register(btn_reset, EventType::Click, move |_id, _event, ctx| {
+    let count_text_reset = Rc::clone(&ctx.widget_tree().get_widget_ref(count_text).unwrap());
+    let btn_reset = ctx.create(Button::new("Reset").on_click(move || {
         let mut c = count_reset.borrow_mut();
+        let old_c = *c;
         *c = 0;
-        if let Some(mut text) = ctx.get::<Text>(count_text) {
-            text.set_content(c.to_string());
+        // 修改 Text 的内容
+        if let Ok(mut text) = count_text_reset.try_borrow_mut() {
+            if let Some(text_widget) = text.as_any_mut().downcast_mut::<Text>() {
+                text_widget.set_content(c.to_string());
+            }
         }
-        ctx.invalidate_render();
-        println!("Count reset to 0");
-        EventResult::Continue
-    });
+        println!("Reset clicked: {} -> 0", old_c);
+    }));
+    ctx.add_child(content, btn_reset);
 
     ctx.set_root(root);
 

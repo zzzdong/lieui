@@ -4,7 +4,7 @@
 
 use crate::core::WidgetId;
 use crate::geometry::Rect;
-use crate::layout::{AlignItems, FlexStyle, LayoutNode};
+use crate::layout::{AlignItems, FlexStyle, JustifyContent, LayoutNode};
 use crate::prelude::ViewContext;
 use crate::render::RenderNode;
 use crate::widget::Widget;
@@ -15,6 +15,8 @@ pub struct Column {
     pub(crate) spacing: f32,
     /// 是否扩展填满父容器
     expand: bool,
+    /// 主轴对齐方式
+    justify: JustifyContent,
 }
 
 impl Column {
@@ -24,6 +26,7 @@ impl Column {
             children: Vec::new(),
             spacing: 0.0,
             expand: false,
+            justify: JustifyContent::Center,
         }
     }
 
@@ -37,6 +40,12 @@ impl Column {
         self.expand = expand;
         self
     }
+
+    /// 设置主轴对齐方式
+    pub fn justify(mut self, justify: JustifyContent) -> Self {
+        self.justify = justify;
+        self
+    }
 }
 
 impl Widget for Column {
@@ -47,13 +56,11 @@ impl Widget for Column {
     }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {
-        use crate::layout::JustifyContent;
-
         // Column 使用 Flex 布局，垂直方向，子元素居中
         let mut node = LayoutNode::new(id).with_flex(
             FlexStyle::column()
                 .align(AlignItems::Center)
-                .justify(JustifyContent::Center)
+                .justify(self.justify)
                 .gap(self.spacing),
         );
 
