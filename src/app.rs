@@ -54,6 +54,9 @@ impl App {
                 .unwrap(),
         );
 
+        // 启用 IME 支持
+        window.set_ime_allowed(true);
+
         let context = softbuffer::Context::new(window.clone()).unwrap();
         let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
 
@@ -141,6 +144,25 @@ impl App {
     pub fn run(mut self, event_loop: EventLoop<()>) {
         let _ = event_loop.run_app(&mut self);
     }
+
+    /// 更新 IME 位置到当前焦点 widget
+    fn update_ime_position(&self) {
+        if let Some(window) = self.window.as_ref() {
+            if let Some(focused) = self.view.focused_widget() {
+                if let Some(bounds) = self.view.widget_bounds(focused) {
+                    // 设置 IME 位置到 widget 的左下角
+                    let position = winit::dpi::LogicalPosition::new(
+                        bounds.x as f64,
+                        (bounds.y + bounds.height) as f64,
+                    );
+                    window.set_ime_cursor_area(
+                        position,
+                        winit::dpi::LogicalSize::new(bounds.width as f64, bounds.height as f64),
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -186,7 +208,9 @@ impl ApplicationHandler for App {
                 };
                 match state {
                     ElementState::Pressed => {
-                        self.view.handle_mouse_down(self.mouse_position, button)
+                        self.view.handle_mouse_down(self.mouse_position, button);
+                        // 焦点变化后，更新 IME 位置
+                        self.update_ime_position();
                     }
                     ElementState::Released => {
                         self.view.handle_mouse_up(self.mouse_position, button)
@@ -216,6 +240,31 @@ impl ApplicationHandler for App {
                 match event.state {
                     ElementState::Pressed => self.view.handle_key_down(key, modifiers),
                     ElementState::Released => self.view.handle_key_up(key, modifiers),
+                }
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+
+            WindowEvent::Ime(ime) => {
+                use winit::event::Ime;
+                match ime {
+                    Ime::Preedit(text, cursor) => {
+                        let (start, end) = cursor
+                            .map(|(s, e)| (Some(s), Some(e)))
+                            .unwrap_or((None, None));
+                        self.view.handle_ime_preedit(text.to_string(), start, end);
+                    }
+                    Ime::Commit(text) => {
+                        self.view.handle_ime_commit(text.to_string());
+                    }
+                    Ime::Disabled => {
+                        self.view.handle_ime_disabled();
+                    }
+                    _ => {}
+                }
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
                 }
             }
 

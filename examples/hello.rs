@@ -2,7 +2,7 @@ use lieui::app::App;
 use lieui::core::ViewContext;
 use lieui::geometry::Size;
 use lieui::prelude::Color;
-use lieui::widgets::{Button, Column, Container, Text};
+use lieui::widgets::{Button, Column, Container, Text, TextInput};
 use std::cell::RefCell;
 use std::rc::Rc;
 use winit::event_loop::EventLoop;
@@ -47,6 +47,18 @@ fn main() {
         println!("Reset clicked! Count reset to 0");
     }));
     ctx.add_child(column, button2_id);
+
+    // 添加分隔文本
+    let input_label = ctx.create(Text::new("TextInput Demo:").font_size(18.0));
+    ctx.add_child(column, input_label);
+
+    // 创建文本输入框（带占位符）
+    let text_input = ctx.create(TextInput::new().placeholder("请输入文本...").width(300.0));
+    ctx.add_child(column, text_input);
+
+    // 创建第二个文本输入框（带初始值）
+    let text_input2 = ctx.create(TextInput::new().text("Hello LieUI!").width(300.0));
+    ctx.add_child(column, text_input2);
 
     ctx.set_root(root);
 

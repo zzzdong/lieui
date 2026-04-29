@@ -2,6 +2,7 @@
 //! 布局节点 - 约束与计算结果
 
 use crate::core::WidgetId;
+use crate::geometry::types::RoundedRect;
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::box_model::{BoxStyle, ComputedLayout};
 use crate::layout::flex::FlexStyle;
@@ -59,6 +60,12 @@ pub struct LayoutNode {
 
     /// Phase 2 计算结果
     pub computed: Option<ComputedLayout>,
+
+    /// 是否参与事件交互（默认为 true）
+    /// 设为 false 时，命中测试将跳过此节点及其子树
+    pub interactive: bool,
+
+    pub border_radius: Option<f32>,
 }
 
 impl LayoutNode {
@@ -74,6 +81,8 @@ impl LayoutNode {
             flex_basis: None,
             children: Vec::new(),
             computed: None,
+            interactive: true,
+            border_radius: None,
         }
     }
 
@@ -124,6 +133,18 @@ impl LayoutNode {
         self
     }
 
+    /// 设置是否参与事件交互
+    pub fn with_interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
+        self
+    }
+
+    /// 设置命中测试形状（默认为 border_box）
+    pub fn with_border_radius(mut self, radius: Option<f32>) -> Self {
+        self.border_radius = radius;
+        self
+    }
+
     /// 查找子节点
     pub fn find(&self, id: WidgetId) -> Option<&LayoutNode> {
         if self.id == id {
@@ -143,24 +164,36 @@ impl LayoutNode {
     }
 
     /// 命中测试（递归）
+    ///
+    /// 返回命中的 WidgetId。如果 interactive 为 false，跳过此节点及其子树。
     pub fn hit_test(&self, point: Point) -> Option<WidgetId> {
+        if !self.interactive {
+            return None;
+        }
+
         if let Some(computed) = &self.computed {
-            // 检查是否在 margin_box 内
-            if !computed.margin_box.contains(point) {
+            // 使用带圆角的 border_box 作为命中形状
+            let outer_hit = self.border_radius.map_or_else(
+                || RoundedRect::new(computed.border_box, 0.0), // 无圆角用普通矩形
+                |radius| RoundedRect::new(computed.border_box, radius),
+            );
+
+            if !outer_hit.contains(point) {
                 return None;
             }
-        }
 
-        // 从后向前遍历子元素
-        for child in self.children.iter().rev() {
-            if let Some(id) = child.hit_test(point) {
-                return Some(id);
-            }
-        }
-
-        // 检查是否在 content_box 内
-        if let Some(computed) = &self.computed {
+            // 判断是否在 content_box 内（content 区域通常无圆角，可直接用 Rect::contains）
             if computed.content_box.contains(point) {
+                // 点在内容区，可能被子元素捕获
+                for child in self.children.iter().rev() {
+                    if let Some(id) = child.hit_test(point) {
+                        return Some(id);
+                    }
+                }
+                // 子元素都没命中，返回自己
+                return Some(self.id);
+            } else {
+                // 点在 padding 区域（外圈），直接返回当前容器
                 return Some(self.id);
             }
         }

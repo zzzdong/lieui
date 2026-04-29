@@ -267,13 +267,43 @@ impl ViewContext {
         self.invalidate_render();
     }
 
+    /// 获取当前悬停的 widget
+    pub fn hovered_widget(&self) -> Option<WidgetId> {
+        self.event_manager.hovered()
+    }
+
     /// 获取当前焦点的 widget
     pub fn focused_widget(&self) -> Option<WidgetId> {
         self.event_manager.focused()
     }
 
-    /// 获取当前悬停的 widget
-    pub fn hovered_widget(&self) -> Option<WidgetId> {
-        self.event_manager.hovered()
+    /// 获取 widget 的布局边界
+    pub fn widget_bounds(&self, widget_id: WidgetId) -> Option<crate::geometry::Rect> {
+        self.layout_ctx.root.as_ref()?.find(widget_id)?.bounds()
+    }
+
+    /// 处理 IME 预编辑事件
+    pub fn handle_ime_preedit(
+        &mut self,
+        text: String,
+        cursor_start: Option<usize>,
+        cursor_end: Option<usize>,
+    ) {
+        self.event_manager
+            .handle_ime_preedit(text, cursor_start, cursor_end, &self.widget_tree);
+        self.invalidate_render();
+    }
+
+    /// 处理 IME 提交事件
+    pub fn handle_ime_commit(&mut self, text: String) {
+        self.event_manager
+            .handle_ime_commit(text, &self.widget_tree);
+        self.invalidate_render();
+    }
+
+    /// 处理 IME 禁用事件
+    pub fn handle_ime_disabled(&mut self) {
+        self.event_manager.handle_ime_disabled(&self.widget_tree);
+        self.invalidate_render();
     }
 }

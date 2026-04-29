@@ -1,7 +1,7 @@
 // src/layout/box_model.rs
 //! CSS Box 模型实现
 
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Rect, Size, types::RoundedRect};
 
 /// 边距结构（用于 margin / padding / border）
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -92,6 +92,7 @@ pub struct ComputedLayout {
     pub border_box: Rect,
     pub padding_box: Rect,
     pub content_box: Rect,
+    pub hit_shape: Option<RoundedRect>,
 }
 
 impl ComputedLayout {

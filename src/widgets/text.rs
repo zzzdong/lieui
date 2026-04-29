@@ -57,6 +57,12 @@ impl Text {
         self
     }
 
+    /// 设置文本颜色（可变）
+    pub fn set_text_color(&mut self, color: crate::text::TextColor) {
+        self.style.0.brush = color;
+        self.dirty = true;
+    }
+
     /// 获取文本内容
     pub fn text_content(&self) -> &str {
         &self.content

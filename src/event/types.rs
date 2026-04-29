@@ -11,6 +11,9 @@ pub enum EventType {
     KeyUp,
     FocusIn,
     FocusOut,
+    ImePreedit,
+    ImeCommit,
+    ImeDisabled,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +53,18 @@ pub enum Event {
     },
     FocusIn,
     FocusOut,
+    /// IME 预编辑状态更新
+    ImePreedit {
+        text: String,
+        cursor_start: Option<usize>,
+        cursor_end: Option<usize>,
+    },
+    /// IME 提交最终文本
+    ImeCommit {
+        text: String,
+    },
+    /// IME 被禁用
+    ImeDisabled,
 }
 
 impl Event {
@@ -66,6 +81,9 @@ impl Event {
             Event::KeyUp { .. } => EventType::KeyUp,
             Event::FocusIn => EventType::FocusIn,
             Event::FocusOut => EventType::FocusOut,
+            Event::ImePreedit { .. } => EventType::ImePreedit,
+            Event::ImeCommit { .. } => EventType::ImeCommit,
+            Event::ImeDisabled => EventType::ImeDisabled,
         }
     }
 }

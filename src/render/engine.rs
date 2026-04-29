@@ -65,6 +65,18 @@ impl VelloRenderer {
             RenderNode::Canvas { bounds, draw } => {
                 draw(ctx, *bounds);
             }
+            RenderNode::CanvasWithData { bounds, data, draw } => {
+                draw(ctx, *bounds, data.as_ref());
+            }
+            RenderNode::Pixmap {
+                bounds: _,
+                pixmap: _,
+                opacity: _,
+            } => {
+                // TODO: 等待 vello_cpu 支持 Pixmap 绘制
+                // 目前 vello_cpu 还没有直接的 draw_pixmap 方法
+                // 参考: https://github.com/linebender/vello/issues/1130
+            }
         }
     }
 
@@ -253,3 +265,5 @@ impl VelloRenderer {
         // 可以使用 vello_cpu 的 draw_image 方法
     }
 }
+
+

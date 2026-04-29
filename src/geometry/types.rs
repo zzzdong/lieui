@@ -1,3 +1,5 @@
+// src/geometry/types.rs
+
 use vello_cpu::color::{AlphaColor, Srgb};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -15,6 +17,11 @@ impl Point {
 
     pub const fn zero() -> Self {
         Self::new(0.0, 0.0)
+    }
+
+    // 两点距离
+    pub fn distance_to(&self, other: Point) -> f32 {
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
     }
 }
 
@@ -83,6 +90,96 @@ impl Rect {
 
     pub fn translate(&self, dx: f32, dy: f32) -> Self {
         Self::new(self.x + dx, self.y + dy, self.width, self.height)
+    }
+}
+
+/// 带等圆角的矩形（四个角半径相同）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundedRect {
+    pub rect: Rect,
+    pub radius: f32,
+}
+
+impl RoundedRect {
+    pub fn new(rect: Rect, radius: f32) -> Self {
+        // 校正半径不超过矩形边长的一半
+        let radius = radius.min(rect.width / 2.0).min(rect.height / 2.0);
+        Self { rect, radius }
+    }
+
+    /// 精确命中测试：点是否在圆角矩形内
+    pub fn contains(&self, point: Point) -> bool {
+        let r = self.radius;
+        let rect = &self.rect;
+
+        // 1. 快速排除：在整体矩形外
+        if !rect.contains(point) {
+            return false;
+        }
+
+        // 2. 内部矩形（无圆角影响的区域）
+        let inner_rect = Rect::new(
+            rect.x + r,
+            rect.y + r,
+            rect.width - 2.0 * r,
+            rect.height - 2.0 * r,
+        );
+        if inner_rect.contains(point) {
+            return true;
+        }
+
+        // 3. 检查四个角
+        // 左上角圆心
+        if point.x < rect.x + r && point.y < rect.y + r {
+            let cx = rect.x + r;
+            let cy = rect.y + r;
+            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
+        }
+        // 右上角
+        if point.x > rect.x + rect.width - r && point.y < rect.y + r {
+            let cx = rect.x + rect.width - r;
+            let cy = rect.y + r;
+            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
+        }
+        // 左下角
+        if point.x < rect.x + r && point.y > rect.y + rect.height - r {
+            let cx = rect.x + r;
+            let cy = rect.y + rect.height - r;
+            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
+        }
+        // 右下角
+        if point.x > rect.x + rect.width - r && point.y > rect.y + rect.height - r {
+            let cx = rect.x + rect.width - r;
+            let cy = rect.y + rect.height - r;
+            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
+        }
+
+        // 在四条边平直区域
+        true
+    }
+
+    /// 获取内部矩形（用于布局内容放置）
+    pub fn inner_rect(&self) -> Rect {
+        let r = self.radius;
+        Rect::new(
+            self.rect.x + r,
+            self.rect.y + r,
+            self.rect.width - 2.0 * r,
+            self.rect.height - 2.0 * r,
+        )
+    }
+
+    /// 转为此形状的 kurbo 表示（用于渲染）
+    pub fn to_kurbo_rounded_rect(&self) -> vello_cpu::kurbo::RoundedRect {
+        vello_cpu::kurbo::RoundedRect::from_rect(
+            vello_cpu::kurbo::Rect::new(
+                self.rect.x as f64,
+                self.rect.y as f64,
+                (self.rect.x + self.rect.width) as f64,
+                (self.rect.y + self.rect.height) as f64,
+            ),
+            self.radius as f64,
+        )
     }
 }
 

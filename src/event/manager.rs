@@ -85,6 +85,10 @@ impl EventManager {
     ) {
         if let Some(target) = layout_root.hit_test(point) {
             self.pressed = Some(target);
+
+            // 设置焦点到点击的 widget（如果它可以获得焦点）
+            self.handle_focus_change(Some(target), tree);
+
             self.dispatch(
                 &Event::MouseDown {
                     button,
@@ -196,6 +200,45 @@ impl EventManager {
         if let Some(target) = self.focused {
             let path = tree.path_to(target);
             self.dispatch_along_path(&Event::KeyUp { key, modifiers }, &path, target, tree);
+        }
+    }
+
+    /// 处理 IME 预编辑事件
+    pub fn handle_ime_preedit(
+        &mut self,
+        text: String,
+        cursor_start: Option<usize>,
+        cursor_end: Option<usize>,
+        tree: &WidgetTree,
+    ) {
+        if let Some(target) = self.focused {
+            let path = tree.path_to(target);
+            self.dispatch_along_path(
+                &Event::ImePreedit {
+                    text,
+                    cursor_start,
+                    cursor_end,
+                },
+                &path,
+                target,
+                tree,
+            );
+        }
+    }
+
+    /// 处理 IME 提交事件
+    pub fn handle_ime_commit(&mut self, text: String, tree: &WidgetTree) {
+        if let Some(target) = self.focused {
+            let path = tree.path_to(target);
+            self.dispatch_along_path(&Event::ImeCommit { text }, &path, target, tree);
+        }
+    }
+
+    /// 处理 IME 禁用事件
+    pub fn handle_ime_disabled(&mut self, tree: &WidgetTree) {
+        if let Some(target) = self.focused {
+            let path = tree.path_to(target);
+            self.dispatch_along_path(&Event::ImeDisabled, &path, target, tree);
         }
     }
 

@@ -2,6 +2,7 @@
 //! 布局上下文 - 约束收集与位置计算
 
 use crate::core::{ViewContext, WidgetId};
+use crate::geometry::types::RoundedRect;
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::JustifyContent;
 use crate::layout::box_model::ComputedLayout;
@@ -249,11 +250,16 @@ impl LayoutContext {
             border_box.height + margin.vertical_sum(),
         );
 
+        let hit_rect = border_box; // 命中测试以 border_box 为界
+        let hit_radius = node.border_radius.unwrap_or(0.0);
+        let hit_shape = RoundedRect::new(hit_rect, hit_radius);
+
         node.computed = Some(ComputedLayout {
             margin_box,
             border_box,
             padding_box,
             content_box,
+            hit_shape: Some(hit_shape),
         });
 
         margin_box.size()
