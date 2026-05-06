@@ -70,7 +70,7 @@ impl Text {
 
     /// 执行文本布局
     pub fn do_layout(&self, max_width: Option<f32>) -> TextLayout {
-        TextEngine::with(|engine| engine.layout(&self.content, &self.style, 1.0, max_width))
+        TextEngine::layout(&self.content, &self.style, 1.0, max_width)
     }
 
     /// 测量文本尺寸
@@ -101,7 +101,7 @@ impl Widget for Text {
         LayoutNode::new(id).with_intrinsic_size(IntrinsicSize::Measurable(Box::new(measure)))
     }
 
-    fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
         if let Some(computed) = &layout.computed {
             let text_layout = self.do_layout(Some(computed.content_box.width));
             RenderNode::text(computed.content_box, text_layout)

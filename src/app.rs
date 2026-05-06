@@ -147,9 +147,9 @@ impl App {
 
     /// 更新 IME 位置到当前焦点 widget
     fn update_ime_position(&self) {
-        if let Some(window) = self.window.as_ref() {
-            if let Some(focused) = self.view.focused_widget() {
-                if let Some(bounds) = self.view.widget_bounds(focused) {
+        if let Some(window) = self.window.as_ref()
+            && let Some(focused) = self.view.focused_widget()
+                && let Some(bounds) = self.view.widget_bounds(focused) {
                     // 设置 IME 位置到 widget 的左下角
                     let position = winit::dpi::LogicalPosition::new(
                         bounds.x as f64,
@@ -160,8 +160,6 @@ impl App {
                         winit::dpi::LogicalSize::new(bounds.width as f64, bounds.height as f64),
                     );
                 }
-            }
-        }
     }
 }
 
@@ -282,8 +280,13 @@ fn winit_key_to_key(event: &KeyEvent) -> Key {
         WinitKey::Named(NamedKey::Enter) => Key::Enter,
         WinitKey::Named(NamedKey::Escape) => Key::Escape,
         WinitKey::Named(NamedKey::Backspace) => Key::Backspace,
+        WinitKey::Named(NamedKey::Delete) => Key::Delete,
         WinitKey::Named(NamedKey::Tab) => Key::Tab,
         WinitKey::Named(NamedKey::Space) => Key::Space,
+        WinitKey::Named(NamedKey::Home) => Key::Home,
+        WinitKey::Named(NamedKey::End) => Key::End,
+        WinitKey::Named(NamedKey::PageUp) => Key::PageUp,
+        WinitKey::Named(NamedKey::PageDown) => Key::PageDown,
         WinitKey::Named(NamedKey::ArrowUp) => Key::ArrowUp,
         WinitKey::Named(NamedKey::ArrowDown) => Key::ArrowDown,
         WinitKey::Named(NamedKey::ArrowLeft) => Key::ArrowLeft,

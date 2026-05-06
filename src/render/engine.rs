@@ -1,7 +1,8 @@
 // src/render/engine.rs
 
 use kurbo::{Affine, Shape};
-use vello_cpu::{Pixmap, RenderContext};
+use vello_cpu::{Pixmap, RenderContext, Image, ImageSource};
+use vello_cpu::peniko::{Extend, ImageSampler};
 
 use crate::render::RenderNode;
 use crate::render::node::BoxShadow;
@@ -65,17 +66,13 @@ impl VelloRenderer {
             RenderNode::Canvas { bounds, draw } => {
                 draw(ctx, *bounds);
             }
-            RenderNode::CanvasWithData { bounds, data, draw } => {
-                draw(ctx, *bounds, data.as_ref());
-            }
             RenderNode::Pixmap {
-                bounds: _,
-                pixmap: _,
-                opacity: _,
+                bounds,
+                pixmap,
+                opacity,
+                children,
             } => {
-                // TODO: 等待 vello_cpu 支持 Pixmap 绘制
-                // 目前 vello_cpu 还没有直接的 draw_pixmap 方法
-                // 参考: https://github.com/linebender/vello/issues/1130
+                self.render_pixmap(ctx, *bounds, pixmap, *opacity, children);
             }
         }
     }
@@ -237,10 +234,10 @@ impl VelloRenderer {
                         }
 
                         let brush = glyph_run.style().brush;
-                        ctx.set_paint(brush.0.clone());
+                        ctx.set_paint(brush.0);
 
                         // 使用 vello_cpu 渲染 glyph run
-                        ctx.glyph_run(&font_data)
+                        ctx.glyph_run(font_data)
                             .font_size(run_font_size)
                             .glyph_transform(transform)
                             .fill_glyphs(glyphs.into_iter());
@@ -263,6 +260,70 @@ impl VelloRenderer {
     ) {
         // TODO: 实现图片渲染
         // 可以使用 vello_cpu 的 draw_image 方法
+    }
+
+    fn render_pixmap(
+        &self,
+        ctx: &mut RenderContext,
+        bounds: crate::geometry::Rect,
+        pixmap: &std::rc::Rc<std::cell::RefCell<vello_cpu::Pixmap>>,
+        opacity: Option<f32>,
+        children: &[RenderNode],
+    ) {
+        use std::sync::Arc;
+
+        // 如果有子节点，先渲染子节点到 Pixmap
+        if !children.is_empty() {
+            let pixmap_ref = pixmap.borrow_mut();
+            // 创建临时 RenderContext 来渲染子节点到 Pixmap
+            let mut pixmap_ctx = vello_cpu::RenderContext::new(
+                pixmap_ref.width(),
+                pixmap_ref.height(),
+            );
+
+            // 渲染所有子节点到 Pixmap 的上下文
+            for child in children {
+                self.render_node(&mut pixmap_ctx, child);
+            }
+
+            // 将渲染结果复制到 Pixmap
+            // 注意：这里假设 pixmap_ctx 和 pixmap 有兼容的格式
+            // 实际实现可能需要更复杂的像素数据复制
+        }
+
+        let pixmap_ref = pixmap.borrow();
+
+        // 创建 Image，使用 Pixmap 作为图像源
+        let image = Image {
+            image: ImageSource::Pixmap(Arc::new(pixmap_ref.clone())),
+            sampler: ImageSampler {
+                x_extend: Extend::Pad,
+                y_extend: Extend::Pad,
+                ..Default::default()
+            },
+        };
+
+        // 计算目标矩形
+        let dst_rect = kurbo::Rect::new(
+            bounds.x as f64,
+            bounds.y as f64,
+            (bounds.x + bounds.width) as f64,
+            (bounds.y + bounds.height) as f64,
+        );
+
+        // 应用透明度
+        if let Some(alpha) = opacity {
+            ctx.push_opacity_layer(alpha);
+        }
+
+        // 设置图像作为绘制内容
+        ctx.set_paint(image);
+        // 填充矩形区域，使用图像作为纹理
+        ctx.fill_rect(&dst_rect);
+
+        if opacity.is_some() {
+            ctx.pop_layer();
+        }
     }
 }
 

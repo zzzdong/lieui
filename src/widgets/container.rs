@@ -16,6 +16,12 @@ pub struct Container {
     box_shadow: Option<BoxShadow>,
 }
 
+impl Default for Container {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Container {
     pub fn new() -> Self {
         Self {
@@ -75,7 +81,7 @@ impl Widget for Container {
         })
     }
 
-    fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
         if let Some(computed) = &layout.computed {
             let border_box = computed.border_box;
             let mut node = RenderNode::div(border_box);
@@ -103,8 +109,16 @@ impl Widget for Container {
         &self.children
     }
 
-    fn children_mut(&mut self) -> &mut Vec<WidgetId> {
-        &mut self.children
+    fn add_child(&mut self, child_id: WidgetId) {
+        self.children.push(child_id);
+    }
+
+    fn remove_child(&mut self, child_id: WidgetId) {
+        self.children.retain(|&id| id != child_id);
+    }
+
+    fn is_container(&self) -> bool {
+        true
     }
 
     fn bounds(&self) -> Option<Rect> {

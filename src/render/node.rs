@@ -77,17 +77,12 @@ pub enum RenderNode {
     },
     /// 画布节点
     Canvas { bounds: Rect, draw: CanvasCallback },
-    /// 画布节点（带自定义数据）
-    CanvasWithData {
-        bounds: Rect,
-        data: Box<dyn std::any::Any>,
-        draw: Box<dyn Fn(&mut vello_cpu::RenderContext, Rect, &dyn std::any::Any)>,
-    },
     /// 离屏渲染节点 - 先绘制到 Pixmap，再合成
     Pixmap {
         bounds: Rect,
         pixmap: std::rc::Rc<std::cell::RefCell<vello_cpu::Pixmap>>,
         opacity: Option<f32>,
+        children: Vec<RenderNode>,
     },
 }
 
@@ -149,19 +144,6 @@ impl RenderNode {
         }
     }
 
-    /// 创建 CanvasWithData 节点
-    pub fn canvas_with_data<D, F>(bounds: Rect, data: D, draw: F) -> Self
-    where
-        D: std::any::Any + 'static,
-        F: Fn(&mut vello_cpu::RenderContext, Rect, &dyn std::any::Any) + 'static,
-    {
-        Self::CanvasWithData {
-            bounds,
-            data: Box::new(data),
-            draw: Box::new(draw),
-        }
-    }
-
     /// 创建 Pixmap 节点
     pub fn pixmap(bounds: Rect, width: u16, height: u16) -> Self {
         let pixmap = vello_cpu::Pixmap::new(width, height);
@@ -169,6 +151,7 @@ impl RenderNode {
             bounds,
             pixmap: std::rc::Rc::new(std::cell::RefCell::new(pixmap)),
             opacity: None,
+            children: Vec::new(),
         }
     }
 
@@ -178,6 +161,7 @@ impl RenderNode {
             bounds,
             pixmap: std::rc::Rc::new(std::cell::RefCell::new(pixmap)),
             opacity: None,
+            children: Vec::new(),
         }
     }
 
@@ -250,7 +234,9 @@ impl RenderNode {
     /// 添加子节点（仅 View 和 Div 节点有效）
     pub fn add_child(mut self, child: RenderNode) -> Self {
         match &mut self {
-            Self::View { children, .. } | Self::Div { children, .. } => children.push(child),
+            Self::View { children, .. } | Self::Div { children, .. } | Self::Pixmap { children, .. } => {
+                children.push(child)
+            }
             _ => {}
         }
         self
@@ -264,15 +250,14 @@ impl RenderNode {
             | Self::Text { bounds, .. }
             | Self::Image { bounds, .. }
             | Self::Canvas { bounds, .. }
-            | Self::CanvasWithData { bounds, .. }
             | Self::Pixmap { bounds, .. } => *bounds,
         }
     }
 
-    /// 获取子节点（仅 View 和 Div 节点有效）
+    /// 获取子节点（仅 View、Div 和 Pixmap 节点有效）
     pub fn children(&self) -> &[RenderNode] {
         match self {
-            Self::View { children, .. } | Self::Div { children, .. } => children,
+            Self::View { children, .. } | Self::Div { children, .. } | Self::Pixmap { children, .. } => children,
             _ => &[],
         }
     }
@@ -318,7 +303,7 @@ impl RenderNode {
                 if children.is_empty() {
                     xml.push_str(" />");
                 } else {
-                    xml.push_str(">");
+                    xml.push('>');
                     for child in children {
                         xml.push('\n');
                         xml.push_str(&child.to_xml(indent + 1));
@@ -347,7 +332,7 @@ impl RenderNode {
                 if children.is_empty() {
                     xml.push_str(" />");
                 } else {
-                    xml.push_str(">");
+                    xml.push('>');
                     for child in children {
                         xml.push('\n');
                         xml.push_str(&child.to_xml(indent + 1));
@@ -380,19 +365,24 @@ impl RenderNode {
                     spaces, bounds.x, bounds.y, bounds.width, bounds.height
                 )
             }
-            Self::CanvasWithData { bounds, .. } => {
-                format!(
-                    "{}<CanvasWithData x=\"{}\" y=\"{}\" w=\"{}\" h=\"{}\" />",
-                    spaces, bounds.x, bounds.y, bounds.width, bounds.height
-                )
-            }
-            Self::Pixmap { bounds, pixmap, .. } => {
+            Self::Pixmap { bounds, pixmap, children, .. } => {
                 let pixmap_ref = pixmap.borrow();
-                format!(
-                    "{}<Pixmap x=\"{}\" y=\"{}\" w=\"{}\" h=\"{}\" pixmapWidth=\"{}\" pixmapHeight=\"{}\" />",
-                    spaces, bounds.x, bounds.y, bounds.width, bounds.height,
-                    pixmap_ref.width(), pixmap_ref.height()
-                )
+                if children.is_empty() {
+                    format!(
+                        "{}<Pixmap x=\"{}\" y=\"{}\" w=\"{}\" h=\"{}\" pixmapWidth=\"{}\" pixmapHeight=\"{}\" />",
+                        spaces, bounds.x, bounds.y, bounds.width, bounds.height,
+                        pixmap_ref.width(), pixmap_ref.height()
+                    )
+                } else {
+                    let children_xml: Vec<String> = children.iter().map(|c| c.to_xml(indent + 2)).collect();
+                    format!(
+                        "{}<Pixmap x=\"{}\" y=\"{}\" w=\"{}\" h=\"{}\" pixmapWidth=\"{}\" pixmapHeight=\"{}\">\n{}\n{}</Pixmap>",
+                        spaces, bounds.x, bounds.y, bounds.width, bounds.height,
+                        pixmap_ref.width(), pixmap_ref.height(),
+                        children_xml.join("\n"),
+                        spaces
+                    )
+                }
             }
         }
     }
@@ -439,11 +429,8 @@ impl std::fmt::Debug for RenderNode {
             Self::Canvas { bounds, .. } => {
                 f.debug_struct("Canvas").field("bounds", bounds).finish()
             }
-            Self::CanvasWithData { bounds, .. } => {
-                f.debug_struct("CanvasWithData").field("bounds", bounds).finish()
-            }
-            Self::Pixmap { bounds, .. } => {
-                f.debug_struct("Pixmap").field("bounds", bounds).finish()
+            Self::Pixmap { bounds, children, .. } => {
+                f.debug_struct("Pixmap").field("bounds", bounds).field("children", children).finish()
             }
         }
     }
@@ -464,8 +451,8 @@ impl Clone for RenderNode {
                 children,
             } => Self::View {
                 bounds: *bounds,
-                background: background.clone(),
-                border_color: border_color.clone(),
+                background: *background,
+                border_color: *border_color,
                 border_width: *border_width,
                 border_radius: *border_radius,
                 opacity: *opacity,
@@ -483,8 +470,8 @@ impl Clone for RenderNode {
                 children,
             } => Self::Div {
                 bounds: *bounds,
-                background: background.clone(),
-                border_color: border_color.clone(),
+                background: *background,
+                border_color: *border_color,
                 border_width: *border_width,
                 border_radius: *border_radius,
                 opacity: *opacity,
@@ -515,21 +502,16 @@ impl Clone for RenderNode {
                     draw: Box::new(|_, _| {}),
                 }
             }
-            Self::CanvasWithData { bounds, .. } => {
-                // CanvasWithData 无法克隆回调函数和数据
-                Self::Canvas {
-                    bounds: *bounds,
-                    draw: Box::new(|_, _| {}),
-                }
-            }
             Self::Pixmap {
                 bounds,
                 pixmap,
                 opacity,
+                children,
             } => Self::Pixmap {
                 bounds: *bounds,
                 pixmap: pixmap.clone(),
                 opacity: *opacity,
+                children: children.clone(),
             },
         }
     }

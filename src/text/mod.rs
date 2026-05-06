@@ -6,49 +6,60 @@ use std::cell::RefCell;
 use vello_cpu::color::{AlphaColor, Srgb};
 
 thread_local! {
-    pub static TEXT_ENGINE: RefCell<TextEngine> = RefCell::new(TextEngine::new());
+    /// 全局字体上下文 - 线程本地存储
+    pub static FONT_CONTEXT: RefCell<FontContext> = RefCell::new(FontContext::default());
+    /// 全局布局上下文 - 线程本地存储
+    pub static LAYOUT_CONTEXT: RefCell<LayoutContext<TextColor>> = RefCell::new(LayoutContext::default());
 }
 
-pub struct TextEngine {
-    font_cx: FontContext,
-    layout_cx: LayoutContext<TextColor>,
+/// 访问字体上下文的便捷函数
+pub fn with_font_context<R, F: FnOnce(&mut FontContext) -> R>(f: F) -> R {
+    FONT_CONTEXT.with(|cx| f(&mut cx.borrow_mut()))
 }
+
+/// 访问布局上下文的便捷函数
+pub fn with_layout_context<R, F: FnOnce(&mut LayoutContext<TextColor>) -> R>(f: F) -> R {
+    LAYOUT_CONTEXT.with(|cx| f(&mut cx.borrow_mut()))
+}
+
+/// 同时访问两个上下文的便捷函数
+pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<TextColor>) -> R>(f: F) -> R {
+    FONT_CONTEXT.with(|font_cx| {
+        LAYOUT_CONTEXT.with(|layout_cx| {
+            f(&mut font_cx.borrow_mut(), &mut layout_cx.borrow_mut())
+        })
+    })
+}
+
+pub struct TextEngine;
 
 impl TextEngine {
     pub fn new() -> Self {
-        Self {
-            font_cx: FontContext::new(),
-            layout_cx: LayoutContext::new(),
-        }
-    }
-
-    pub fn with<R, F: FnOnce(&mut TextEngine) -> R>(f: F) -> R {
-        TEXT_ENGINE.with(|engine| f(&mut engine.borrow_mut()))
+        Self
     }
 
     pub fn layout(
-        &mut self,
         text: &str,
         style: &TextStyle,
         scale: f32,
         max_width: Option<f32>,
     ) -> TextLayout {
-        let mut builder = self
-            .layout_cx
-            .ranged_builder(&mut self.font_cx, text, scale, true);
+        with_text_contexts(|font_cx, layout_cx| {
+            let mut builder = layout_cx.ranged_builder(font_cx, text, scale, true);
 
-        style.apply(&mut builder);
+            style.apply(&mut builder);
 
-        let mut layout = builder.build(text);
+            let mut layout = builder.build(text);
 
-        layout.break_all_lines(max_width);
+            layout.break_all_lines(max_width);
 
-        layout.align(
-            parley::Alignment::Start,
-            parley::AlignmentOptions::default(),
-        );
+            layout.align(
+                parley::Alignment::Start,
+                parley::AlignmentOptions::default(),
+            );
 
-        layout
+            layout
+        })
     }
 }
 

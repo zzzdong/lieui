@@ -1,6 +1,6 @@
 // src/core/view_context.rs
 
-use std::any::Any;
+use std::cell::{Ref, RefMut};
 
 use crate::core::WidgetId;
 use crate::event::{EventManager, Key, Modifiers, MouseButton};
@@ -66,13 +66,17 @@ impl ViewContext {
         self.invalidate_layout();
     }
 
-    /// 获取指定类型的 Widget 可变引用
-    pub fn get<W: Any>(&self, id: WidgetId) -> Option<std::cell::RefMut<'_, W>> {
+    pub fn get<W: Widget>(&self, id: WidgetId) -> Option<Ref<'_, W>> {
         self.widget_tree.get(id)
     }
 
+    /// 获取指定类型的 Widget 可变引用
+    pub fn get_mut<W: Widget>(&self, id: WidgetId) -> Option<RefMut<'_, W>> {
+        self.widget_tree.get_mut(id)
+    }
+
     /// 获取 widget（用于布局）
-    pub fn get_widget(&self, id: WidgetId) -> Option<std::cell::RefMut<'_, Box<dyn Widget>>> {
+    pub fn get_widget(&self, id: WidgetId) -> Option<RefMut<'_, Box<dyn Widget>>> {
         self.widget_tree.get_widget(id)
     }
 
@@ -101,18 +105,16 @@ impl ViewContext {
     }
 
     /// 从布局树构建渲染树
-    pub fn build_render_tree(&self) -> Option<RenderNode> {
-        self.layout_ctx
-            .root
-            .as_ref()
-            .map(|root| self.build_render_node_recursive(root))
+    pub fn build_render_tree(&mut self) -> Option<RenderNode> {
+        let root = self.layout_ctx.root.as_ref().cloned()?;
+        Some(self.build_render_node_recursive(&root))
     }
 
-    fn build_render_node_recursive(&self, layout_node: &LayoutNode) -> RenderNode {
+    fn build_render_node_recursive(&mut self, layout_node: &LayoutNode) -> RenderNode {
         let id = layout_node.id;
 
         // 获取 widget 并渲染
-        let mut node = if let Some(widget) = self.widget_tree.get_widget(id) {
+        let mut node = if let Some(mut widget) = self.widget_tree.get_widget(id) {
             widget.render(layout_node, self)
         } else {
             // 默认渲染
@@ -158,7 +160,7 @@ impl ViewContext {
             .widget_tree
             .widgets
             .values()
-            .any(|widget_ref| widget_ref.try_borrow().map_or(false, |w| w.is_dirty()));
+            .any(|widget_ref| widget_ref.try_borrow().is_ok_and(|w| w.is_dirty()));
         if has_dirty {
             self.invalidate_layout(); // dirty 总是触发重新布局（也隐含重渲染）
         }
@@ -166,7 +168,7 @@ impl ViewContext {
 
     /// 清除所有 Widget 的脏标记
     fn clear_dirty_flags(&self) {
-        for (_, widget_ref) in &self.widget_tree.widgets {
+        for widget_ref in self.widget_tree.widgets.values() {
             if let Ok(mut widget) = widget_ref.try_borrow_mut() {
                 widget.clear_dirty();
             }
@@ -199,69 +201,80 @@ impl ViewContext {
     pub fn handle_mouse_move(&mut self, point: Point) {
         self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            self.event_manager
+            let effects = self.event_manager
                 .handle_mouse_move(point, &layout_root, &self.widget_tree);
+            self.apply_effects(effects);
         }
-        self.invalidate_render();
     }
 
     /// 处理鼠标按下事件
     pub fn handle_mouse_down(&mut self, point: Point, button: MouseButton) {
         self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            self.event_manager
-                .handle_mouse_down(button, point, &layout_root, &self.widget_tree);
+            let effects = self.event_manager
+                .handle_mouse_down(point, button, &layout_root, &self.widget_tree);
+            self.apply_effects(effects);
         }
-        self.invalidate_render();
     }
 
     /// 处理鼠标释放事件
     pub fn handle_mouse_up(&mut self, point: Point, button: MouseButton) {
         self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            self.event_manager
-                .handle_mouse_up(button, point, &layout_root, &self.widget_tree);
+            let effects = self.event_manager
+                .handle_mouse_up(point, button, &layout_root, &self.widget_tree);
+            self.apply_effects(effects);
         }
-        self.invalidate_render();
     }
 
     /// 处理鼠标滚轮事件
     pub fn handle_mouse_wheel(&mut self, delta_x: f32, delta_y: f32, point: Point) {
         self.ensure_layout();
         if let Some(layout_root) = self.layout_ctx.root.clone() {
-            self.event_manager.handle_mouse_wheel(
+            let effects = self.event_manager.handle_wheel(
+                point,
                 delta_x,
                 delta_y,
-                point,
                 &layout_root,
                 &self.widget_tree,
             );
+            self.apply_effects(effects);
         }
-        self.invalidate_render();
     }
 
     /// 处理键盘按下事件
     pub fn handle_key_down(&mut self, key: Key, modifiers: Modifiers) {
-        self.event_manager
+        let effects = self.event_manager
             .handle_key_down(key, modifiers, &self.widget_tree);
-        self.invalidate_render();
+        self.apply_effects(effects);
     }
 
     /// 处理键盘释放事件
     pub fn handle_key_up(&mut self, key: Key, modifiers: Modifiers) {
-        self.event_manager
+        let effects = self.event_manager
             .handle_key_up(key, modifiers, &self.widget_tree);
-        self.invalidate_render();
+        self.apply_effects(effects);
     }
 
     /// 处理窗口失焦（清除焦点状态）
     pub fn handle_window_unfocus(&mut self) {
-        self.event_manager.handle_window_unfocus(&self.widget_tree);
-        self.invalidate_render();
+        let effects = self.event_manager.handle_window_unfocus(&self.widget_tree);
+        self.apply_effects(effects);
+    }
+
+    /// 应用事件副作用
+    fn apply_effects(&mut self, effects: crate::event::EventEffects) {
+        if effects.needs_render() {
+            self.invalidate_render();
+        }
+        if effects.needs_layout() {
+            self.invalidate_layout();
+        }
     }
 
     /// 设置焦点到指定 widget
     pub fn set_focus(&mut self, widget_id: Option<WidgetId>) {
+        self.ensure_layout();
         self.event_manager
             .handle_focus_change(widget_id, &self.widget_tree);
         self.invalidate_render();
@@ -289,21 +302,21 @@ impl ViewContext {
         cursor_start: Option<usize>,
         cursor_end: Option<usize>,
     ) {
-        self.event_manager
+        let effects = self.event_manager
             .handle_ime_preedit(text, cursor_start, cursor_end, &self.widget_tree);
-        self.invalidate_render();
+        self.apply_effects(effects);
     }
 
     /// 处理 IME 提交事件
     pub fn handle_ime_commit(&mut self, text: String) {
-        self.event_manager
+        let effects = self.event_manager
             .handle_ime_commit(text, &self.widget_tree);
-        self.invalidate_render();
+        self.apply_effects(effects);
     }
 
     /// 处理 IME 禁用事件
     pub fn handle_ime_disabled(&mut self) {
-        self.event_manager.handle_ime_disabled(&self.widget_tree);
-        self.invalidate_render();
+        let effects = self.event_manager.handle_ime_disabled(&self.widget_tree);
+        self.apply_effects(effects);
     }
 }

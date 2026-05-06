@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::core::WidgetId;
-use crate::event::{Event, EventResult, Propagation};
+use crate::event::{Event, EventContext, EventResult};
 use crate::geometry::{Point, Rect};
 use crate::layout::LayoutNode;
 use crate::render::RenderNode;
@@ -40,7 +40,7 @@ pub trait Widget: Any {
     /// # 参数
     /// - `layout`: 已计算的布局节点（包含 computed 字段）
     /// - `ctx`: 视图上下文
-    fn render(&self, layout: &LayoutNode, ctx: &crate::core::ViewContext) -> RenderNode;
+    fn render(&mut self, layout: &LayoutNode, ctx: &crate::core::ViewContext) -> RenderNode;
 
     /// 命中测试
     ///
@@ -57,23 +57,41 @@ pub trait Widget: Any {
     ///
     /// 参数：
     /// - event: 事件数据
-    /// - propagation: 传播控制器，可通过 propagation.stop() 停止事件传播
+    /// - ctx: 事件上下文，可访问 Widget 树、请求副作用、控制传播
     ///
     /// 返回 EventResult：
     /// - Continue: 继续传播到父节点
     /// - Stop: 停止传播
     ///
     /// 默认实现返回 Continue，表示不拦截事件
-    fn handle_event(&mut self, _event: &Event, _propagation: &mut Propagation) -> EventResult {
+    fn handle_event(&mut self, _event: &Event, _ctx: &EventContext) -> EventResult {
         EventResult::Continue
     }
 
+    /// 获取子节点 ID 列表（只读）
+    ///
+    /// 默认返回空切片，表示没有子节点（叶子节点）
     fn children(&self) -> &[WidgetId] {
         &[]
     }
 
-    fn children_mut(&mut self) -> &mut Vec<WidgetId> {
-        unimplemented!()
+    /// 添加子节点
+    ///
+    /// 默认实现为空，叶子节点无需重写。
+    /// 容器 Widget 应重写此方法，将 child_id 加入内部 children 列表。
+    fn add_child(&mut self, _child_id: WidgetId) {}
+
+    /// 移除子节点
+    ///
+    /// 默认实现为空，叶子节点无需重写。
+    /// 容器 Widget 应重写此方法，从内部 children 列表中移除指定节点。
+    fn remove_child(&mut self, _child_id: WidgetId) {}
+
+    /// 是否为容器 Widget
+    ///
+    /// 用于调试和断言，容器应返回 true
+    fn is_container(&self) -> bool {
+        false
     }
 
     fn can_focus(&self) -> bool {

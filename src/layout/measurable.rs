@@ -53,10 +53,8 @@ impl TextMeasure {
 
 impl Measurable for TextMeasure {
     fn measure(&self, max_width: Option<f32>) -> Size {
-        TextEngine::with(|engine| {
-            let layout = engine.layout(&self.content, &self.style, 1.0, max_width);
-            Size::new(layout.width(), layout.height())
-        })
+        let layout = TextEngine::layout(&self.content, &self.style, 1.0, max_width);
+        Size::new(layout.width(), layout.height())
     }
 
     fn clone_box(&self) -> Box<dyn Measurable> {

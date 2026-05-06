@@ -10,7 +10,7 @@
 //! - 颜色：使用 Fluent UI 主题色板
 
 use crate::core::WidgetId;
-use crate::event::{Event, EventResult, EventType, Propagation};
+use crate::event::{Event, EventContext, EventResult, EventType, UserCallbackMap};
 use crate::geometry::{Color, Rect, Size};
 use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
 use crate::prelude::ViewContext;
@@ -18,7 +18,6 @@ use crate::render::RenderNode;
 use crate::text::TextColor;
 use crate::widget::Widget;
 use crate::widgets::text::Text;
-use std::collections::HashMap;
 use vello_cpu::color::AlphaColor;
 
 // ============================================
@@ -67,9 +66,6 @@ pub enum ButtonVariant {
     Ghost,
 }
 
-/// 用户回调类型 - 简化签名，无需参数
-type UserCallback = Box<dyn FnMut()>;
-
 pub struct Button {
     bounds: Rect,
     text_widget: Text,
@@ -80,7 +76,7 @@ pub struct Button {
     /// 脏标记
     dirty: bool,
     /// 用户回调，按事件类型分组
-    callbacks: std::collections::HashMap<EventType, Vec<UserCallback>>,
+    callbacks: UserCallbackMap,
 }
 
 impl Button {
@@ -96,7 +92,7 @@ impl Button {
             is_pressed: false,
             is_disabled: false,
             dirty: false,
-            callbacks: HashMap::new(),
+            callbacks: UserCallbackMap::new(),
         }
     }
 
@@ -134,7 +130,7 @@ impl Button {
     /// 注册点击事件回调
     pub fn on_click<F>(mut self, f: F) -> Self
     where
-        F: FnMut() + 'static,
+        F: FnMut(&EventContext) + 'static,
     {
         self.callbacks
             .entry(EventType::Click)
@@ -146,7 +142,7 @@ impl Button {
     /// 注册鼠标进入回调
     pub fn on_mouse_enter<F>(mut self, f: F) -> Self
     where
-        F: FnMut() + 'static,
+        F: FnMut(&EventContext) + 'static,
     {
         self.callbacks
             .entry(EventType::MouseEnter)
@@ -158,7 +154,7 @@ impl Button {
     /// 注册鼠标离开回调
     pub fn on_mouse_leave<F>(mut self, f: F) -> Self
     where
-        F: FnMut() + 'static,
+        F: FnMut(&EventContext) + 'static,
     {
         self.callbacks
             .entry(EventType::MouseLeave)
@@ -220,10 +216,10 @@ impl Button {
     }
 
     /// 触发指定事件类型的用户回调
-    fn fire_callbacks(&mut self, event_type: EventType) {
+    fn fire_callbacks(&mut self, event_type: EventType, ctx: &EventContext) {
         if let Some(cbs) = self.callbacks.get_mut(&event_type) {
             for cb in cbs {
-                cb();
+                cb(ctx);
             }
         }
     }
@@ -265,7 +261,7 @@ impl Widget for Button {
             .add_child(text_node)
     }
 
-    fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
         if let Some(computed) = &layout.computed {
             // 使用 padding_box 作为按钮背景边界
             let bounds = computed.padding_box;
@@ -308,7 +304,7 @@ impl Widget for Button {
         !self.is_disabled
     }
 
-    fn handle_event(&mut self, event: &Event, _propagation: &mut Propagation) -> EventResult {
+    fn handle_event(&mut self, event: &Event, ctx: &EventContext) -> EventResult {
         if self.is_disabled {
             return EventResult::Continue;
         }
@@ -320,8 +316,9 @@ impl Widget for Button {
                     self.dirty = true;
                     self.text_widget
                         .set_text_color(crate::text::TextColor(self.text_color().0));
+                    ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseEnter);
+                self.fire_callbacks(EventType::MouseEnter, ctx);
             }
             Event::MouseLeave => {
                 if self.is_hovered || self.is_pressed {
@@ -330,8 +327,9 @@ impl Widget for Button {
                     self.dirty = true;
                     self.text_widget
                         .set_text_color(crate::text::TextColor(self.text_color().0));
+                    ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseLeave);
+                self.fire_callbacks(EventType::MouseLeave, ctx);
             }
             Event::MouseDown { .. } => {
                 if !self.is_pressed {
@@ -339,8 +337,9 @@ impl Widget for Button {
                     self.dirty = true;
                     self.text_widget
                         .set_text_color(crate::text::TextColor(self.text_color().0));
+                    ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseDown);
+                self.fire_callbacks(EventType::MouseDown, ctx);
             }
             Event::MouseUp { .. } => {
                 if self.is_pressed {
@@ -348,11 +347,12 @@ impl Widget for Button {
                     self.dirty = true;
                     self.text_widget
                         .set_text_color(crate::text::TextColor(self.text_color().0));
+                    ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseUp);
+                self.fire_callbacks(EventType::MouseUp, ctx);
             }
             Event::Click { .. } => {
-                self.fire_callbacks(EventType::Click);
+                self.fire_callbacks(EventType::Click, ctx);
             }
             _ => {}
         }

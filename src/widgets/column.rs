@@ -72,7 +72,7 @@ impl Widget for Column {
         node
     }
 
-    fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
         if let Some(computed) = &layout.computed {
             RenderNode::view(computed.content_box)
         } else {
@@ -84,8 +84,16 @@ impl Widget for Column {
         &self.children
     }
 
-    fn children_mut(&mut self) -> &mut Vec<WidgetId> {
-        &mut self.children
+    fn add_child(&mut self, child_id: WidgetId) {
+        self.children.push(child_id);
+    }
+
+    fn remove_child(&mut self, child_id: WidgetId) {
+        self.children.retain(|&id| id != child_id);
+    }
+
+    fn is_container(&self) -> bool {
+        true
     }
 
     fn bounds(&self) -> Option<Rect> {

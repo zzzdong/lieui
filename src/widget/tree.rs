@@ -1,7 +1,7 @@
 // src/widget/tree.rs
 //! Widget 树管理
 
-use std::any::Any;
+use std::cell::Ref;
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::collections::HashMap;
@@ -51,16 +51,35 @@ impl WidgetTree {
     }
 
     /// 添加子节点关系
+    ///
+    /// 将 child_id 添加到 parent_id 对应的容器的子节点列表中。
+    /// 父子关系由容器 Widget 内部维护，WidgetTree 只负责协调。
     pub fn add_child(&mut self, parent_id: WidgetId, child_id: WidgetId) {
         if let Some(parent) = self.widgets.get(&parent_id) {
-            parent.borrow_mut().children_mut().push(child_id);
+            parent.borrow_mut().add_child(child_id);
+        }
+    }
+
+    /// 移除子节点关系
+    ///
+    /// 从 parent_id 对应的容器的子节点列表中移除 child_id。
+    pub fn remove_child(&mut self, parent_id: WidgetId, child_id: WidgetId) {
+        if let Some(parent) = self.widgets.get(&parent_id) {
+            parent.borrow_mut().remove_child(child_id);
         }
     }
 
     /// 获取指定类型的 Widget 可变引用
     ///
     /// 注意：由于使用 Rc<RefCell<>>，返回的是运行时借用守卫
-    pub fn get<W: Any>(&self, id: WidgetId) -> Option<RefMut<'_, W>> {
+    pub fn get<W: Widget>(&self, id: WidgetId) -> Option<Ref<'_, W>> {
+        let widget_rc = self.widgets.get(&id)?;
+        let widget_ref = widget_rc.borrow();
+        // 尝试 downcast
+        Ref::filter_map(widget_ref, |w| w.as_any().downcast_ref::<W>()).ok()
+    }
+
+    pub fn get_mut<W: Widget>(&self, id: WidgetId) -> Option<RefMut<'_, W>> {
         let widget_rc = self.widgets.get(&id)?;
         let widget_ref = widget_rc.borrow_mut();
         // 尝试 downcast
@@ -83,20 +102,12 @@ impl WidgetTree {
     }
 
     /// 获取子节点列表
+    ///
+    /// 从指定 Widget 的 children() 方法获取子节点 ID 列表
     pub fn children_of(&self, id: WidgetId) -> Vec<WidgetId> {
         self.get_widget(id)
             .map(|w| w.children().to_vec())
             .unwrap_or_default()
-    }
-
-    /// 获取父节点（通过遍历查找）
-    pub fn parent_of(&self, child_id: WidgetId) -> Option<WidgetId> {
-        for (id, widget_rc) in &self.widgets {
-            if widget_rc.borrow().children().contains(&child_id) {
-                return Some(*id);
-            }
-        }
-        None
     }
 
     /// 遍历树（前序遍历）
@@ -207,7 +218,7 @@ mod tests {
             LayoutNode::new(id).with_intrinsic_size(IntrinsicSize::Fixed(Size::new(100.0, 100.0)))
         }
 
-        fn render(&self, _layout: &LayoutNode, _ctx: &crate::core::ViewContext) -> RenderNode {
+        fn render(&mut self, _layout: &LayoutNode, _ctx: &crate::core::ViewContext) -> RenderNode {
             RenderNode::view(Rect::zero())
         }
 
@@ -215,8 +226,16 @@ mod tests {
             &self.children
         }
 
-        fn children_mut(&mut self) -> &mut Vec<WidgetId> {
-            &mut self.children
+        fn add_child(&mut self, child_id: WidgetId) {
+            self.children.push(child_id);
+        }
+
+        fn remove_child(&mut self, child_id: WidgetId) {
+            self.children.retain(|&id| id != child_id);
+        }
+
+        fn is_container(&self) -> bool {
+            true
         }
     }
 
@@ -241,8 +260,10 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert_eq!(children[0], child);
 
-        let parent_found = tree.parent_of(child);
-        assert_eq!(parent_found, Some(parent));
+        // 测试移除子节点
+        tree.remove_child(parent, child);
+        let children_after_remove = tree.children_of(parent);
+        assert_eq!(children_after_remove.len(), 0);
     }
 
     #[test]

@@ -3,8 +3,6 @@ use lieui::core::ViewContext;
 use lieui::geometry::Size;
 use lieui::prelude::Color;
 use lieui::widgets::{Button, Column, Container, Text, TextInput};
-use std::cell::RefCell;
-use std::rc::Rc;
 use winit::event_loop::EventLoop;
 
 fn main() {
@@ -28,37 +26,29 @@ fn main() {
     let subtitle = ctx.create(Text::new("A minimal Rust GUI library").font_size(16.0));
     ctx.add_child(column, subtitle);
 
-    // 创建按钮并注册点击回调 - 新的简化 API
-    // 使用 Rc<RefCell<>> 来共享可变状态
-    let click_count = Rc::new(RefCell::new(0i32));
-    let click_count_clone = Rc::clone(&click_count);
-
-    let button_id = ctx.create(Button::new("Click Me!").on_click(move || {
-        let mut count = click_count_clone.borrow_mut();
-        *count += 1;
-        println!("Button clicked! Count: {}", *count);
+    // 创建按钮并注册点击回调 - 使用 EventContext
+    let button_id = ctx.create(Button::new("Click Me!").on_click(move |ctx| {
+        ctx.request_render();
     }));
     ctx.add_child(column, button_id);
-
-    // 创建第二个按钮
-    let button2_id = ctx.create(Button::new("Reset").on_click(move || {
-        let mut count = click_count.borrow_mut();
-        *count = 0;
-        println!("Reset clicked! Count reset to 0");
-    }));
-    ctx.add_child(column, button2_id);
 
     // 添加分隔文本
     let input_label = ctx.create(Text::new("TextInput Demo:").font_size(18.0));
     ctx.add_child(column, input_label);
 
-    // 创建文本输入框（带占位符）
-    let text_input = ctx.create(TextInput::new().placeholder("请输入文本...").width(300.0));
+    // 创建单行文本输入框
+    let text_input = ctx.create(TextInput::new().placeholder("单行输入...").width(300.0));
     ctx.add_child(column, text_input);
 
-    // 创建第二个文本输入框（带初始值）
-    let text_input2 = ctx.create(TextInput::new().text("Hello LieUI!").width(300.0));
-    ctx.add_child(column, text_input2);
+    // 创建多行文本输入框
+    let multiline_input = ctx.create(
+        TextInput::new()
+            .placeholder("多行输入...\n支持换行")
+            .width(300.0)
+            .height(150.0)
+            .multiline(true)
+    );
+    ctx.add_child(column, multiline_input);
 
     ctx.set_root(root);
 
