@@ -9,10 +9,11 @@ use crate::event::{Event, EventContext, EventResult, Key};
 use crate::geometry::{Color, Rect, Size};
 use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
 use crate::prelude::ViewContext;
-use crate::render::RenderNode;
+use crate::render::visual::{FillStrokeStyle, LayeredElement, Stroke, VisualElement};
 use crate::text::{TextColor, TextStyle};
 use crate::widget::Widget;
 use clipboard_rs::{Clipboard, ClipboardContext};
+use kurbo::Rect as KurboRect;
 use parley::PlainEditor;
 use parley::editing::PlainEditorDriver;
 use vello_cpu::color::AlphaColor;
@@ -76,7 +77,7 @@ impl TextInput {
         let editor = PlainEditor::new(14.0);
 
         let mut placeholder_style = TextStyle::default();
-        placeholder_style.0.brush = TextColor(NEUTRAL_400.0);
+        placeholder_style.0.brush = NEUTRAL_400;
         placeholder_style.0.font_size = 14.0;
 
         Self {
@@ -127,7 +128,11 @@ impl TextInput {
 
     /// 获取当前文本 (不包括 IME 预编辑)[reference:2]
     pub fn get_text(&self) -> String {
-        self.editor.text().into_iter().flat_map(|s| s.chars()).collect()
+        self.editor
+            .text()
+            .into_iter()
+            .flat_map(|s| s.chars())
+            .collect()
     }
 
     /// 设置文本内容（链式调用）
@@ -144,15 +149,24 @@ impl TextInput {
 
     /// 获取背景色
     fn bg_color(&self) -> Color {
-        if self.is_disabled { NEUTRAL_100 } else { NEUTRAL_WHITE }
+        if self.is_disabled {
+            NEUTRAL_100
+        } else {
+            NEUTRAL_WHITE
+        }
     }
 
     /// 获取边框色
     fn border_color(&self) -> Color {
-        if self.is_disabled { NEUTRAL_200 }
-        else if self.is_focused { THEME_PRIMARY }
-        else if self.is_hovered { NEUTRAL_600 }
-        else { NEUTRAL_300 }
+        if self.is_disabled {
+            NEUTRAL_200
+        } else if self.is_focused {
+            THEME_PRIMARY
+        } else if self.is_hovered {
+            NEUTRAL_600
+        } else {
+            NEUTRAL_300
+        }
     }
 
     /// 获取边框宽度
@@ -195,9 +209,10 @@ impl TextInput {
     /// 复制选中的文本到剪贴板
     fn copy_selection(&mut self) {
         if let Some(text) = self.editor.selected_text()
-            && let Ok(clipboard) = ClipboardContext::new() {
-                let _ = clipboard.set_text(text.to_owned());
-            }
+            && let Ok(clipboard) = ClipboardContext::new()
+        {
+            let _ = clipboard.set_text(text.to_owned());
+        }
     }
 
     /// 剪切选中的文本到剪贴板
@@ -212,12 +227,13 @@ impl TextInput {
     /// 从剪贴板粘贴文本
     fn paste_from_clipboard(&mut self) {
         if let Ok(clipboard) = ClipboardContext::new()
-            && let Ok(text) = clipboard.get_text() {
-                self.with_driver(|driver| {
-                    driver.insert_or_replace_selection(&text);
-                });
-                self.after_edit();
-            }
+            && let Ok(text) = clipboard.get_text()
+        {
+            self.with_driver(|driver| {
+                driver.insert_or_replace_selection(&text);
+            });
+            self.after_edit();
+        }
     }
 
     /// 将全局坐标转换为本地文本坐标
@@ -244,11 +260,17 @@ impl TextInput {
 impl Widget for TextInput {
     crate::impl_widget_any!(TextInput);
 
-    fn type_name(&self) -> &'static str { "TextInput" }
+    fn type_name(&self) -> &'static str {
+        "TextInput"
+    }
 
-    fn is_dirty(&self) -> bool { self.dirty }
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 
-    fn clear_dirty(&mut self) { self.dirty = false; }
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {
         // 多行模式下，高度根据内容自适应；单行模式下使用固定高度
@@ -277,116 +299,178 @@ impl Widget for TextInput {
             .with_border_radius(Some(INPUT_RADIUS))
     }
 
-    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
-        if let Some(computed) = &layout.computed {
-            let bounds = computed.padding_box;
-            // 保存内容区域边界，用于事件处理时的坐标转换
-            self.content_bounds = Some(computed.content_box);
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> Vec<LayeredElement> {
+        let mut elements = Vec::new();
 
-            let mut node = RenderNode::div(bounds)
-                .background(self.bg_color())
-                .border_color(self.border_color())
-                .border_width(self.border_width())
-                .border_radius(INPUT_RADIUS);
+        let bounds = layout.computed.padding_box;
+        // 保存内容区域边界，用于事件处理时的坐标转换
+        self.content_bounds = Some(layout.computed.content_box);
 
-            let content_bounds = computed.content_box;
+        let rect = KurboRect::new(
+            bounds.x as f64,
+            bounds.y as f64,
+            (bounds.x + bounds.width) as f64,
+            (bounds.y + bounds.height) as f64,
+        );
 
-            // 计算文本的垂直偏移量（用于光标和选区的正确位置）
-            let text_vertical_offset = if let Some(layout_ref) = self.editor.try_layout() {
-                let text_height = layout_ref.height();
-                if self.multiline {
-                    0.0 // 多行模式：顶部对齐，无偏移
-                } else {
-                    // 单行模式：垂直居中的偏移量
-                    (content_bounds.height - text_height) / 2.0
-                }
+        // 1. 输入框背景（圆角矩形）
+        let style = FillStrokeStyle {
+            fill: Some(self.bg_color()),
+            stroke: Some(Stroke {
+                color: self.border_color(),
+                width: self.border_width() as f64,
+            }),
+        };
+
+        let bg_elem = VisualElement::RoundedRect {
+            rect,
+            radius: INPUT_RADIUS as f64,
+            style,
+        };
+        elements.push(LayeredElement::default_layer(bg_elem));
+
+        let content_bounds = layout.computed.content_box;
+
+        // 计算文本的垂直偏移量（用于光标和选区的正确位置）
+        let text_vertical_offset = if let Some(layout_ref) = self.editor.try_layout() {
+            let text_height = layout_ref.height();
+            if self.multiline {
+                0.0 // 多行模式：顶部对齐，无偏移
             } else {
-                0.0
+                // 单行模式：垂直居中的偏移量
+                (content_bounds.height - text_height) / 2.0
+            }
+        } else {
+            0.0
+        };
+
+        // 2. 渲染选区高亮（在文本下方）
+        for (sel_rect, _) in self.editor.selection_geometry() {
+            let sel_rect_kurbo = KurboRect::new(
+                (content_bounds.x + sel_rect.x0 as f32) as f64,
+                (content_bounds.y + text_vertical_offset + sel_rect.y0 as f32) as f64,
+                (content_bounds.x + sel_rect.x1 as f32) as f64,
+                (content_bounds.y + text_vertical_offset + sel_rect.y1 as f32) as f64,
+            );
+
+            let sel_style = FillStrokeStyle {
+                fill: Some(Color::from_rgba8(0, 120, 212, 128)),
+                stroke: None,
             };
 
-            // 1. 首先渲染选区高亮（在文本下方）
-            for (sel_rect, _) in self.editor.selection_geometry() {
-                let sel_bounds = Rect::new(
-                    content_bounds.x + sel_rect.x0 as f32,
-                    content_bounds.y + text_vertical_offset + sel_rect.y0 as f32,
-                    sel_rect.width() as f32,
-                    sel_rect.height() as f32,
-                );
-                let sel_node = RenderNode::div(sel_bounds).background(
-                    Color(AlphaColor::from_rgba8(0, 120, 212, 128))
-                );
-                node = node.add_child(sel_node);
-            }
-
-            // 2. 然后渲染文本
-            if let Some(layout_ref) = self.editor.try_layout() {
-                let text_size = Size::new(layout_ref.width(), layout_ref.height());
-                // 多行模式：顶部对齐；单行模式：垂直居中
-                let text_y = if self.multiline {
-                    content_bounds.y
-                } else {
-                    content_bounds.y + (content_bounds.height - text_size.height) / 2.0
-                };
-                let text_bounds = Rect::new(
-                    content_bounds.x,
-                    text_y,
-                    text_size.width,
-                    text_size.height,
-                );
-
-                // 使用 PlainEditor 的 try_layout 获取布局并渲染
-                if let Some(layout) = self.editor.try_layout() {
-                    let text_node = RenderNode::text(text_bounds, layout.clone());
-                    node = node.add_child(text_node);
-                }
-            } else if self.editor.text().into_iter().flat_map(|s| s.chars()).count() == 0 {
-                // 空文本时显示占位符
-                let layout = crate::text::TextEngine::layout(
-                    &self.placeholder,
-                    &self.placeholder_style,
-                    1.0,
-                    Some(content_bounds.width)
-                );
-                let text_size = Size::new(layout.width(), layout.height());
-                // 多行模式：顶部对齐；单行模式：垂直居中
-                let text_y = if self.multiline {
-                    content_bounds.y
-                } else {
-                    content_bounds.y + (content_bounds.height - text_size.height) / 2.0
-                };
-                let text_bounds = Rect::new(
-                    content_bounds.x,
-                    text_y,
-                    text_size.width,
-                    text_size.height,
-                );
-                let text_node = RenderNode::text(text_bounds, layout);
-                node = node.add_child(text_node);
-            }
-
-            // 3. 最后渲染光标 (当获得焦点时，在文本上方)
-            if self.is_focused
-                && let Some(cursor_geometry) = self.editor.cursor_geometry(CURSOR_WIDTH) {
-                    let cursor_x = content_bounds.x + cursor_geometry.x0 as f32;
-                    // 光标 Y 位置 = 内容区域 Y + 文本垂直偏移 + 光标在文本中的 Y 位置
-                    let cursor_y = content_bounds.y + text_vertical_offset + cursor_geometry.y0 as f32;
-                    let cursor_height = cursor_geometry.height() as f32;
-
-                    let cursor_bounds = Rect::new(cursor_x, cursor_y, CURSOR_WIDTH, cursor_height);
-                    let cursor_node = RenderNode::div(cursor_bounds).background(NEUTRAL_700);
-                    node = node.add_child(cursor_node);
-                }
-
-            node
-        } else {
-            RenderNode::div(Rect::zero())
+            let sel_elem = VisualElement::Rect {
+                rect: sel_rect_kurbo,
+                style: sel_style,
+            };
+            elements.push(LayeredElement::default_layer(sel_elem));
         }
+
+        // 3. 渲染文本
+        if let Some(layout_ref) = self.editor.try_layout() {
+            let text_size = Size::new(layout_ref.width(), layout_ref.height());
+            // 多行模式：顶部对齐；单行模式：垂直居中
+            let text_y = if self.multiline {
+                content_bounds.y
+            } else {
+                content_bounds.y + (content_bounds.height - text_size.height) / 2.0
+            };
+
+            // 获取文本颜色（placeholder 颜色）
+            let text_color = self.placeholder_style.0.brush;
+
+            // 创建文本元素
+            let text_elem = VisualElement::TextRun {
+                text: self.get_text(),
+                position: kurbo::Point::new(content_bounds.x as f64, text_y as f64),
+                color: text_color,
+                font_size: self.placeholder_style.0.font_size as f64,
+                font_family: "sans-serif".to_string(),
+                rotation: 0.0,
+                max_width: Some(content_bounds.width as f64),
+                layout: self.editor.try_layout().cloned(),
+            };
+
+            elements.push(LayeredElement::default_layer(text_elem));
+        } else if self
+            .editor
+            .text()
+            .into_iter()
+            .flat_map(|s| s.chars())
+            .count()
+            == 0
+        {
+            // 空文本时显示占位符
+            let layout = crate::text::TextEngine::layout(
+                &self.placeholder,
+                &self.placeholder_style,
+                1.0,
+                Some(content_bounds.width),
+            );
+            let text_size = Size::new(layout.width(), layout.height());
+            // 多行模式：顶部对齐；单行模式：垂直居中
+            let text_y = if self.multiline {
+                content_bounds.y
+            } else {
+                content_bounds.y + (content_bounds.height - text_size.height) / 2.0
+            };
+
+            // 占位符颜色（直接使用 Color）
+            let placeholder_color = NEUTRAL_400;
+
+            // 创建占位符文本元素
+            let text_elem = VisualElement::TextRun {
+                text: self.placeholder.clone(),
+                position: kurbo::Point::new(content_bounds.x as f64, text_y as f64),
+                color: placeholder_color,
+                font_size: self.placeholder_style.0.font_size as f64,
+                font_family: "sans-serif".to_string(),
+                rotation: 0.0,
+                max_width: Some(content_bounds.width as f64),
+                layout: Some(layout),
+            };
+
+            elements.push(LayeredElement::default_layer(text_elem));
+        }
+
+        // 4. 渲染光标 (当获得焦点时，在文本上方)
+        if self.is_focused
+            && let Some(cursor_geometry) = self.editor.cursor_geometry(CURSOR_WIDTH)
+        {
+            let cursor_x = content_bounds.x + cursor_geometry.x0 as f32;
+            // 光标 Y 位置 = 内容区域 Y + 文本垂直偏移 + 光标在文本中的 Y 位置
+            let cursor_y = content_bounds.y + text_vertical_offset + cursor_geometry.y0 as f32;
+            let cursor_height = cursor_geometry.height() as f32;
+
+            let cursor_rect = KurboRect::new(
+                cursor_x as f64,
+                cursor_y as f64,
+                (cursor_x + CURSOR_WIDTH) as f64,
+                (cursor_y + cursor_height) as f64,
+            );
+
+            let cursor_style = FillStrokeStyle {
+                fill: Some(NEUTRAL_700),
+                stroke: None,
+            };
+
+            let cursor_elem = VisualElement::Rect {
+                rect: cursor_rect,
+                style: cursor_style,
+            };
+            elements.push(LayeredElement::default_layer(cursor_elem));
+        }
+
+        elements
     }
 
-    fn can_focus(&self) -> bool { !self.is_disabled }
+    fn can_focus(&self) -> bool {
+        !self.is_disabled
+    }
 
     fn handle_event(&mut self, event: &Event, ctx: &EventContext) -> EventResult {
-        if self.is_disabled { return EventResult::Continue; }
+        if self.is_disabled {
+            return EventResult::Continue;
+        }
 
         match event {
             Event::MouseEnter => { self.is_hovered = true; self.dirty = true; ctx.request_render(); }
@@ -560,9 +644,13 @@ impl Widget for TextInput {
         EventResult::Continue
     }
 
-    fn bounds(&self) -> Option<Rect> { None }
+    fn bounds(&self) -> Option<Rect> {
+        None
+    }
 }
 
 impl Default for TextInput {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

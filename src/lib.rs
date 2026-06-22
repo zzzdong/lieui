@@ -14,7 +14,6 @@ pub mod prelude {
     pub use crate::event::{Event, EventType, MouseButton};
     pub use crate::geometry::{Color, Point, Rect, Size};
     pub use crate::layout::LayoutConstraint;
-    pub use crate::render::RenderNode;
     pub use crate::widget::Widget;
     pub use crate::widgets::{Button, Column, Container, Row, Text};
 }

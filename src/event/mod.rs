@@ -6,6 +6,6 @@ pub mod types;
 
 pub use callback::{CallbackMap, EventCallback, UserCallback, UserCallbackMap};
 pub use context::{EventContext, EventEffects};
-pub use manager::EventManager;
+pub use manager::{EventManager, EventPhase, HitTestResult};
 pub use propagation::Propagation;
 pub use types::{Event, EventResult, EventType, Key, Modifiers, MouseButton};

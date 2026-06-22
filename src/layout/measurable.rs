@@ -1,8 +1,11 @@
 // src/layout/measurable.rs
 //! 可测量尺寸 trait 和实现
+//!
+//! 改进：
+//! - TextMeasure 添加 create_layout 方法，返回完整布局（不只是尺寸）
 
 use crate::geometry::Size;
-use crate::text::{TextEngine, TextStyle};
+use crate::text::{TextEngine, TextLayout, TextStyle};
 
 /// 可测量尺寸 trait
 ///
@@ -32,7 +35,7 @@ impl std::fmt::Debug for dyn Measurable {
 
 /// 文本测量器
 ///
-/// 专门用于 Text widget 的尺寸测量
+/// 专门用于 Text widget 的尺寸测量和布局创建
 #[derive(Clone)]
 pub struct TextMeasure {
     /// 文本内容
@@ -49,11 +52,18 @@ impl TextMeasure {
             style,
         }
     }
+
+    /// 创建完整的文本布局（用于缓存）
+    ///
+    /// 返回 TextLayout 对象，包含所有 glyph 位置信息
+    pub fn create_layout(&self, max_width: Option<f32>) -> TextLayout {
+        TextEngine::layout(&self.content, &self.style, 1.0, max_width)
+    }
 }
 
 impl Measurable for TextMeasure {
     fn measure(&self, max_width: Option<f32>) -> Size {
-        let layout = TextEngine::layout(&self.content, &self.style, 1.0, max_width);
+        let layout = self.create_layout(max_width);
         Size::new(layout.width(), layout.height())
     }
 

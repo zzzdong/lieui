@@ -1,214 +1,357 @@
-// src/render/engine.rs
+//! Vello CPU 渲染器 - 实现 Renderer trait
+//!
+//! 改进：
+//! - 提取 apply_fill_and_stroke 消除重复模式
+//! - 实现 push_transform/pop_transform 变换支持
+//! - 简化 draw_text 签名
 
-use kurbo::{Affine, Shape};
-use vello_cpu::{Pixmap, RenderContext, Image, ImageSource};
-use vello_cpu::peniko::{Extend, ImageSampler};
+use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape, Stroke as KurboStroke};
+use vello_cpu::peniko::color::AlphaColor;
+use vello_cpu::{Pixmap, RenderContext, Resources};
 
-use crate::render::RenderNode;
-use crate::render::node::BoxShadow;
+use crate::geometry::Color;
+use crate::render::renderer::Renderer;
+use crate::render::visual::{
+    BoxShadowDef, FillStrokeStyle, GradientDef, LayeredElement, Stroke, Transform, VisualElement,
+};
+use crate::text::TextLayout;
 
-pub struct VelloRenderer {}
+/// Vello CPU 渲染器
+///
+/// 实现 Renderer trait，将 VisualElement 渲染为位图
+pub struct VelloRenderer {
+    ctx: RenderContext,
+    resources: Resources,
+    width: u16,
+    height: u16,
+    /// 变换栈
+    transform_stack: Vec<Affine>,
+}
 
 impl VelloRenderer {
     /// 创建新的 VelloRenderer
-    pub fn new() -> Self {
-        VelloRenderer {}
+    pub fn new(width: u16, height: u16) -> Self {
+        Self {
+            ctx: RenderContext::new(width, height),
+            resources: Resources::new(),
+            width,
+            height,
+            transform_stack: Vec::new(),
+        }
     }
 
-    pub fn render(&self, root: &RenderNode, pixmap: &mut Pixmap) {
-        let mut ctx = RenderContext::new(pixmap.width(), pixmap.height());
-        self.render_node(&mut ctx, root);
-        ctx.flush();
-        ctx.render_to_pixmap(pixmap);
+    /// 渲染视觉元素序列并输出 Pixmap
+    pub fn render(&mut self, elements: &[LayeredElement]) -> Pixmap {
+        self.draw_all_layered(elements);
+
+        let mut pixmap = Pixmap::new(self.width, self.height);
+        self.ctx.render_to_pixmap(&mut self.resources, &mut pixmap);
+        pixmap
     }
 
-    fn render_node(&self, ctx: &mut RenderContext, node: &RenderNode) {
-        match node {
-            RenderNode::View { children, .. } => {
-                for child in children {
-                    self.render_node(ctx, child);
-                }
+    /// 渲染到已有的 Pixmap
+    pub fn render_to_pixmap(&mut self, elements: &[LayeredElement], pixmap: &mut Pixmap) {
+        self.draw_all_layered(elements);
+        self.ctx.render_to_pixmap(&mut self.resources, pixmap);
+    }
+
+    /// 颜色转换辅助函数
+    fn color_to_vello(color: &Color) -> AlphaColor<vello_cpu::peniko::color::Srgb> {
+        color.to_vello()
+    }
+
+    /// 设置描边样式
+    fn set_stroke_style(&mut self, stroke: &Stroke) {
+        let kurbo_stroke = KurboStroke::new(stroke.width);
+        self.ctx.set_stroke(kurbo_stroke);
+    }
+
+    /// 应用填充和描边（消除重复模式）
+    ///
+    /// # 参数
+    /// - `style`: 填充/描边样式
+    /// - `fill_fn`: 填充操作（如 `|| self.ctx.fill_path(&path)`）
+    /// - `stroke_fn`: 描边操作（如 `|| self.ctx.stroke_path(&path)`）
+    fn apply_fill_and_stroke(
+        &mut self,
+        style: &FillStrokeStyle,
+        fill_fn: impl FnOnce(&mut Self),
+        stroke_fn: impl FnOnce(&mut Self),
+    ) {
+        if let Some(fill) = &style.fill {
+            let color = Self::color_to_vello(fill);
+            self.ctx.set_paint(color);
+            fill_fn(self);
+        }
+
+        if let Some(stroke) = &style.stroke {
+            let color = Self::color_to_vello(&stroke.color);
+            self.ctx.set_paint(color);
+            self.set_stroke_style(stroke);
+            stroke_fn(self);
+        }
+    }
+
+    /// 获取当前累积变换
+    fn current_transform(&self) -> Affine {
+        self.transform_stack
+            .iter()
+            .fold(Affine::IDENTITY, |acc, t| acc * *t)
+    }
+
+    /// 应用当前变换到路径
+    fn apply_transform_to_path(&self, path: &BezPath) -> BezPath {
+        let transform = self.current_transform();
+        let mut new_path = path.clone();
+        new_path.apply_affine(transform);
+        new_path
+    }
+
+    /// 应用当前变换到矩形（返回变换后的路径）
+    fn apply_transform_to_rect(&self, rect: Rect) -> BezPath {
+        let transform = self.current_transform();
+        let mut path = BezPath::new();
+        path.move_to((rect.x0, rect.y0));
+        path.line_to((rect.x1, rect.y0));
+        path.line_to((rect.x1, rect.y1));
+        path.line_to((rect.x0, rect.y1));
+        path.close_path();
+        path.apply_affine(transform);
+        path
+    }
+}
+
+impl Renderer for VelloRenderer {
+    fn draw(&mut self, element: &VisualElement) {
+        match element {
+            VisualElement::Rect { rect, style } => {
+                self.draw_rect(*rect, style);
             }
-            RenderNode::Div {
-                bounds,
-                background,
-                border_color,
-                border_width,
-                border_radius,
-                opacity,
-                box_shadow,
-                children,
+            VisualElement::RoundedRect {
+                rect,
+                radius,
+                style,
             } => {
-                self.render_container(
-                    ctx,
-                    *bounds,
-                    background.as_ref(),
-                    border_color.as_ref(),
-                    *border_width,
-                    *border_radius,
-                    *opacity,
-                    box_shadow.as_ref(),
-                    children,
-                );
+                self.draw_rounded_rect(*rect, *radius, style);
             }
-            RenderNode::Text { bounds, layout } => {
-                self.render_text(ctx, *bounds, layout);
+            VisualElement::Circle {
+                center,
+                radius,
+                style,
+            } => {
+                self.draw_circle(*center, *radius, style);
             }
-            RenderNode::Image {
+            VisualElement::Line { start, end, style } => {
+                self.draw_line(*start, *end, style);
+            }
+            VisualElement::Polyline { points, style } => {
+                self.draw_polyline(points, style);
+            }
+            VisualElement::Path { path, style } => {
+                self.draw_path(path, style);
+            }
+            VisualElement::GradientPath {
+                path,
+                gradient,
+                stroke,
+            } => {
+                self.draw_gradient_path(path, gradient, stroke.as_ref());
+            }
+            VisualElement::TextRun {
+                position,
+                color,
+                rotation,
+                layout,
+                ..
+            } => {
+                self.draw_text(*position, *color, *rotation, layout.as_ref());
+            }
+            VisualElement::Image {
                 bounds,
                 data,
                 width,
                 height,
-                ..
-            } => {
-                self.render_image(ctx, *bounds, data, *width, *height);
-            }
-            RenderNode::Canvas { bounds, draw } => {
-                draw(ctx, *bounds);
-            }
-            RenderNode::Pixmap {
-                bounds,
-                pixmap,
                 opacity,
-                children,
             } => {
-                self.render_pixmap(ctx, *bounds, pixmap, *opacity, children);
+                self.draw_image(*bounds, data, *width, *height, *opacity);
+            }
+            VisualElement::BoxShadow {
+                rect,
+                radius,
+                shadow,
+            } => {
+                self.draw_box_shadow(*rect, *radius, shadow);
+            }
+            VisualElement::Group {
+                children,
+                transform,
+            } => {
+                if let Some(t) = transform {
+                    self.push_transform(t);
+                }
+                for layered in children {
+                    self.draw(&layered.element);
+                }
+                if transform.is_some() {
+                    self.pop_transform();
+                }
             }
         }
     }
 
-    fn render_container(
-        &self,
-        ctx: &mut RenderContext,
-        bounds: crate::geometry::Rect,
-        background: Option<&crate::geometry::Color>,
-        border_color: Option<&crate::geometry::Color>,
-        border_width: Option<f32>,
-        border_radius: Option<f32>,
-        opacity: Option<f32>,
-        box_shadow: Option<&BoxShadow>,
-        children: &[RenderNode],
-    ) {
-        let rect = kurbo::Rect::new(
-            bounds.x as f64,
-            bounds.y as f64,
-            (bounds.x + bounds.width) as f64,
-            (bounds.y + bounds.height) as f64,
+    fn draw_rect(&mut self, rect: Rect, style: &FillStrokeStyle) {
+        // 应用变换（矩形变换后可能不是矩形，用路径表示）
+        let transformed_path = self.apply_transform_to_rect(rect);
+
+        self.apply_fill_and_stroke(
+            style,
+            |renderer| renderer.ctx.fill_path(&transformed_path),
+            |renderer| renderer.ctx.stroke_path(&transformed_path),
         );
+    }
 
-        let radius = border_radius.unwrap_or(0.0) as f64;
+    fn draw_rounded_rect(&mut self, rect: Rect, radius: f64, style: &FillStrokeStyle) {
+        let path = kurbo::RoundedRect::from_rect(rect, radius).to_path(0.1);
+        let transformed_path = self.apply_transform_to_path(&path);
 
-        // 1. 绘制阴影（在背景之前）
-        if let Some(shadow) = box_shadow {
-            self.render_shadow(ctx, &rect, radius, shadow);
+        self.apply_fill_and_stroke(
+            style,
+            |renderer| renderer.ctx.fill_path(&transformed_path),
+            |renderer| renderer.ctx.stroke_path(&transformed_path),
+        );
+    }
+
+    fn draw_circle(&mut self, center: Point, radius: f64, style: &FillStrokeStyle) {
+        let circle = Circle::new(center, radius);
+        let path = circle.to_path(0.1);
+        let transformed_path = self.apply_transform_to_path(&path);
+
+        self.apply_fill_and_stroke(
+            style,
+            |renderer| renderer.ctx.fill_path(&transformed_path),
+            |renderer| renderer.ctx.stroke_path(&transformed_path),
+        );
+    }
+
+    fn draw_line(&mut self, start: Point, end: Point, style: &Stroke) {
+        let transform = self.current_transform();
+        let transformed_start = transform * start;
+        let transformed_end = transform * end;
+
+        let color = Self::color_to_vello(&style.color);
+        self.ctx.set_paint(color);
+        self.ctx.set_stroke(KurboStroke::new(style.width));
+
+        let mut path = BezPath::new();
+        path.move_to(transformed_start);
+        path.line_to(transformed_end);
+        self.ctx.stroke_path(&path);
+    }
+
+    fn draw_polyline(&mut self, points: &[Point], style: &Stroke) {
+        if points.len() < 2 {
+            return;
         }
 
-        // 2. 构建圆角路径（背景+边框+clip 共用）
-        let path = if radius > 0.0 {
-            kurbo::RoundedRect::from_rect(rect, radius).to_path(0.1)
-        } else {
-            rect.to_path(0.1)
+        let transform = self.current_transform();
+        let mut path = BezPath::new();
+        path.move_to(transform * points[0]);
+        for point in &points[1..] {
+            path.line_to(transform * *point);
+        }
+
+        let color = Self::color_to_vello(&style.color);
+        self.ctx.set_paint(color);
+        self.ctx.set_stroke(KurboStroke::new(style.width));
+        self.ctx.stroke_path(&path);
+    }
+
+    fn draw_path(&mut self, path: &BezPath, style: &FillStrokeStyle) {
+        let transformed_path = self.apply_transform_to_path(path);
+
+        self.apply_fill_and_stroke(
+            style,
+            |renderer| renderer.ctx.fill_path(&transformed_path),
+            |renderer| renderer.ctx.stroke_path(&transformed_path),
+        );
+    }
+
+    fn draw_gradient_path(
+        &mut self,
+        path: &BezPath,
+        gradient: &GradientDef,
+        stroke: Option<&Stroke>,
+    ) {
+        use vello_cpu::kurbo::Point as KurboPoint;
+        use vello_cpu::peniko::color::{ColorSpaceTag, DynamicColor, HueDirection};
+        use vello_cpu::peniko::{
+            ColorStop, ColorStops, GradientKind, InterpolationAlphaSpace, LinearGradientPosition,
+        };
+        use vello_cpu::peniko::{Extend, Gradient};
+
+        let transformed_path = self.apply_transform_to_path(path);
+
+        let stops: Vec<ColorStop> = gradient
+            .stops
+            .iter()
+            .map(|(offset, color)| ColorStop {
+                offset: *offset as f32,
+                color: DynamicColor::from_alpha_color(color.to_vello()),
+            })
+            .collect();
+
+        // 使用路径的包围盒来确定渐变坐标
+        let bounds = transformed_path.bounding_box();
+        let peniko_gradient = Gradient {
+            kind: GradientKind::Linear(LinearGradientPosition {
+                start: KurboPoint::new(bounds.x0, bounds.y0),
+                end: KurboPoint::new(bounds.x1, bounds.y0),
+            }),
+            extend: Extend::Pad,
+            interpolation_cs: ColorSpaceTag::Srgb,
+            hue_direction: HueDirection::default(),
+            interpolation_alpha_space: InterpolationAlphaSpace::Premultiplied,
+            stops: ColorStops::from(stops.as_slice()),
         };
 
-        // 3. 绘制背景
-        if let Some(bg) = background {
-            ctx.set_paint(bg.0);
-            if radius > 0.0 {
-                ctx.fill_path(&path);
-            } else {
-                ctx.fill_rect(&rect);
-            }
-        }
+        self.ctx.set_paint(peniko_gradient);
+        self.ctx.fill_path(&transformed_path);
 
-        // 4. 绘制边框
-        if let Some(bc) = border_color {
-            let width = border_width.unwrap_or(1.0) as f64;
-            ctx.set_paint(bc.0);
-            ctx.set_stroke(kurbo::Stroke::new(width));
-            if radius > 0.0 {
-                ctx.stroke_path(&path);
-            } else {
-                ctx.stroke_rect(&rect);
-            }
-        }
-
-        // 5. 设置 clip 并绘制子节点（支持 opacity layer）
-        let has_clip = radius > 0.0;
-        let has_opacity = opacity.map(|o| o < 1.0).unwrap_or(false);
-
-        if has_opacity {
-            ctx.push_opacity_layer(opacity.unwrap_or(1.0));
-        }
-
-        if has_clip {
-            ctx.push_clip_layer(&path);
-        }
-
-        for child in children {
-            self.render_node(ctx, child);
-        }
-
-        if has_clip {
-            ctx.pop_layer();
-        }
-
-        if has_opacity {
-            ctx.pop_layer();
+        if let Some(stroke) = stroke {
+            let color = Self::color_to_vello(&stroke.color);
+            self.ctx.set_paint(color);
+            self.set_stroke_style(stroke);
+            self.ctx.stroke_path(&transformed_path);
         }
     }
 
-    fn render_shadow(
-        &self,
-        ctx: &mut RenderContext,
-        rect: &kurbo::Rect,
-        radius: f64,
-        shadow: &BoxShadow,
+    /// 绘制文本（简化签名）
+    ///
+    /// # 参数
+    /// - `position`: 文本起始位置
+    /// - `color`: 文本颜色
+    /// - `rotation`: 旋转角度（弧度）
+    /// - `layout`: 预计算的文本布局
+    fn draw_text(
+        &mut self,
+        position: Point,
+        color: Color,
+        rotation: f64,
+        layout: Option<&TextLayout>,
     ) {
-        let offset_x = shadow.offset_x as f64;
-        let offset_y = shadow.offset_y as f64;
-        let blur = shadow.blur_radius as f64;
-        let spread = shadow.spread_radius as f64;
+        let Some(layout) = layout else {
+            return;
+        };
 
-        // 阴影矩形 = 原矩形 + 偏移 + 扩展
-        let shadow_rect = kurbo::Rect::new(
-            rect.x0 + offset_x - spread,
-            rect.y0 + offset_y - spread,
-            rect.x1 + offset_x + spread,
-            rect.y1 + offset_y + spread,
-        );
+        // 应用当前变换栈 + 位置/旋转
+        let base_transform = self.current_transform();
+        let transform =
+            base_transform * Affine::translate((position.x, position.y)) * Affine::rotate(rotation);
 
-        let shadow_radius = (radius + spread).max(0.0) as f32;
+        let vello_color = Self::color_to_vello(&color);
+        self.ctx.set_paint(vello_color);
 
-        ctx.set_paint(shadow.color.0);
-
-        if blur > 0.0 {
-            // 使用 vello_cpu 的模糊圆角矩形
-            ctx.fill_blurred_rounded_rect(&shadow_rect, shadow_radius, blur as f32);
-        } else if shadow_radius > 0.0 {
-            let path =
-                kurbo::RoundedRect::from_rect(shadow_rect, shadow_radius as f64).to_path(0.1);
-            ctx.fill_path(&path);
-        } else {
-            ctx.fill_rect(&shadow_rect);
-        }
-    }
-
-    fn render_text(
-        &self,
-        ctx: &mut RenderContext,
-        bounds: crate::geometry::Rect,
-        layout: &crate::text::TextLayout,
-    ) {
-        let transform = Affine::translate((bounds.x as f64, bounds.y as f64));
-
-        log::debug!(
-            "render text at ({}, {}), w: {}, h: {}",
-            bounds.x,
-            bounds.y,
-            bounds.width,
-            bounds.height
-        );
-
+        // 遍历布局中的每一行和每个 glyph run
         for line in layout.lines() {
             for item in line.items() {
                 match item {
@@ -233,11 +376,9 @@ impl VelloRenderer {
                             continue;
                         }
 
-                        let brush = glyph_run.style().brush;
-                        ctx.set_paint(brush.0);
-
                         // 使用 vello_cpu 渲染 glyph run
-                        ctx.glyph_run(font_data)
+                        self.ctx
+                            .glyph_run(&mut self.resources, font_data)
                             .font_size(run_font_size)
                             .glyph_transform(transform)
                             .fill_glyphs(glyphs.into_iter());
@@ -250,81 +391,109 @@ impl VelloRenderer {
         }
     }
 
-    fn render_image(
-        &self,
-        _ctx: &mut RenderContext,
-        _bounds: crate::geometry::Rect,
+    fn draw_image(
+        &mut self,
+        bounds: Rect,
         _data: &[u8],
         _width: u32,
         _height: u32,
+        _opacity: Option<f32>,
     ) {
+        // 应用变换（矩形变换后可能不是矩形，用路径表示）
+        let transformed_path = self.apply_transform_to_rect(bounds);
+
         // TODO: 实现图片渲染
-        // 可以使用 vello_cpu 的 draw_image 方法
+        // vello_cpu 的 ImageSource API 需要进一步确认
+        // 目前先绘制一个占位矩形
+        let placeholder_color = Self::color_to_vello(&Color::from_rgb8(200, 200, 200));
+        self.ctx.set_paint(placeholder_color);
+        self.ctx.fill_path(&transformed_path);
+
+        // 绘制对角线表示图片占位符
+        let stroke_color = Self::color_to_vello(&Color::from_rgb8(150, 150, 150));
+        self.ctx.set_paint(stroke_color);
+        self.ctx.set_stroke(KurboStroke::new(1.0));
+
+        // 变换后的对角线
+        let transform = self.current_transform();
+        let mut path = BezPath::new();
+        path.move_to((bounds.x0, bounds.y0));
+        path.line_to((bounds.x1, bounds.y1));
+        path.move_to((bounds.x1, bounds.y0));
+        path.line_to((bounds.x0, bounds.y1));
+        path.apply_affine(transform);
+        self.ctx.stroke_path(&path);
     }
 
-    fn render_pixmap(
-        &self,
-        ctx: &mut RenderContext,
-        bounds: crate::geometry::Rect,
-        pixmap: &std::rc::Rc<std::cell::RefCell<vello_cpu::Pixmap>>,
-        opacity: Option<f32>,
-        children: &[RenderNode],
-    ) {
-        use std::sync::Arc;
-
-        // 如果有子节点，先渲染子节点到 Pixmap
-        if !children.is_empty() {
-            let pixmap_ref = pixmap.borrow_mut();
-            // 创建临时 RenderContext 来渲染子节点到 Pixmap
-            let mut pixmap_ctx = vello_cpu::RenderContext::new(
-                pixmap_ref.width(),
-                pixmap_ref.height(),
-            );
-
-            // 渲染所有子节点到 Pixmap 的上下文
-            for child in children {
-                self.render_node(&mut pixmap_ctx, child);
-            }
-
-            // 将渲染结果复制到 Pixmap
-            // 注意：这里假设 pixmap_ctx 和 pixmap 有兼容的格式
-            // 实际实现可能需要更复杂的像素数据复制
-        }
-
-        let pixmap_ref = pixmap.borrow();
-
-        // 创建 Image，使用 Pixmap 作为图像源
-        let image = Image {
-            image: ImageSource::Pixmap(Arc::new(pixmap_ref.clone())),
-            sampler: ImageSampler {
-                x_extend: Extend::Pad,
-                y_extend: Extend::Pad,
-                ..Default::default()
-            },
+    fn draw_box_shadow(&mut self, rect: Rect, radius: f64, shadow: &BoxShadowDef) {
+        // 应用变换（矩形变换后可能不是矩形，用路径表示）
+        let transform = self.current_transform();
+        let rect_path = {
+            let mut path = BezPath::new();
+            path.move_to((rect.x0, rect.y0));
+            path.line_to((rect.x1, rect.y0));
+            path.line_to((rect.x1, rect.y1));
+            path.line_to((rect.x0, rect.y1));
+            path.close_path();
+            path.apply_affine(transform);
+            path
         };
+        let transformed_bounds = rect_path.bounding_box();
 
-        // 计算目标矩形
-        let dst_rect = kurbo::Rect::new(
-            bounds.x as f64,
-            bounds.y as f64,
-            (bounds.x + bounds.width) as f64,
-            (bounds.y + bounds.height) as f64,
+        let offset_x = shadow.offset_x;
+        let offset_y = shadow.offset_y;
+        let blur = shadow.blur_radius;
+        let spread = shadow.spread_radius;
+
+        // 阴影矩形 = 原矩形 + 偏移 + 扩展
+        let shadow_rect = Rect::new(
+            transformed_bounds.x0 + offset_x - spread,
+            transformed_bounds.y0 + offset_y - spread,
+            transformed_bounds.x1 + offset_x + spread,
+            transformed_bounds.y1 + offset_y + spread,
         );
 
-        // 应用透明度
-        if let Some(alpha) = opacity {
-            ctx.push_opacity_layer(alpha);
-        }
+        let shadow_radius = (radius + spread).max(0.0) as f32;
 
-        // 设置图像作为绘制内容
-        ctx.set_paint(image);
-        // 填充矩形区域，使用图像作为纹理
-        ctx.fill_rect(&dst_rect);
+        self.ctx.set_paint(Self::color_to_vello(&shadow.color));
 
-        if opacity.is_some() {
-            ctx.pop_layer();
+        if blur > 0.0 {
+            // 使用 vello_cpu 的模糊圆角矩形
+            self.ctx
+                .fill_blurred_rounded_rect(&shadow_rect, shadow_radius, blur as f32);
+        } else if shadow_radius > 0.0 {
+            let path =
+                kurbo::RoundedRect::from_rect(shadow_rect, shadow_radius as f64).to_path(0.1);
+            self.ctx.fill_path(&path);
+        } else {
+            self.ctx.fill_rect(&shadow_rect);
         }
     }
+
+    /// 推入变换（实现）
+    fn push_transform(&mut self, transform: &Transform) {
+        let affine = transform.to_affine();
+        self.transform_stack.push(affine);
+    }
+
+    /// 弹出变换（实现）
+    fn pop_transform(&mut self) {
+        self.transform_stack.pop();
+    }
+
+    fn push_layer(&mut self, opacity: Option<f32>, clip_path: Option<&BezPath>) {
+        if let Some(alpha) = opacity {
+            self.ctx.push_opacity_layer(alpha);
+        }
+
+        if let Some(path) = clip_path {
+            // 应用当前变换到裁剪路径
+            let transformed_path = self.apply_transform_to_path(path);
+            self.ctx.push_clip_layer(&transformed_path);
+        }
+    }
+
+    fn pop_layer(&mut self) {
+        self.ctx.pop_layer();
+    }
 }
-
-

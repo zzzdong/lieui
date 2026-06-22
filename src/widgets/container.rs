@@ -1,19 +1,23 @@
+//! Container Widget - 带样式的矩形容器
+//!
+//! 父子关系由 WidgetTree 集中管理，Container 不再维护 children 列表
+
 use crate::core::WidgetId;
 use crate::geometry::{Color, Rect, Size};
 use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
 use crate::prelude::ViewContext;
-use crate::render::{BoxShadow, RenderNode};
+use crate::render::visual::{BoxShadowDef, FillStrokeStyle, LayeredElement, Stroke, VisualElement};
 use crate::widget::Widget;
+use kurbo::Rect as KurboRect;
 
 pub struct Container {
     bounds: Rect,
-    children: Vec<WidgetId>,
     background: Option<Color>,
     border_color: Option<Color>,
     border_width: f32,
     border_radius: f32,
     padding: f32,
-    box_shadow: Option<BoxShadow>,
+    box_shadow: Option<BoxShadowDef>,
 }
 
 impl Default for Container {
@@ -26,7 +30,6 @@ impl Container {
     pub fn new() -> Self {
         Self {
             bounds: Rect::zero(),
-            children: Vec::new(),
             background: None,
             border_color: None,
             border_width: 0.0,
@@ -57,7 +60,7 @@ impl Container {
         self
     }
 
-    pub fn box_shadow(mut self, shadow: BoxShadow) -> Self {
+    pub fn box_shadow(mut self, shadow: BoxShadowDef) -> Self {
         self.box_shadow = Some(shadow);
         self
     }
@@ -81,40 +84,55 @@ impl Widget for Container {
         })
     }
 
-    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
-        if let Some(computed) = &layout.computed {
-            let border_box = computed.border_box;
-            let mut node = RenderNode::div(border_box);
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> Vec<LayeredElement> {
+        let mut elements = Vec::new();
 
-            if let Some(bg) = &self.background {
-                node = node.background(*bg);
-            }
-            if let Some(bc) = &self.border_color {
-                node = node.border_color(*bc).border_width(self.border_width);
-            }
-            if self.border_radius > 0.0 {
-                node = node.border_radius(self.border_radius);
-            }
-            if let Some(shadow) = &self.box_shadow {
-                node = node.box_shadow(shadow.clone());
-            }
+        let border_box = layout.computed.border_box;
+        let rect = KurboRect::new(
+            border_box.x as f64,
+            border_box.y as f64,
+            (border_box.x + border_box.width) as f64,
+            (border_box.y + border_box.height) as f64,
+        );
 
-            node
+        // 创建填充/描边样式
+        let style = FillStrokeStyle {
+            fill: self.background,
+            stroke: if self.border_color.is_some() {
+                Some(Stroke {
+                    color: self.border_color.unwrap(),
+                    width: self.border_width as f64,
+                })
+            } else {
+                None
+            },
+        };
+
+        // 根据是否有边框半径选择矩形类型
+        let background_elem = if self.border_radius > 0.0 {
+            VisualElement::RoundedRect {
+                rect,
+                radius: self.border_radius as f64,
+                style,
+            }
         } else {
-            RenderNode::div(Rect::zero())
+            VisualElement::Rect { rect, style }
+        };
+
+        elements.push(LayeredElement::default_layer(background_elem));
+
+        // 添加阴影
+        if let Some(shadow) = &self.box_shadow {
+            let shadow_def = shadow.clone();
+            let shadow_elem = VisualElement::BoxShadow {
+                rect,
+                radius: self.border_radius as f64,
+                shadow: shadow_def,
+            };
+            elements.push(LayeredElement::default_layer(shadow_elem));
         }
-    }
 
-    fn children(&self) -> &[WidgetId] {
-        &self.children
-    }
-
-    fn add_child(&mut self, child_id: WidgetId) {
-        self.children.push(child_id);
-    }
-
-    fn remove_child(&mut self, child_id: WidgetId) {
-        self.children.retain(|&id| id != child_id);
+        elements
     }
 
     fn is_container(&self) -> bool {

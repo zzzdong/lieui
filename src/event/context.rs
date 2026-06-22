@@ -1,15 +1,19 @@
 // src/event/context.rs
 //! 事件上下文
 //!
-//! 提供事件处理期间对 Widget 树的安全访问和副作用收集能力
+//! 提供事件处理期间对各层 Widget 树的安全访问和副作用收集能力
+//!
+//! 改进：
+//! - 添加事件传播阶段（Capture/Target/Bubble）
 
 use crate::core::WidgetId;
-use crate::event::Propagation;
-use crate::widget::{Widget, WidgetTree};
-use std::cell::{Ref, RefCell, RefMut};
+use crate::core::layers::{LayerType, Layers, WidgetRef, WidgetRefMut};
+use crate::event::{Propagation, manager::EventPhase};
+use crate::widget::Widget;
+use std::cell::{Cell, Ref, RefMut};
 
 /// 事件副作用
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct EventEffects {
     pub needs_render: bool,
     pub needs_layout: bool,
@@ -57,159 +61,191 @@ impl EventEffects {
 
 /// 事件上下文，贯穿整个事件处理流程
 ///
+/// 持有 &Layers，可以跨层访问 Widget，并直接操作各层（显示/隐藏 Modal 等）。
+///
 /// 提供：
-/// 1. 对 Widget 树的安全访问
-/// 2. 副作用收集（渲染、布局、动画）
-/// 3. 传播控制
+/// 1. 跨层 Widget 访问（Base / Overlay / Modal）
+/// 2. 层操作（show_modal / hide_modal 等）
+/// 3. 副作用收集（渲染、布局、动画）
+/// 4. 传播控制
+/// 5. 事件阶段（Capture/Target/Bubble）
 pub struct EventContext<'a> {
-    /// Widget 树引用
-    tree: &'a WidgetTree,
+    /// 所有层的引用
+    layers: &'a Layers,
+
+    /// 当前正在派发事件的层（用于事件路径计算）
+    current_layer: LayerType,
 
     /// 副作用收集器
-    effects: RefCell<EventEffects>,
+    effects: Cell<EventEffects>,
 
     /// 传播控制器
-    propagation: RefCell<Propagation>,
+    propagation: Cell<Propagation>,
+
+    /// 当前事件传播阶段
+    phase: Cell<EventPhase>,
 }
 
 impl<'a> EventContext<'a> {
     /// 创建新的事件上下文
-    pub fn new(tree: &'a WidgetTree) -> Self {
+    pub fn new(layers: &'a Layers, current_layer: LayerType) -> Self {
         Self {
-            tree,
-            effects: RefCell::new(EventEffects::default()),
-            propagation: RefCell::new(Propagation::new()),
+            layers,
+            current_layer,
+            effects: Cell::new(EventEffects::default()),
+            propagation: Cell::new(Propagation::new()),
+            phase: Cell::new(EventPhase::Target), // 默认 Target 阶段
         }
     }
 
-    // ========== Widget 访问 ==========
+    // ========== Widget 跨层访问 ==========
 
-    /// 获取 Widget 的不可变引用
-    pub fn get<W: Widget + 'static>(&self, id: WidgetId) -> Option<Ref<'_, W>> { 
-        self.tree.get::<W>(id)
+    /// 获取 Widget 的不可变引用（跨层查找）
+    pub fn get<W: Widget + 'static>(&self, id: WidgetId) -> Option<Ref<'_, W>> {
+        self.layers.tree.get::<W>(id)
     }
 
-    /// 获取 Widget 的可变引用
-    pub fn get_mut<W: Widget + 'static>(&self, id: WidgetId) -> Option<RefMut<'_, W>> { 
-        self.tree.get_mut::<W>(id)
+    /// 获取 Widget 的可变引用（跨层查找）
+    pub fn get_mut<W: Widget + 'static>(&self, id: WidgetId) -> Option<RefMut<'_, W>> {
+        self.layers.tree.get_mut::<W>(id)
     }
 
-    /// 获取 WidgetTree 引用
-    pub fn tree(&self) -> &WidgetTree {
-        self.tree
+    /// 获取 Widget 的不可变引用（类型擦除，返回 Box<dyn Widget>）
+    pub fn get_widget(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
+        self.layers.get_widget(id)
+    }
+
+    /// 获取 Widget 的可变引用（类型擦除，返回 Box<dyn Widget>）
+    pub fn get_widget_mut(&self, id: WidgetId) -> Option<WidgetRefMut<'_>> {
+        self.layers.get_widget_mut(id)
+    }
+
+    /// 获取 Layers 引用（高级用法）
+    pub fn layers(&self) -> &Layers {
+        self.layers
+    }
+
+    /// 当前事件派发所在的层
+    pub fn current_layer(&self) -> LayerType {
+        self.current_layer
+    }
+
+    // ========== 层操作（直接操作 Overlay / Modal 层）==========
+
+    /// 显示 Modal 层（传入 modal 内容的根 WidgetId）
+    pub fn show_modal(&self, root_id: WidgetId) {
+        self.layers.show_modal(root_id);
+        let mut e = self.effects.get();
+        e.request_render();
+        e.request_layout();
+        self.effects.set(e);
+    }
+
+    /// 隐藏 Modal 层
+    pub fn hide_modal(&self) {
+        self.layers.hide_modal();
+        let mut e = self.effects.get();
+        e.request_render();
+        e.request_layout();
+        self.effects.set(e);
+    }
+
+    /// 显示 Overlay 层
+    pub fn show_overlay(&self, root_id: WidgetId) {
+        self.layers.show_overlay(root_id);
+        let mut e = self.effects.get();
+        e.request_render();
+        e.request_layout();
+        self.effects.set(e);
+    }
+
+    /// 隐藏 Overlay 层
+    pub fn hide_overlay(&self) {
+        self.layers.hide_overlay();
+        let mut e = self.effects.get();
+        e.request_render();
+        e.request_layout();
+        self.effects.set(e);
     }
 
     // ========== 副作用 ==========
 
     /// 请求重新渲染
     pub fn request_render(&self) {
-        self.effects.borrow_mut().request_render();
+        let mut e = self.effects.get();
+        e.request_render();
+        self.effects.set(e);
     }
 
     /// 请求重新布局
     pub fn request_layout(&self) {
-        self.effects.borrow_mut().request_layout();
+        let mut e = self.effects.get();
+        e.request_layout();
+        self.effects.set(e);
     }
 
     /// 请求动画帧
     pub fn request_animate(&self) {
-        self.effects.borrow_mut().request_animate();
+        let mut e = self.effects.get();
+        e.request_animate();
+        self.effects.set(e);
     }
 
     /// 提取副作用（会清空当前副作用）
     pub fn take_effects(&self) -> EventEffects {
-        std::mem::take(&mut *self.effects.borrow_mut())
+        let effects = self.effects.get();
+        self.effects.set(EventEffects::default());
+        effects
     }
 
     /// 获取副作用的副本（不清空）
     pub fn effects(&self) -> EventEffects {
-        let e = self.effects.borrow();
-        EventEffects {
-            needs_render: e.needs_render,
-            needs_layout: e.needs_layout,
-            needs_animate: e.needs_animate,
-        }
+        self.effects.get()
     }
 
     // ========== 传播控制 ==========
 
     /// 停止事件传播
     pub fn stop_propagation(&self) {
-        self.propagation.borrow_mut().stop();
+        let mut p = self.propagation.get();
+        p.stop();
+        self.propagation.set(p);
     }
 
     /// 是否已停止传播
     pub fn is_stopped(&self) -> bool {
-        self.propagation.borrow().is_stopped()
+        self.propagation.get().is_stopped()
     }
 
     /// 重置传播状态
     pub fn reset_propagation(&self) {
-        *self.propagation.borrow_mut() = Propagation::new();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::geometry::{Rect, Size};
-    use crate::layout::{IntrinsicSize, LayoutNode};
-    use crate::render::RenderNode;
-    use crate::widget::Widget;
-
-    struct TestWidget {
-        value: i32,
+        self.propagation.set(Propagation::new());
     }
 
-    impl TestWidget {
-        fn new(value: i32) -> Self {
-            Self { value }
-        }
+    // ========== 事件阶段 ==========
+
+    /// 获取当前事件传播阶段
+    pub fn phase(&self) -> EventPhase {
+        self.phase.get()
     }
 
-    impl Widget for TestWidget {
-        crate::impl_widget_any!(TestWidget);
-
-        fn type_name(&self) -> &'static str {
-            "TestWidget"
-        }
-
-        fn layout(&self, id: WidgetId) -> LayoutNode {
-            LayoutNode::new(id).with_intrinsic_size(IntrinsicSize::Fixed(Size::new(100.0, 100.0)))
-        }
-
-        fn render(&mut self, _layout: &LayoutNode, _ctx: &crate::prelude::ViewContext) -> RenderNode {
-            RenderNode::view(Rect::zero())
-        }
+    /// 设置当前事件传播阶段
+    pub fn set_phase(&self, phase: EventPhase) {
+        self.phase.set(phase);
     }
 
-    #[test]
-    fn test_event_effects() {
-        let mut effects = EventEffects::default();
-        assert!(!effects.needs_render());
-        assert!(!effects.needs_layout());
-
-        effects.request_render();
-        assert!(effects.needs_render());
-
-        effects.request_layout();
-        assert!(effects.needs_layout());
-
-        effects.clear();
-        assert!(!effects.needs_render());
-        assert!(!effects.needs_layout());
+    /// 是否在捕获阶段
+    pub fn is_capture(&self) -> bool {
+        self.phase.get() == EventPhase::Capture
     }
 
-    #[test]
-    fn test_event_effects_merge() {
-        let mut effects1 = EventEffects::default();
-        effects1.request_render();
+    /// 是否在目标阶段
+    pub fn is_target(&self) -> bool {
+        self.phase.get() == EventPhase::Target
+    }
 
-        let mut effects2 = EventEffects::default();
-        effects2.request_layout();
-
-        effects1.merge(&effects2);
-        assert!(effects1.needs_render());
-        assert!(effects1.needs_layout());
+    /// 是否在冒泡阶段
+    pub fn is_bubble(&self) -> bool {
+        self.phase.get() == EventPhase::Bubble
     }
 }

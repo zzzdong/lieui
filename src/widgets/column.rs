@@ -1,17 +1,18 @@
 // src/widgets/column.rs
 
 //! Column Widget - 垂直布局容器
+//!
+//! 父子关系由 WidgetTree 集中管理，Column 不再维护 children 列表
 
 use crate::core::WidgetId;
 use crate::geometry::Rect;
 use crate::layout::{AlignItems, FlexStyle, JustifyContent, LayoutNode};
 use crate::prelude::ViewContext;
-use crate::render::RenderNode;
+use crate::render::visual::LayeredElement;
 use crate::widget::Widget;
 
 pub struct Column {
     bounds: Rect,
-    children: Vec<WidgetId>,
     pub(crate) spacing: f32,
     /// 是否扩展填满父容器
     expand: bool,
@@ -23,7 +24,6 @@ impl Column {
     pub fn new() -> Self {
         Self {
             bounds: Rect::zero(),
-            children: Vec::new(),
             spacing: 0.0,
             expand: false,
             justify: JustifyContent::Center,
@@ -72,24 +72,9 @@ impl Widget for Column {
         node
     }
 
-    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
-        if let Some(computed) = &layout.computed {
-            RenderNode::view(computed.content_box)
-        } else {
-            RenderNode::view(Rect::zero())
-        }
-    }
-
-    fn children(&self) -> &[WidgetId] {
-        &self.children
-    }
-
-    fn add_child(&mut self, child_id: WidgetId) {
-        self.children.push(child_id);
-    }
-
-    fn remove_child(&mut self, child_id: WidgetId) {
-        self.children.retain(|&id| id != child_id);
+    fn render(&mut self, _layout: &LayoutNode, _ctx: &ViewContext) -> Vec<LayeredElement> {
+        // Column 是布局容器，本身不渲染任何内容
+        Vec::new()
     }
 
     fn is_container(&self) -> bool {

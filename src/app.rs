@@ -30,7 +30,8 @@ pub struct App {
 
 impl App {
     pub fn new(view: ViewContext) -> Self {
-        let renderer = VelloRenderer::new();
+        // 先使用默认大小创建渲染器，后续会在 init_window 中重新创建
+        let renderer = VelloRenderer::new(800, 600);
 
         Self {
             view,
@@ -75,6 +76,9 @@ impl App {
             .set_viewport(Size::new(size.width as f32, size.height as f32));
         self.pixmap = Pixmap::new(size.width as u16, size.height as u16);
 
+        // 使用正确的窗口大小重新创建渲染器
+        self.renderer = VelloRenderer::new(size.width as u16, size.height as u16);
+
         // Initial render
         self.render_and_present();
     }
@@ -84,15 +88,23 @@ impl App {
             return;
         }
 
+        // 确保 pixmap 尺寸与 surface 匹配（在借用 surface 之前）
+        self.ensure_pixmap_size();
+
         let _window = self.window.as_ref().unwrap();
         let surface = self.surface.as_mut().unwrap();
 
-        // Render to pixmap
-        if let Some(render_tree) = self.view.render() {
-            if self.view.debug_render_tree {
-                log::debug!("{}", render_tree.to_xml(0));
-            }
-            self.renderer.render(&render_tree, &mut self.pixmap);
+        // Render to pixmap using new VisualElement API
+        let elements = self.view.render();
+
+        if self.view.debug_render_tree {
+            // 暂时禁用 to_xml，因为现在返回的是 Vec<VisualElement>
+            // log::debug!("{}", ...);
+        }
+
+        // 使用新的渲染器 API
+        if !elements.is_empty() {
+            self.pixmap = self.renderer.render(&elements);
         }
 
         // Present to window - use pixmap dimensions to ensure correct mapping
@@ -149,17 +161,35 @@ impl App {
     fn update_ime_position(&self) {
         if let Some(window) = self.window.as_ref()
             && let Some(focused) = self.view.focused_widget()
-                && let Some(bounds) = self.view.widget_bounds(focused) {
-                    // 设置 IME 位置到 widget 的左下角
-                    let position = winit::dpi::LogicalPosition::new(
-                        bounds.x as f64,
-                        (bounds.y + bounds.height) as f64,
-                    );
-                    window.set_ime_cursor_area(
-                        position,
-                        winit::dpi::LogicalSize::new(bounds.width as f64, bounds.height as f64),
-                    );
-                }
+            && let Some(bounds) = self.view.widget_bounds(focused)
+        {
+            // 设置 IME 位置到 widget 的左下角
+            let position = winit::dpi::LogicalPosition::new(
+                bounds.x as f64,
+                (bounds.y + bounds.height) as f64,
+            );
+            window.set_ime_cursor_area(
+                position,
+                winit::dpi::LogicalSize::new(bounds.width as f64, bounds.height as f64),
+            );
+        }
+    }
+
+    /// 确保 pixmap 尺寸与 surface 匹配
+    fn ensure_pixmap_size(&mut self) {
+        if let Some(surface) = self.surface.as_mut() {
+            let buffer = surface.buffer_mut().unwrap();
+            let (width, height) = (buffer.width().get(), buffer.height().get());
+            drop(buffer);
+
+            let expected_width = width as u16;
+            let expected_height = height as u16;
+
+            if self.pixmap.width() != expected_width || self.pixmap.height() != expected_height {
+                self.pixmap = Pixmap::new(expected_width, expected_height);
+                self.renderer = VelloRenderer::new(expected_width, expected_height);
+            }
+        }
     }
 }
 

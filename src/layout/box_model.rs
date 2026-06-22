@@ -95,6 +95,18 @@ pub struct ComputedLayout {
     pub hit_shape: Option<RoundedRect>,
 }
 
+impl Default for ComputedLayout {
+    fn default() -> Self {
+        Self {
+            margin_box: Rect::zero(),
+            border_box: Rect::zero(),
+            padding_box: Rect::zero(),
+            content_box: Rect::zero(),
+            hit_shape: None,
+        }
+    }
+}
+
 impl ComputedLayout {
     /// 获取内容边界（便捷方法）
     pub fn bounds(&self) -> Rect {

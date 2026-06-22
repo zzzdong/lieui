@@ -14,10 +14,10 @@ use crate::event::{Event, EventContext, EventResult, EventType, UserCallbackMap}
 use crate::geometry::{Color, Rect, Size};
 use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
 use crate::prelude::ViewContext;
-use crate::render::RenderNode;
-use crate::text::TextColor;
+use crate::render::visual::{FillStrokeStyle, LayeredElement, Stroke, VisualElement};
 use crate::widget::Widget;
 use crate::widgets::text::Text;
+use kurbo::Rect as KurboRect;
 use vello_cpu::color::AlphaColor;
 
 // ============================================
@@ -82,7 +82,7 @@ pub struct Button {
 impl Button {
     /// 创建新的 Button（默认样式）
     pub fn new(text: impl Into<String>) -> Self {
-        let text_widget = Text::new(text).text_color(TextColor(NEUTRAL_700.0));
+        let text_widget = Text::new(text).text_color(NEUTRAL_700);
 
         Self {
             bounds: Rect::zero(),
@@ -100,7 +100,7 @@ impl Button {
     pub fn primary(text: impl Into<String>) -> Self {
         let mut button = Self::new(text);
         button.variant = ButtonVariant::Primary;
-        button.text_widget = button.text_widget.text_color(TextColor(NEUTRAL_WHITE.0));
+        button.text_widget = button.text_widget.text_color(NEUTRAL_WHITE);
         button
     }
 
@@ -241,15 +241,18 @@ impl Widget for Button {
     }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {
-        // 创建文本子节点 - Text 只是视觉内容，不参与事件交互
-        let text_id = WidgetId::new();
-        let text_node = self.text_widget.layout(text_id).with_interactive(false);
-
-        // 计算按钮尺寸
-        let text_size = self.text_widget.measure(None);
+        // 使用 TextMeasure 直接测量文本尺寸（不依赖缓存）
+        use crate::layout::{Measurable, TextMeasure};
+        let measure = TextMeasure::new(
+            self.text_widget.text_content(),
+            self.text_widget.style().clone(),
+        );
+        let text_size = measure.measure(None);
         let width = text_size.width + BUTTON_PAD_X * 2.0;
         let height = BUTTON_HEIGHT;
 
+        // Button 不创建内部子节点的 LayoutNode
+        // 文本布局在 render 时处理
         LayoutNode::new(id)
             .with_box_style(BoxStyle {
                 padding: EdgeInsets::symmetric(BUTTON_PAD_X, BUTTON_PAD_Y),
@@ -258,46 +261,74 @@ impl Widget for Button {
                 ..Default::default()
             })
             .with_fixed_size(Size::new(width, height))
-            .add_child(text_node)
     }
 
-    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
-        if let Some(computed) = &layout.computed {
-            // 使用 padding_box 作为按钮背景边界
-            let bounds = computed.padding_box;
+    fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> Vec<LayeredElement> {
+        let mut elements = Vec::new();
 
-            // 按钮背景
-            let mut node = RenderNode::div(bounds)
-                .background(self.bg_color())
-                .border_radius(BUTTON_RADIUS);
+        // 使用 padding_box 作为按钮背景边界
+        let bounds = layout.computed.padding_box;
+        let rect = KurboRect::new(
+            bounds.x as f64,
+            bounds.y as f64,
+            (bounds.x + bounds.width) as f64,
+            (bounds.y + bounds.height) as f64,
+        );
 
-            // 幽灵按钮添加边框
-            if self.variant == ButtonVariant::Ghost && !self.is_disabled {
-                node = node.border_color(NEUTRAL_300).border_width(1.0);
-            }
+        // 按钮背景样式
+        let style = FillStrokeStyle {
+            fill: Some(self.bg_color()),
+            stroke: if self.variant == ButtonVariant::Ghost && !self.is_disabled {
+                Some(Stroke {
+                    color: NEUTRAL_300,
+                    width: 1.0,
+                })
+            } else {
+                None
+            },
+        };
 
-            // 渲染文本 - 在按钮内容区域居中
-            let content_bounds = computed.content_box;
-            let text_layout = self.text_widget.do_layout(Some(content_bounds.width));
-            let text_size = Size::new(text_layout.width(), text_layout.height());
+        // 按钮背景（圆角矩形）
+        let bg_elem = VisualElement::RoundedRect {
+            rect,
+            radius: BUTTON_RADIUS as f64,
+            style,
+        };
+        elements.push(LayeredElement::default_layer(bg_elem));
 
-            // 计算文本居中位置
-            let text_x = (content_bounds.width - text_size.width) / 2.0;
-            let text_y = (content_bounds.height - text_size.height) / 2.0;
-            let text_bounds = Rect::new(
-                content_bounds.x + text_x,
-                content_bounds.y + text_y,
-                text_size.width,
-                text_size.height,
-            );
+        // 渲染文本 - 在按钮内容区域居中
+        let content_bounds = layout.computed.content_box;
+        let text_layout = self
+            .text_widget
+            .get_or_create_layout(Some(content_bounds.width))
+            .clone();
+        let text_size = Size::new(text_layout.width(), text_layout.height());
 
-            let text_node = RenderNode::text(text_bounds, text_layout);
-            node = node.add_child(text_node);
+        // 计算文本居中位置
+        let text_x = (content_bounds.width - text_size.width) / 2.0;
+        let text_y = (content_bounds.height - text_size.height) / 2.0;
 
-            node
-        } else {
-            RenderNode::div(Rect::zero())
-        }
+        // 获取文本颜色
+        let text_color = self.text_color();
+
+        // 创建文本元素
+        let text_elem = VisualElement::TextRun {
+            text: self.text_widget.text_content().to_string(),
+            position: kurbo::Point::new(
+                (content_bounds.x + text_x) as f64,
+                (content_bounds.y + text_y) as f64,
+            ),
+            color: text_color,
+            font_size: self.text_widget.get_font_size() as f64,
+            font_family: "sans-serif".to_string(),
+            rotation: 0.0,
+            max_width: Some(content_bounds.width as f64),
+            layout: Some(text_layout),
+        };
+
+        elements.push(LayeredElement::default_layer(text_elem));
+
+        elements
     }
 
     fn can_focus(&self) -> bool {
@@ -314,8 +345,7 @@ impl Widget for Button {
                 if !self.is_hovered {
                     self.is_hovered = true;
                     self.dirty = true;
-                    self.text_widget
-                        .set_text_color(crate::text::TextColor(self.text_color().0));
+                    self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
                 self.fire_callbacks(EventType::MouseEnter, ctx);
@@ -325,8 +355,7 @@ impl Widget for Button {
                     self.is_hovered = false;
                     self.is_pressed = false;
                     self.dirty = true;
-                    self.text_widget
-                        .set_text_color(crate::text::TextColor(self.text_color().0));
+                    self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
                 self.fire_callbacks(EventType::MouseLeave, ctx);
@@ -335,8 +364,7 @@ impl Widget for Button {
                 if !self.is_pressed {
                     self.is_pressed = true;
                     self.dirty = true;
-                    self.text_widget
-                        .set_text_color(crate::text::TextColor(self.text_color().0));
+                    self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
                 self.fire_callbacks(EventType::MouseDown, ctx);
@@ -345,8 +373,7 @@ impl Widget for Button {
                 if self.is_pressed {
                     self.is_pressed = false;
                     self.dirty = true;
-                    self.text_widget
-                        .set_text_color(crate::text::TextColor(self.text_color().0));
+                    self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
                 self.fire_callbacks(EventType::MouseUp, ctx);

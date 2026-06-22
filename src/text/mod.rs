@@ -3,7 +3,13 @@
 use parley::style::{FontFamily, FontStyle, FontWeight, LineHeight};
 use parley::{FontContext, LayoutContext, RangedBuilder};
 use std::cell::RefCell;
-use vello_cpu::color::{AlphaColor, Srgb};
+
+use crate::geometry::Color;
+
+// TextColor 现在是 geometry::Color 的类型别名
+// parley 的 Brush trait 是 blanket implementation: Clone + PartialEq + Default + Debug
+// geometry::Color 已经满足所有这些要求
+pub type TextColor = Color;
 
 thread_local! {
     /// 全局字体上下文 - 线程本地存储
@@ -23,11 +29,11 @@ pub fn with_layout_context<R, F: FnOnce(&mut LayoutContext<TextColor>) -> R>(f: 
 }
 
 /// 同时访问两个上下文的便捷函数
-pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<TextColor>) -> R>(f: F) -> R {
+pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<TextColor>) -> R>(
+    f: F,
+) -> R {
     FONT_CONTEXT.with(|font_cx| {
-        LAYOUT_CONTEXT.with(|layout_cx| {
-            f(&mut font_cx.borrow_mut(), &mut layout_cx.borrow_mut())
-        })
+        LAYOUT_CONTEXT.with(|layout_cx| f(&mut font_cx.borrow_mut(), &mut layout_cx.borrow_mut()))
     })
 }
 
@@ -38,12 +44,7 @@ impl TextEngine {
         Self
     }
 
-    pub fn layout(
-        text: &str,
-        style: &TextStyle,
-        scale: f32,
-        max_width: Option<f32>,
-    ) -> TextLayout {
+    pub fn layout(text: &str, style: &TextStyle, scale: f32, max_width: Option<f32>) -> TextLayout {
         with_text_contexts(|font_cx, layout_cx| {
             let mut builder = layout_cx.ranged_builder(font_cx, text, scale, true);
 
@@ -66,86 +67,6 @@ impl TextEngine {
 impl Default for TextEngine {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ========== TextColor ==========
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TextColor(pub AlphaColor<Srgb>);
-
-impl TextColor {
-    pub const BLACK: Self = Self(AlphaColor::BLACK);
-    pub const WHITE: Self = Self(AlphaColor::WHITE);
-    pub const RED: Self = Self(AlphaColor::from_rgb8(255, 0, 0));
-    pub const GREEN: Self = Self(AlphaColor::from_rgb8(0, 128, 0));
-    pub const BLUE: Self = Self(AlphaColor::from_rgb8(0, 0, 255));
-
-    pub fn from_hex(hex: &str) -> Option<Self> {
-        parse_color(hex).map(TextColor)
-    }
-
-    pub fn from_rgb8(r: u8, g: u8, b: u8) -> Self {
-        Self(AlphaColor::from_rgb8(r, g, b))
-    }
-
-    pub fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self(AlphaColor::from_rgba8(r, g, b, a))
-    }
-
-    pub fn inner(&self) -> AlphaColor<Srgb> {
-        self.0
-    }
-}
-
-impl Default for TextColor {
-    fn default() -> Self {
-        Self(AlphaColor::BLACK)
-    }
-}
-
-// ========== 颜色解析 ==========
-
-fn parse_color(hex: &str) -> Option<AlphaColor<Srgb>> {
-    let hex = hex.trim_start_matches('#');
-
-    // 命名颜色
-    match hex.to_lowercase().as_str() {
-        "black" => return Some(AlphaColor::from_rgb8(0, 0, 0)),
-        "white" => return Some(AlphaColor::from_rgb8(255, 255, 255)),
-        "red" => return Some(AlphaColor::from_rgb8(255, 0, 0)),
-        "green" => return Some(AlphaColor::from_rgb8(0, 128, 0)),
-        "blue" => return Some(AlphaColor::from_rgb8(0, 0, 255)),
-        "yellow" => return Some(AlphaColor::from_rgb8(255, 255, 0)),
-        "cyan" => return Some(AlphaColor::from_rgb8(0, 255, 255)),
-        "magenta" => return Some(AlphaColor::from_rgb8(255, 0, 255)),
-        "gray" | "grey" => return Some(AlphaColor::from_rgb8(128, 128, 128)),
-        "transparent" => return Some(AlphaColor::from_rgba8(0, 0, 0, 0)),
-        _ => {}
-    }
-
-    // 十六进制颜色
-    match hex.len() {
-        6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some(AlphaColor::from_rgb8(r, g, b))
-        }
-        8 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            Some(AlphaColor::from_rgba8(r, g, b, a))
-        }
-        3 => {
-            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-            Some(AlphaColor::from_rgb8(r, g, b))
-        }
-        _ => None,
     }
 }
 

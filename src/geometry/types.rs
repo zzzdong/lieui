@@ -194,6 +194,16 @@ impl Color {
     pub const BLUE: Self = Self(AlphaColor::from_rgb8(0, 0, 255));
     pub const TRANSPARENT: Self = Self(AlphaColor::from_rgba8(0, 0, 0, 0));
 
+    /// 从 RGB 值创建颜色（0-255）
+    pub const fn from_rgb8(r: u8, g: u8, b: u8) -> Self {
+        Self(AlphaColor::from_rgb8(r, g, b))
+    }
+
+    /// 从 RGBA 值创建颜色（0-255）
+    pub const fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self(AlphaColor::from_rgba8(r, g, b, a))
+    }
+
     pub fn rgb(r: f32, g: f32, b: f32) -> Self {
         Self(AlphaColor::from_rgb8(
             (r * 255.0) as u8,
@@ -251,11 +261,31 @@ impl Color {
             (alpha * 255.0) as u8,
         ))
     }
+
+    /// 获取内部 AlphaColor
+    pub fn inner(&self) -> AlphaColor<Srgb> {
+        self.0
+    }
+
+    /// 转换为 vello_cpu 颜色（用于渲染）
+    pub fn to_vello(&self) -> AlphaColor<Srgb> {
+        self.0
+    }
 }
 
 impl Default for Color {
     fn default() -> Self {
         Self::BLACK
+    }
+}
+
+/// 从十六进制颜色字符串直接转换
+///
+/// 支持 `"#RRGGBB"`、`"#RRGGBBAA"`、`"#RGB"` 格式。
+/// 解析失败时回退为黑色。
+impl From<&str> for Color {
+    fn from(hex: &str) -> Self {
+        Self::from_hex(hex).unwrap_or(Self::BLACK)
     }
 }
 
