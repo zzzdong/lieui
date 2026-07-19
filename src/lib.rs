@@ -4,6 +4,7 @@ pub mod event;
 pub mod geometry;
 pub mod layout;
 pub mod render;
+pub mod state;
 pub mod text;
 pub mod widget;
 pub mod widgets;
@@ -14,8 +15,11 @@ pub mod prelude {
     pub use crate::event::{Event, EventType, MouseButton};
     pub use crate::geometry::{Color, Point, Rect, Size};
     pub use crate::layout::LayoutConstraint;
+    pub use crate::state::State;
     pub use crate::widget::Widget;
-    pub use crate::widgets::{Button, Column, Container, Row, Text};
+    pub use crate::widgets::{
+        Button, Checkbox, Column, Container, Divider, ProgressBar, Row, Slider, Switch, Text,
+    };
 }
 
 #[cfg(test)]

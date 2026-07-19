@@ -406,11 +406,16 @@ impl EventManager {
 
 ### UserCallback
 
-用户回调类型，接收 EventContext：
+用户回调类型，接收完整事件和 EventContext：
 
 ```rust
-pub type UserCallback = Box<dyn Fn(&mut EventContext) + 'static>;
+pub type UserCallback = Box<dyn FnMut(&Event, &EventContext)>;
 ```
+
+框架内置的 `Button` 提供了两种注册方式：
+
+- `on_click(|ctx| { ... })`：简单场景，不关心事件细节
+- `on_click_with_event(|event, ctx| { ... })`：需要判断鼠标按键、坐标等
 
 ### 使用示例
 
@@ -420,20 +425,20 @@ pub struct Button {
 }
 
 impl Button {
-    pub fn on_click<F>(mut self, callback: F) -> Self
-    where F: Fn(&mut EventContext) + 'static
+    pub fn on_click<F>(mut self, mut callback: F) -> Self
+    where F: FnMut(&EventContext) + 'static
     {
-        self.on_click = Some(Box::new(callback));
+        self.on_click = Some(Box::new(move |_event, ctx| callback(ctx)));
         self
     }
 }
 
 impl Widget for Button {
-    fn handle_event(&mut self, event: &Event, ctx: &mut EventContext) -> EventResult {
+    fn handle_event(&mut self, event: &Event, ctx: &EventContext) -> EventResult {
         match event {
             Event::MouseUp { .. } => {
-                if let Some(ref callback) = self.on_click {
-                    callback(ctx);
+                if let Some(ref mut callback) = self.on_click {
+                    callback(event, ctx);
                 }
                 ctx.stop_propagation();
                 return EventResult::Stop;
@@ -445,31 +450,32 @@ impl Widget for Button {
 }
 ```
 
-### 完整示例：计数器
+### 完整示例：计数器（State + bind_text）
 
 ```rust
 fn main() {
     let mut ctx = ViewContext::new(Size::new(800.0, 600.0));
 
-    // 创建计数显示文本
+    let count = ctx.state(0);
     let count_text = ctx.create(Text::new("0").font_size(72.0));
+    ctx.bind_text(&count, count_text, |v| v.to_string());
 
-    // 加号按钮 - 使用 EventContext 直接访问 Widget
-    let btn_plus = ctx.create(Button::new("+").on_click(move |ctx| {
-        if let Some(mut text) = ctx.get_mut::<Text>(count_text) {
-            let current = text.text_content().parse::<i32>().unwrap_or(0);
-            text.set_content((current + 1).to_string());
+    let btn_plus = ctx.create(Button::new("+").on_click({
+        let count = count.clone();
+        move |_ctx| {
+            count.update(|v| *v += 1);
         }
-        ctx.request_render();
     }));
 }
 ```
 
+> 用户回调执行后框架会自动调用 `ctx.request_render()`，通常无需手动请求重绘。
+
 ## 最佳实践
 
 1. **尽早停止传播**：如果处理了事件，调用 `ctx.stop_propagation()`
-2. **使用 EventContext**：通过 `ctx.get/get_mut` 访问其他 Widget，避免 Rc<RefCell<>>
-3. **请求副作用**：状态变化后调用 `ctx.request_render()` 等
+2. **使用 State + bind_text**：跨 widget 状态更新优先使用 `State<T>`，避免手动维护 `WidgetId`
+3. **请求副作用**：用户回调执行后会自动 `request_render()`；如需在回调外修改状态，可手动调用
 4. **检查 modifiers**：使用 `modifiers.ctrl` 等检查组合键
 5. **处理空字符串**：IME 事件可能传递空字符串
 6. **焦点管理**：实现 `can_focus()` 控制焦点行为

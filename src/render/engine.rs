@@ -164,7 +164,7 @@ impl Renderer for VelloRenderer {
                 layout,
                 ..
             } => {
-                self.draw_text(*position, *color, *rotation, layout.as_ref());
+                self.draw_text(*position, *color, *rotation, layout.as_deref());
             }
             VisualElement::Image {
                 bounds,

@@ -7,7 +7,7 @@ edition = "2024"
 log = "0.4"
 vello_cpu = "0.0.9"
 kurbo = "0.13.1"
-parley = "0.10.0"
+parley = "0.11.0"
 winit = "0.30"
 softbuffer = "0.4"
 clipboard-rs = "0.3"
@@ -20,3 +20,7 @@ path = "examples/hello.rs"
 [[example]]
 name = "counter"
 path = "examples/counter.rs"
+
+[[example]]
+name = "control_panel"
+path = "examples/control_panel.rs"

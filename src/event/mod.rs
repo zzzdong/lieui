@@ -4,7 +4,7 @@ pub mod manager;
 pub mod propagation;
 pub mod types;
 
-pub use callback::{CallbackMap, EventCallback, UserCallback, UserCallbackMap};
+pub use callback::{EventCallback, UserCallback, UserCallbackMap};
 pub use context::{EventContext, EventEffects};
 pub use manager::{EventManager, EventPhase, HitTestResult};
 pub use propagation::Propagation;

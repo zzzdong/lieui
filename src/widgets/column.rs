@@ -18,6 +18,8 @@ pub struct Column {
     expand: bool,
     /// 主轴对齐方式
     justify: JustifyContent,
+    /// 交叉轴对齐方式
+    align: AlignItems,
 }
 
 impl Column {
@@ -27,6 +29,7 @@ impl Column {
             spacing: 0.0,
             expand: false,
             justify: JustifyContent::Center,
+            align: AlignItems::Center,
         }
     }
 
@@ -46,6 +49,12 @@ impl Column {
         self.justify = justify;
         self
     }
+
+    /// 设置交叉轴对齐方式
+    pub fn align(mut self, align: AlignItems) -> Self {
+        self.align = align;
+        self
+    }
 }
 
 impl Widget for Column {
@@ -59,7 +68,7 @@ impl Widget for Column {
         // Column 使用 Flex 布局，垂直方向，子元素居中
         let mut node = LayoutNode::new(id).with_flex(
             FlexStyle::column()
-                .align(AlignItems::Center)
+                .align(self.align)
                 .justify(self.justify)
                 .gap(self.spacing),
         );

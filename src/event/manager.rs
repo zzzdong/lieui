@@ -10,7 +10,6 @@ use crate::core::WidgetId;
 use crate::core::layers::{LayerType, Layers};
 use crate::event::{Event, EventContext, EventEffects, Key, Modifiers, MouseButton};
 use crate::geometry::Point;
-use crate::layout::LayoutNode;
 
 /// 事件传播阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,56 +76,52 @@ impl EventManager {
     // ========================================================================
 
     /// 处理鼠标按下事件
+    ///
+    /// 调用方已通过 `Layers::layer_hit_test_with_path` 计算好命中结果，
+    /// 避免在事件分发期间持有布局根节点的借用。
     pub fn handle_mouse_down(
         &mut self,
         point: Point,
         button: MouseButton,
-        layout_root: &LayoutNode,
+        hit: &HitTestResult,
         layers: &Layers,
         current_layer: LayerType,
     ) -> EventEffects {
         self.mouse_down = true;
         let mut effects = EventEffects::default();
 
-        // 单次 hit-test
-        let hit_result = Self::hit_test_with_path(point, layout_root, layers);
-
-        if let Some(hit) = &hit_result {
-            // 处理焦点变化
-            if self.focused != Some(hit.target) {
-                let focus_effects = self.handle_focus_change(Some(hit.target), layers);
-                effects.merge(&focus_effects);
-            }
-
-            // 检查是否能捕获鼠标
-            if Self::widget_can_focus(layers, hit.target) {
-                self.mouse_capture = Some(hit.target);
-            }
-
-            // 三阶段分发（使用缓存的 hit 结果）
-            let ctx = EventContext::new(layers, current_layer);
-            let event = Event::MouseDown {
-                x: point.x,
-                y: point.y,
-                button,
-            };
-            self.dispatch_three_phase(&event, hit, layers, &ctx);
-            effects.merge(&ctx.take_effects());
-        } else {
-            // 点击空白处，清除焦点
-            let focus_effects = self.handle_focus_change(None, layers);
+        // 处理焦点变化
+        if self.focused != Some(hit.target) {
+            let focus_effects = self.handle_focus_change(Some(hit.target), layers);
             effects.merge(&focus_effects);
         }
+
+        // 检查是否能捕获鼠标
+        if Self::widget_can_focus(layers, hit.target) {
+            self.mouse_capture = Some(hit.target);
+        }
+
+        // 三阶段分发（使用缓存的 hit 结果）
+        let ctx = EventContext::new(layers, current_layer);
+        let event = Event::MouseDown {
+            x: point.x,
+            y: point.y,
+            button,
+        };
+        self.dispatch_three_phase(&event, hit, layers, &ctx);
+        effects.merge(&ctx.take_effects());
 
         effects
     }
 
     /// 处理鼠标释放事件
+    ///
+    /// 调用方已通过 `Layers::layer_hit_test_with_path` 计算好释放点的命中结果。
     pub fn handle_mouse_up(
         &mut self,
         point: Point,
         button: MouseButton,
-        layout_root: &LayoutNode,
+        hit: &HitTestResult,
         layers: &Layers,
         current_layer: LayerType,
     ) -> EventEffects {
@@ -146,10 +141,7 @@ impl EventManager {
             effects.merge(&ctx.take_effects());
 
             // 检查是否是有效的点击（释放位置仍在捕获的 widget 内）
-            let hit_result = Self::hit_test_with_path(point, layout_root, layers);
-            if let Some(hit) = &hit_result
-                && hit.target == capture
-            {
+            if hit.target == capture {
                 // 发送 Click 事件
                 let click_event = Event::Click { button };
                 let ctx = EventContext::new(layers, current_layer);
@@ -157,30 +149,28 @@ impl EventManager {
                 effects.merge(&ctx.take_effects());
             }
         } else {
-            // 单次 hit-test
-            let hit_result = Self::hit_test_with_path(point, layout_root, layers);
+            let ctx = EventContext::new(layers, current_layer);
+            self.dispatch_three_phase(&event, hit, layers, &ctx);
+            effects.merge(&ctx.take_effects());
 
-            if let Some(hit) = &hit_result {
-                let ctx = EventContext::new(layers, current_layer);
-                self.dispatch_three_phase(&event, hit, layers, &ctx);
-                effects.merge(&ctx.take_effects());
-
-                // 发送 Click 事件
-                let click_event = Event::Click { button };
-                let ctx = EventContext::new(layers, current_layer);
-                self.dispatch_three_phase(&click_event, hit, layers, &ctx);
-                effects.merge(&ctx.take_effects());
-            }
+            // 发送 Click 事件
+            let click_event = Event::Click { button };
+            let ctx = EventContext::new(layers, current_layer);
+            self.dispatch_three_phase(&click_event, hit, layers, &ctx);
+            effects.merge(&ctx.take_effects());
         }
 
         effects
     }
 
     /// 处理鼠标移动事件
+    ///
+    /// `hit` 由调用方通过 `Layers::layer_hit_test_with_path` 计算得到，
+    /// 用于事件分发和悬停状态更新，避免二次 hit-test。
     pub fn handle_mouse_move(
         &mut self,
         point: Point,
-        layout_root: &LayoutNode,
+        hit: Option<&HitTestResult>,
         layers: &Layers,
         current_layer: LayerType,
     ) -> EventEffects {
@@ -189,36 +179,35 @@ impl EventManager {
             y: point.y,
         };
         let mut effects = EventEffects::default();
+        let current_hover = hit.map(|h| h.target);
 
-        // 如果有鼠标捕获，直接分发给捕获的 widget
+        // 如果有鼠标捕获，直接分发给捕获的 widget；否则分发给命中目标
         if let Some(capture) = self.mouse_capture {
             let ctx = EventContext::new(layers, current_layer);
             Self::invoke(capture, &event, layers, &ctx);
             effects.merge(&ctx.take_effects());
-        } else {
-            // 单次 hit-test
-            let hit_result = Self::hit_test_with_path(point, layout_root, layers);
-            if let Some(hit) = &hit_result {
-                let ctx = EventContext::new(layers, current_layer);
-                self.dispatch_three_phase(&event, hit, layers, &ctx);
-                effects.merge(&ctx.take_effects());
-            }
+        } else if let Some(hit) = hit {
+            let ctx = EventContext::new(layers, current_layer);
+            self.dispatch_three_phase(&event, hit, layers, &ctx);
+            effects.merge(&ctx.take_effects());
         }
 
-        // 处理悬停状态变化（使用单次 hit-test）
-        let hover_effects = self.handle_hover_change(point, layout_root, layers);
+        // 处理悬停状态变化（复用已经计算好的命中结果）
+        let hover_effects = self.handle_hover_change_with_target(current_hover, layers);
         effects.merge(&hover_effects);
 
         effects
     }
 
     /// 处理鼠标滚轮事件
+    ///
+    /// 调用方已通过 `Layers::layer_hit_test_with_path` 计算好命中结果。
     pub fn handle_wheel(
         &mut self,
         point: Point,
         delta_x: f32,
         delta_y: f32,
-        layout_root: &LayoutNode,
+        hit: &HitTestResult,
         layers: &Layers,
         current_layer: LayerType,
     ) -> EventEffects {
@@ -229,15 +218,9 @@ impl EventManager {
             y: point.y,
         };
 
-        // 单次 hit-test
-        let hit_result = Self::hit_test_with_path(point, layout_root, layers);
-        if let Some(hit) = &hit_result {
-            let ctx = EventContext::new(layers, current_layer);
-            self.dispatch_three_phase(&event, hit, layers, &ctx);
-            return ctx.take_effects();
-        }
-
-        EventEffects::default()
+        let ctx = EventContext::new(layers, current_layer);
+        self.dispatch_three_phase(&event, hit, layers, &ctx);
+        ctx.take_effects()
     }
 
     // ========================================================================
@@ -340,21 +323,6 @@ impl EventManager {
     /// 处理 IME 禁用事件
     pub fn handle_ime_disabled(&mut self, layers: &Layers) -> EventEffects {
         self.dispatch_to_focused(&Event::ImeDisabled, layers)
-    }
-
-    // ========================================================================
-    // 内部：命中测试
-    // ========================================================================
-
-    /// 单次 hit-test，同时计算路径（避免重复）
-    fn hit_test_with_path(
-        point: Point,
-        layout_root: &LayoutNode,
-        layers: &Layers,
-    ) -> Option<HitTestResult> {
-        let target = layout_root.hit_test(point)?;
-        let path = layers.path_to(target);
-        Some(HitTestResult { target, path })
     }
 
     // ========================================================================
@@ -465,14 +433,11 @@ impl EventManager {
     }
 
     /// 处理悬停状态变化
-    fn handle_hover_change(
+    fn handle_hover_change_with_target(
         &mut self,
-        point: Point,
-        layout_root: &LayoutNode,
+        current_hover: Option<WidgetId>,
         layers: &Layers,
     ) -> EventEffects {
-        // 单次 hit-test
-        let current_hover = layout_root.hit_test(point);
         let prev_hover = self.hovered;
         let mut effects = EventEffects::default();
 

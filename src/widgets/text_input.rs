@@ -50,6 +50,8 @@ pub struct TextInput {
     placeholder: String,
     /// 占位符样式
     placeholder_style: TextStyle,
+    /// 实际文本样式（独立于占位符样式）
+    text_style: TextStyle,
     /// 是否获得焦点
     is_focused: bool,
     /// 是否悬停
@@ -80,10 +82,15 @@ impl TextInput {
         placeholder_style.0.brush = NEUTRAL_400;
         placeholder_style.0.font_size = 14.0;
 
+        let mut text_style = TextStyle::default();
+        text_style.0.brush = NEUTRAL_700;
+        text_style.0.font_size = 14.0;
+
         Self {
             editor,
             placeholder: String::new(),
             placeholder_style,
+            text_style,
             is_focused: false,
             is_hovered: false,
             is_disabled: false,
@@ -331,8 +338,11 @@ impl Widget for TextInput {
 
         let content_bounds = layout.computed.content_box;
 
+        // 只获取一次 editor 布局引用，减少重复借用
+        let editor_layout = self.editor.try_layout();
+
         // 计算文本的垂直偏移量（用于光标和选区的正确位置）
-        let text_vertical_offset = if let Some(layout_ref) = self.editor.try_layout() {
+        let text_vertical_offset = if let Some(layout_ref) = editor_layout {
             let text_height = layout_ref.height();
             if self.multiline {
                 0.0 // 多行模式：顶部对齐，无偏移
@@ -366,7 +376,7 @@ impl Widget for TextInput {
         }
 
         // 3. 渲染文本
-        if let Some(layout_ref) = self.editor.try_layout() {
+        if let Some(layout_ref) = editor_layout {
             let text_size = Size::new(layout_ref.width(), layout_ref.height());
             // 多行模式：顶部对齐；单行模式：垂直居中
             let text_y = if self.multiline {
@@ -375,19 +385,19 @@ impl Widget for TextInput {
                 content_bounds.y + (content_bounds.height - text_size.height) / 2.0
             };
 
-            // 获取文本颜色（placeholder 颜色）
-            let text_color = self.placeholder_style.0.brush;
+            // 使用独立的文本样式（不再是占位符样式）
+            let text_color = self.text_style.0.brush;
 
-            // 创建文本元素
+            // 创建文本元素，editor 布局只 clone 一次
             let text_elem = VisualElement::TextRun {
                 text: self.get_text(),
                 position: kurbo::Point::new(content_bounds.x as f64, text_y as f64),
                 color: text_color,
-                font_size: self.placeholder_style.0.font_size as f64,
+                font_size: self.text_style.0.font_size as f64,
                 font_family: "sans-serif".to_string(),
                 rotation: 0.0,
                 max_width: Some(content_bounds.width as f64),
-                layout: self.editor.try_layout().cloned(),
+                layout: Some(Box::new(layout_ref.clone())),
             };
 
             elements.push(LayeredElement::default_layer(text_elem));
@@ -426,7 +436,7 @@ impl Widget for TextInput {
                 font_family: "sans-serif".to_string(),
                 rotation: 0.0,
                 max_width: Some(content_bounds.width as f64),
-                layout: Some(layout),
+                layout: Some(Box::new(layout)),
             };
 
             elements.push(LayeredElement::default_layer(text_elem));

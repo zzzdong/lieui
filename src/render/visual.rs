@@ -186,7 +186,8 @@ pub enum VisualElement {
         font_family: String,
         rotation: f64,
         max_width: Option<f64>,
-        layout: Option<TextLayout>,
+        /// 用 Box 缓存大型 TextLayout，避免 VisualElement 枚举体积过大
+        layout: Option<Box<TextLayout>>,
     },
 
     // ---- 图片 ----
@@ -409,7 +410,7 @@ impl Clone for VisualElement {
                 font_family: font_family.clone(),
                 rotation: *rotation,
                 max_width: *max_width,
-                layout: layout.clone(),
+                layout: layout.clone(), // Box<TextLayout> 实现 Clone
             },
             VisualElement::Image {
                 bounds,

@@ -8,8 +8,12 @@ use crate::event::{EventManager, Key, Modifiers, MouseButton};
 use crate::geometry::{Point, Size};
 use crate::layout::{LayoutContext, LayoutNode};
 use crate::render::visual::LayeredElement;
+use crate::state::State;
 use crate::widget::Widget;
-use crate::widgets::{Button, Column, Container, Row, Text};
+use crate::widgets::{Button, Column, Container, ProgressBar, Row, Text};
+
+/// State -> Widget 绑定回调的类型别名
+type BindingFn = Box<dyn FnMut(&Layers)>;
 
 pub struct ViewContext {
     /// 三层架构
@@ -20,6 +24,8 @@ pub struct ViewContext {
     pub debug_render_tree: bool,
     /// 事件管理器
     event_manager: EventManager,
+    /// State -> Widget 绑定回调，每帧渲染前应用
+    bindings: Vec<BindingFn>,
 }
 
 impl ViewContext {
@@ -31,6 +37,7 @@ impl ViewContext {
             needs_render: true,
             debug_render_tree: false,
             event_manager: EventManager::new(),
+            bindings: Vec::new(),
         }
     }
 
@@ -90,6 +97,51 @@ impl ViewContext {
     /// 快捷创建 Row Widget（省去 import，不借用 self）
     pub fn row(&self) -> Row {
         Row::new()
+    }
+
+    /// 创建共享状态
+    ///
+    /// 可在多个闭包间克隆使用，配合 `bind_text` 自动同步到 Text widget。
+    pub fn state<T>(&self, value: T) -> State<T> {
+        State::new(value)
+    }
+
+    /// 将共享状态绑定到 Text widget
+    ///
+    /// 每帧渲染前会自动用 `f(&state.get())` 更新 Text 内容，无需手动维护 WidgetId。
+    pub fn bind_text<T, F>(&mut self, state: &State<T>, text_id: WidgetId, f: F)
+    where
+        F: Fn(&T) -> String + 'static,
+        T: 'static,
+    {
+        let state = state.clone();
+        self.bindings.push(Box::new(move |layers| {
+            if let Some(mut widget) = layers.get_widget_mut(text_id)
+                && let Some(text) = widget.as_any_mut().downcast_mut::<Text>()
+            {
+                let value = state.get();
+                text.set_content(f(&*value));
+            }
+        }));
+    }
+
+    /// 将共享状态绑定到 ProgressBar widget
+    ///
+    /// 每帧渲染前会自动用 `f(&state.get())` 更新进度值（范围 [0.0, 1.0]）。
+    pub fn bind_progress<T, F>(&mut self, state: &State<T>, progress_id: WidgetId, f: F)
+    where
+        F: Fn(&T) -> f32 + 'static,
+        T: 'static,
+    {
+        let state = state.clone();
+        self.bindings.push(Box::new(move |layers| {
+            if let Some(mut widget) = layers.get_widget_mut(progress_id)
+                && let Some(pb) = widget.as_any_mut().downcast_mut::<ProgressBar>()
+            {
+                let value = state.get();
+                pb.set_progress(f(&*value));
+            }
+        }));
     }
 
     /// 便捷运行入口
@@ -190,47 +242,41 @@ impl ViewContext {
     pub fn build_render_tree(&mut self) -> Vec<LayeredElement> {
         let mut elements = Vec::new();
 
-        // Base 层 (z = 0)
-        if let Some(root) = self.layers.layer_layout_root(LayerType::Base) {
-            self.collect_visual_elements(&root, &mut elements, LayerType::Base);
+        // 依次收集各层，借用布局根节点而非克隆整棵树
+        for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
+            self.layers.with_layer_layout_root(lt, |root| {
+                Self::collect_visual_elements(self, root, &mut elements);
+            });
         }
 
-        // Overlay 层 (z = 1)
-        if let Some(root) = self.layers.layer_layout_root(LayerType::Overlay) {
-            self.collect_visual_elements(&root, &mut elements, LayerType::Overlay);
-        }
-
-        // Modal 层 (z = 2)
-        if let Some(root) = self.layers.layer_layout_root(LayerType::Modal) {
-            self.collect_visual_elements(&root, &mut elements, LayerType::Modal);
-        }
-
-        // 按 z_index 排序
+        // 按 z_index 排序（稳定排序，同 z 时保持层顺序）
         elements.sort_by_key(|e| e.z_index);
         elements
     }
 
     fn collect_visual_elements(
-        &mut self,
+        ctx: &ViewContext,
         layout_node: &LayoutNode,
         elements: &mut Vec<LayeredElement>,
-        layer: LayerType,
     ) {
         let id = layout_node.id;
 
         // 获取 widget 并渲染
-        if let Some(mut widget) = self.layers.get_widget_mut(id) {
-            let mut widget_elements = widget.render(layout_node, self);
+        if let Some(mut widget) = ctx.layers.get_widget_mut(id) {
+            let mut widget_elements = widget.render(layout_node, ctx);
             elements.append(&mut widget_elements);
         }
 
         // 递归收集子节点
         for child_layout in &layout_node.children {
-            self.collect_visual_elements(child_layout, elements, layer);
+            Self::collect_visual_elements(ctx, child_layout, elements);
         }
     }
 
     pub fn render(&mut self) -> Vec<LayeredElement> {
+        // 先应用 State -> Widget 绑定，让 Text 等 widget 有机会变脏
+        self.apply_bindings();
+
         // 扫描 Widget 脏标记
         self.scan_dirty_flags();
 
@@ -245,6 +291,14 @@ impl ViewContext {
             elements
         } else {
             Vec::new()
+        }
+    }
+
+    /// 应用所有 State -> Widget 绑定
+    fn apply_bindings(&mut self) {
+        let layers = &self.layers;
+        for binding in &mut self.bindings {
+            binding(layers);
         }
     }
 
@@ -308,12 +362,10 @@ impl ViewContext {
             if !self.layers.layer_has_content(lt) {
                 continue;
             }
-            if let Some(layout_root) = self.layers.layer_layout_root(lt)
-                && self.layers.layer_hit_test(lt, point).is_some()
-            {
+            if let Some(hit) = self.layers.layer_hit_test_with_path(lt, point) {
                 let effects =
                     self.event_manager
-                        .handle_mouse_move(point, &layout_root, &self.layers, lt);
+                        .handle_mouse_move(point, Some(&hit), &self.layers, lt);
                 self.apply_effects(effects);
                 return; // 该层消费了事件
             }
@@ -328,16 +380,10 @@ impl ViewContext {
             if !self.layers.layer_has_content(lt) {
                 continue;
             }
-            if let Some(layout_root) = self.layers.layer_layout_root(lt)
-                && self.layers.layer_hit_test(lt, point).is_some()
-            {
-                let effects = self.event_manager.handle_mouse_down(
-                    point,
-                    button,
-                    &layout_root,
-                    &self.layers,
-                    lt,
-                );
+            if let Some(hit) = self.layers.layer_hit_test_with_path(lt, point) {
+                let effects =
+                    self.event_manager
+                        .handle_mouse_down(point, button, &hit, &self.layers, lt);
                 self.apply_effects(effects);
                 return;
             }
@@ -356,16 +402,10 @@ impl ViewContext {
             if !self.layers.layer_has_content(lt) {
                 continue;
             }
-            if let Some(layout_root) = self.layers.layer_layout_root(lt)
-                && self.layers.layer_hit_test(lt, point).is_some()
-            {
-                let effects = self.event_manager.handle_mouse_up(
-                    point,
-                    button,
-                    &layout_root,
-                    &self.layers,
-                    lt,
-                );
+            if let Some(hit) = self.layers.layer_hit_test_with_path(lt, point) {
+                let effects =
+                    self.event_manager
+                        .handle_mouse_up(point, button, &hit, &self.layers, lt);
                 self.apply_effects(effects);
                 return;
             }
@@ -380,14 +420,12 @@ impl ViewContext {
             if !self.layers.layer_has_content(lt) {
                 continue;
             }
-            if let Some(layout_root) = self.layers.layer_layout_root(lt)
-                && self.layers.layer_hit_test(lt, point).is_some()
-            {
+            if let Some(hit) = self.layers.layer_hit_test_with_path(lt, point) {
                 let effects = self.event_manager.handle_wheel(
                     point,
                     delta_x,
                     delta_y,
-                    &layout_root,
+                    &hit,
                     &self.layers,
                     lt,
                 );
@@ -452,12 +490,13 @@ impl ViewContext {
 
     /// 获取 widget 的布局边界
     pub fn widget_bounds(&self, widget_id: WidgetId) -> Option<crate::geometry::Rect> {
-        // 在各层的 layout 中查找
+        // 在各层的 layout 中查找（借用根节点，不克隆整棵树）
         for lt in LayerType::dispatch_order() {
-            if let Some(root) = self.layers.layer_layout_root(lt)
-                && let Some(node) = root.find(widget_id)
+            if let Some(bounds) = self
+                .layers
+                .with_layer_layout_root(lt, |root| root.find(widget_id).map(|node| node.bounds()))
             {
-                return Some(node.bounds());
+                return bounds;
             }
         }
         None

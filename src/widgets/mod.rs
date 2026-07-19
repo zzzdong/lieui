@@ -1,14 +1,24 @@
 pub mod button;
+pub mod checkbox;
 pub mod column;
 pub mod container;
+pub mod divider;
+pub mod progress_bar;
 pub mod row;
+pub mod slider;
+pub mod switch;
 pub mod text;
 pub mod text_input;
 
 pub use button::Button;
+pub use checkbox::Checkbox;
 pub use column::Column;
 pub use container::Container;
+pub use divider::Divider;
+pub use progress_bar::ProgressBar;
 pub use row::Row;
+pub use slider::Slider;
+pub use switch::Switch;
 pub use text::Text;
 pub use text_input::TextInput;
 

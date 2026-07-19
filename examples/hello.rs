@@ -25,8 +25,8 @@ fn main() {
         ctx.text("A minimal Rust GUI library").font_size(16.0),
     );
 
-    let btn = ctx.button("Click Me!").on_click(move |ctx| {
-        ctx.request_render();
+    let btn = ctx.button("Click Me!").on_click(|_ctx| {
+        println!("Clicked!");
     });
     ctx.attach(column, btn);
 

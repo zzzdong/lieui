@@ -6,7 +6,9 @@
 //! 所有层均用 RefCell 包裹，使 EventContext（持 &Layers）可直接修改各层。
 
 use crate::core::WidgetId;
-use crate::layout::LayoutContext;
+use crate::event::HitTestResult;
+use crate::geometry::Point;
+use crate::layout::{LayoutContext, LayoutNode};
 use crate::widget::WidgetTree;
 use std::cell::RefCell;
 
@@ -168,30 +170,26 @@ impl Layers {
     }
 
     /// 在某层做命中测试
-    pub fn layer_hit_test(&self, lt: LayerType, point: crate::geometry::Point) -> Option<WidgetId> {
-        match lt {
-            LayerType::Base => self
-                .base
-                .borrow()
-                .layout
-                .root
-                .as_ref()
-                .and_then(|r| r.hit_test(point)),
-            LayerType::Overlay => self
-                .overlay
-                .borrow()
-                .layout
-                .root
-                .as_ref()
-                .and_then(|r| r.hit_test(point)),
-            LayerType::Modal => self
-                .modal
-                .borrow()
-                .layout
-                .root
-                .as_ref()
-                .and_then(|r| r.hit_test(point)),
-        }
+    pub fn layer_hit_test(&self, lt: LayerType, point: Point) -> Option<WidgetId> {
+        self.with_layer(lt, |layer| layer.layout.root.as_ref()?.hit_test(point))
+    }
+
+    /// 在某层做命中测试，并返回目标与其从根到目标的路径
+    ///
+    /// 只借用布局根节点做命中测试，不会克隆整棵布局树
+    pub fn layer_hit_test_with_path(&self, lt: LayerType, point: Point) -> Option<HitTestResult> {
+        let target = self.with_layer(lt, |layer| layer.layout.root.as_ref()?.hit_test(point))?;
+        let path = self.path_to(target);
+        Some(HitTestResult { target, path })
+    }
+
+    /// 在持有布局根节点借用的前提下执行操作，避免 `LayoutNode` 整棵克隆
+    pub fn with_layer_layout_root<R>(
+        &self,
+        lt: LayerType,
+        f: impl FnOnce(&LayoutNode) -> R,
+    ) -> Option<R> {
+        self.with_layer(lt, |layer| layer.layout.root.as_ref().map(f))
     }
 
     // ========== Widget 跨层查找 ==========

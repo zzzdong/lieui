@@ -88,11 +88,21 @@ impl App {
             return;
         }
 
-        // 确保 pixmap 尺寸与 surface 匹配（在借用 surface 之前）
-        self.ensure_pixmap_size();
-
-        let _window = self.window.as_ref().unwrap();
         let surface = self.surface.as_mut().unwrap();
+
+        // 以 softbuffer 的 buffer 尺寸为准，确保 pixmap / renderer 与其一致
+        let mut buffer = surface.buffer_mut().unwrap();
+        let width = buffer.width().get();
+        let height = buffer.height().get();
+
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        if self.pixmap.width() != width as u16 || self.pixmap.height() != height as u16 {
+            self.pixmap = Pixmap::new(width as u16, height as u16);
+            self.renderer = VelloRenderer::new(width as u16, height as u16);
+        }
 
         // Render to pixmap using new VisualElement API
         let elements = self.view.render();
@@ -107,33 +117,23 @@ impl App {
             self.pixmap = self.renderer.render(&elements);
         }
 
-        // Present to window - use pixmap dimensions to ensure correct mapping
-        let width = self.pixmap.width() as u32;
-        let height = self.pixmap.height() as u32;
+        // Present to window
+        let pixmap_data = self.pixmap.data();
+        let buffer_len = buffer.len();
+        let pixel_count = (width * height) as usize;
 
-        if width > 0 && height > 0 {
-            let mut buffer = surface.buffer_mut().unwrap();
-            let pixmap_data = self.pixmap.data();
-
-            // Convert RGBA to ARGB for softbuffer
-            for y in 0..height {
-                for x in 0..width {
-                    let idx = (y * width + x) as usize;
-                    if idx < pixmap_data.len() {
-                        let pixel = pixmap_data[idx];
-                        let r = pixel.r as u32;
-                        let g = pixel.g as u32;
-                        let b = pixel.b as u32;
-                        let a = pixel.a as u32;
-                        // ARGB format for softbuffer
-                        let argb_pixel = (a << 24) | (r << 16) | (g << 8) | b;
-                        buffer[idx] = argb_pixel;
-                    }
-                }
-            }
-
-            buffer.present().unwrap();
+        // Convert RGBA to ARGB for softbuffer，取最小长度防止尺寸不匹配
+        for idx in 0..pixel_count.min(buffer_len).min(pixmap_data.len()) {
+            let pixel = pixmap_data[idx];
+            let r = pixel.r as u32;
+            let g = pixel.g as u32;
+            let b = pixel.b as u32;
+            let a = pixel.a as u32;
+            // ARGB format for softbuffer
+            buffer[idx] = (a << 24) | (r << 16) | (g << 8) | b;
         }
+
+        buffer.present().unwrap();
     }
 
     fn handle_resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -172,23 +172,6 @@ impl App {
                 position,
                 winit::dpi::LogicalSize::new(bounds.width as f64, bounds.height as f64),
             );
-        }
-    }
-
-    /// 确保 pixmap 尺寸与 surface 匹配
-    fn ensure_pixmap_size(&mut self) {
-        if let Some(surface) = self.surface.as_mut() {
-            let buffer = surface.buffer_mut().unwrap();
-            let (width, height) = (buffer.width().get(), buffer.height().get());
-            drop(buffer);
-
-            let expected_width = width as u16;
-            let expected_height = height as u16;
-
-            if self.pixmap.width() != expected_width || self.pixmap.height() != expected_height {
-                self.pixmap = Pixmap::new(expected_width, expected_height);
-                self.renderer = VelloRenderer::new(expected_width, expected_height);
-            }
         }
     }
 }

@@ -16,6 +16,8 @@ pub struct Row {
     pub(crate) spacing: f32,
     /// 是否扩展填满父容器
     expand: bool,
+    /// 交叉轴对齐方式
+    align: AlignItems,
 }
 
 impl Row {
@@ -24,6 +26,7 @@ impl Row {
             bounds: Rect::zero(),
             spacing: 0.0,
             expand: false,
+            align: AlignItems::Center,
         }
     }
 
@@ -35,6 +38,12 @@ impl Row {
     /// 设置是否扩展填满父容器
     pub fn expand(mut self, expand: bool) -> Self {
         self.expand = expand;
+        self
+    }
+
+    /// 设置交叉轴对齐方式
+    pub fn align(mut self, align: AlignItems) -> Self {
+        self.align = align;
         self
     }
 }
@@ -50,7 +59,7 @@ impl Widget for Row {
         // Row 使用 Flex 布局，水平方向，子元素在主轴和交叉轴都居中
         let mut node = LayoutNode::new(id).with_flex(
             FlexStyle::row()
-                .align(AlignItems::Center)
+                .align(self.align)
                 .justify(JustifyContent::Center)
                 .gap(self.spacing),
         );

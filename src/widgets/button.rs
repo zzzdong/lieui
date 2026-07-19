@@ -9,10 +9,12 @@
 //! - 内边距：左右 12px，上下 6px
 //! - 颜色：使用 Fluent UI 主题色板
 
+use std::cell::Cell;
+
 use crate::core::WidgetId;
 use crate::event::{Event, EventContext, EventResult, EventType, UserCallbackMap};
 use crate::geometry::{Color, Rect, Size};
-use crate::layout::{BoxStyle, EdgeInsets, LayoutNode};
+use crate::layout::{BoxStyle, EdgeInsets, LayoutNode, Measurable, TextMeasure};
 use crate::prelude::ViewContext;
 use crate::render::visual::{FillStrokeStyle, LayeredElement, Stroke, VisualElement};
 use crate::widget::Widget;
@@ -75,6 +77,8 @@ pub struct Button {
     is_disabled: bool,
     /// 脏标记
     dirty: bool,
+    /// 缓存的文本测量尺寸（避免每次 layout 都重新测量）
+    cached_text_size: Cell<Option<Size>>,
     /// 用户回调，按事件类型分组
     callbacks: UserCallbackMap,
 }
@@ -92,6 +96,7 @@ impl Button {
             is_pressed: false,
             is_disabled: false,
             dirty: false,
+            cached_text_size: Cell::new(None),
             callbacks: UserCallbackMap::new(),
         }
     }
@@ -114,6 +119,8 @@ impl Button {
     /// 设置文本
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text_widget = self.text_widget.content(text);
+        self.cached_text_size.set(None);
+        self.dirty = true;
         self
     }
 
@@ -124,13 +131,27 @@ impl Button {
 
     /// 设置文本内容（可变）
     pub fn set_text(&mut self, text: impl Into<String>) {
-        self.text_widget = self.text_widget.clone().content(text);
+        self.text_widget.set_content(text);
+        self.cached_text_size.set(None);
+        self.dirty = true;
     }
 
-    /// 注册点击事件回调
-    pub fn on_click<F>(mut self, f: F) -> Self
+    /// 注册点击事件回调（简单形式）
+    pub fn on_click<F>(mut self, mut f: F) -> Self
     where
         F: FnMut(&EventContext) + 'static,
+    {
+        self.callbacks
+            .entry(EventType::Click)
+            .or_default()
+            .push(Box::new(move |_event, ctx| f(ctx)));
+        self
+    }
+
+    /// 注册点击事件回调（可读取事件细节）
+    pub fn on_click_with_event<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&Event, &EventContext) + 'static,
     {
         self.callbacks
             .entry(EventType::Click)
@@ -140,26 +161,26 @@ impl Button {
     }
 
     /// 注册鼠标进入回调
-    pub fn on_mouse_enter<F>(mut self, f: F) -> Self
+    pub fn on_mouse_enter<F>(mut self, mut f: F) -> Self
     where
         F: FnMut(&EventContext) + 'static,
     {
         self.callbacks
             .entry(EventType::MouseEnter)
             .or_default()
-            .push(Box::new(f));
+            .push(Box::new(move |_event, ctx| f(ctx)));
         self
     }
 
     /// 注册鼠标离开回调
-    pub fn on_mouse_leave<F>(mut self, f: F) -> Self
+    pub fn on_mouse_leave<F>(mut self, mut f: F) -> Self
     where
         F: FnMut(&EventContext) + 'static,
     {
         self.callbacks
             .entry(EventType::MouseLeave)
             .or_default()
-            .push(Box::new(f));
+            .push(Box::new(move |_event, ctx| f(ctx)));
         self
     }
 
@@ -216,12 +237,30 @@ impl Button {
     }
 
     /// 触发指定事件类型的用户回调
-    fn fire_callbacks(&mut self, event_type: EventType, ctx: &EventContext) {
-        if let Some(cbs) = self.callbacks.get_mut(&event_type) {
+    ///
+    /// 每个回调执行后会自动调用 `ctx.request_render()`，避免用户忘记请求重绘。
+    fn fire_callbacks(&mut self, event: &Event, ctx: &EventContext) {
+        if let Some(cbs) = self.callbacks.get_mut(&event.to_type()) {
             for cb in cbs {
-                cb(ctx);
+                cb(event, ctx);
+                // 用户回调通常会更改状态，自动请求重绘
+                ctx.request_render();
             }
         }
+    }
+
+    /// 获取文本测量尺寸（带缓存）
+    fn text_size(&self) -> Size {
+        if let Some(size) = self.cached_text_size.get() {
+            return size;
+        }
+        let measure = TextMeasure::new(
+            self.text_widget.text_content(),
+            self.text_widget.style().clone(),
+        );
+        let size = measure.measure(None);
+        self.cached_text_size.set(Some(size));
+        size
     }
 }
 
@@ -241,13 +280,8 @@ impl Widget for Button {
     }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {
-        // 使用 TextMeasure 直接测量文本尺寸（不依赖缓存）
-        use crate::layout::{Measurable, TextMeasure};
-        let measure = TextMeasure::new(
-            self.text_widget.text_content(),
-            self.text_widget.style().clone(),
-        );
-        let text_size = measure.measure(None);
+        // 使用缓存的文本测量尺寸计算按钮宽高
+        let text_size = self.text_size();
         let width = text_size.width + BUTTON_PAD_X * 2.0;
         let height = BUTTON_HEIGHT;
 
@@ -323,7 +357,7 @@ impl Widget for Button {
             font_family: "sans-serif".to_string(),
             rotation: 0.0,
             max_width: Some(content_bounds.width as f64),
-            layout: Some(text_layout),
+            layout: Some(Box::new(text_layout)),
         };
 
         elements.push(LayeredElement::default_layer(text_elem));
@@ -348,7 +382,7 @@ impl Widget for Button {
                     self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseEnter, ctx);
+                self.fire_callbacks(event, ctx);
             }
             Event::MouseLeave => {
                 if self.is_hovered || self.is_pressed {
@@ -358,7 +392,7 @@ impl Widget for Button {
                     self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseLeave, ctx);
+                self.fire_callbacks(event, ctx);
             }
             Event::MouseDown { .. } => {
                 if !self.is_pressed {
@@ -367,7 +401,7 @@ impl Widget for Button {
                     self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseDown, ctx);
+                self.fire_callbacks(event, ctx);
             }
             Event::MouseUp { .. } => {
                 if self.is_pressed {
@@ -376,10 +410,10 @@ impl Widget for Button {
                     self.text_widget.set_text_color(self.text_color());
                     ctx.request_render();
                 }
-                self.fire_callbacks(EventType::MouseUp, ctx);
+                self.fire_callbacks(event, ctx);
             }
             Event::Click { .. } => {
-                self.fire_callbacks(EventType::Click, ctx);
+                self.fire_callbacks(event, ctx);
             }
             _ => {}
         }

@@ -1,7 +1,7 @@
 use lieui::core::ViewContext;
 use lieui::geometry::Size;
 use lieui::layout::JustifyContent;
-use lieui::widgets::{Container, Text};
+use lieui::widgets::Container;
 use winit::event_loop::EventLoop;
 
 fn main() {
@@ -24,40 +24,41 @@ fn main() {
 
     ctx.attach(content, ctx.text("Counter").font_size(48.0));
 
+    // 使用 State + bind_text，无需手动维护 count_text 的 WidgetId
+    let count = ctx.state(0);
     let count_text = ctx.attach(content, ctx.text("0").font_size(72.0));
+    ctx.bind_text(&count, count_text, |v| v.to_string());
 
     let button_row = ctx.create(ctx.row().spacing(16.0));
     ctx.add_child(content, button_row);
 
     ctx.attach(
         button_row,
-        ctx.button("-").on_click(move |ctx| {
-            if let Some(mut text) = ctx.get_mut::<Text>(count_text) {
-                let current = text.text_content().parse::<i32>().unwrap_or(0);
-                text.set_content((current - 1).to_string());
+        ctx.button("-").on_click({
+            let count = count.clone();
+            move |_ctx| {
+                count.update(|v| *v -= 1);
             }
-            ctx.request_render();
         }),
     );
 
     ctx.attach(
         button_row,
-        ctx.button("+").on_click(move |ctx| {
-            if let Some(mut text) = ctx.get_mut::<Text>(count_text) {
-                let current = text.text_content().parse::<i32>().unwrap_or(0);
-                text.set_content((current + 1).to_string());
+        ctx.button("+").on_click({
+            let count = count.clone();
+            move |_ctx| {
+                count.update(|v| *v += 1);
             }
-            ctx.request_render();
         }),
     );
 
     ctx.attach(
         content,
-        ctx.button("Reset").on_click(move |ctx| {
-            if let Some(mut text) = ctx.get_mut::<Text>(count_text) {
-                text.set_content("0".to_string());
+        ctx.button("Reset").on_click({
+            let count = count.clone();
+            move |_ctx| {
+                count.set(0);
             }
-            ctx.request_render();
         }),
     );
 

@@ -98,14 +98,10 @@ impl Widget for Container {
         // 创建填充/描边样式
         let style = FillStrokeStyle {
             fill: self.background,
-            stroke: if self.border_color.is_some() {
-                Some(Stroke {
-                    color: self.border_color.unwrap(),
-                    width: self.border_width as f64,
-                })
-            } else {
-                None
-            },
+            stroke: self.border_color.map(|color| Stroke {
+                color,
+                width: self.border_width as f64,
+            }),
         };
 
         // 根据是否有边框半径选择矩形类型

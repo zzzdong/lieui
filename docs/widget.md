@@ -260,7 +260,7 @@ pub struct MyWidget {
 
 impl MyWidget {
     pub fn on_click<F>(mut self, callback: F) -> Self
-    where F: Fn(&mut EventContext) + 'static
+    where F: FnMut(&Event, &EventContext) + 'static
     {
         self.on_click = Some(Box::new(callback));
         self
@@ -268,11 +268,11 @@ impl MyWidget {
 }
 
 impl Widget for MyWidget {
-    fn handle_event(&mut self, event: &Event, ctx: &mut EventContext) -> EventResult {
+    fn handle_event(&mut self, event: &Event, ctx: &EventContext) -> EventResult {
         match event {
             Event::MouseUp { .. } => {
-                if let Some(ref callback) = self.on_click {
-                    callback(ctx);
+                if let Some(ref mut callback) = self.on_click {
+                    callback(event, ctx);
                 }
                 ctx.stop_propagation();
                 EventResult::Stop

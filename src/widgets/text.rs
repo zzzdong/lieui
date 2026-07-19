@@ -184,7 +184,7 @@ impl Widget for Text {
             font_family: "sans-serif".to_string(),
             rotation: 0.0,
             max_width: Some(content_box.width as f64),
-            layout: Some(text_layout),
+            layout: Some(Box::new(text_layout)),
         };
 
         elements.push(LayeredElement::default_layer(text_elem));
