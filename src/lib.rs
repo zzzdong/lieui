@@ -18,7 +18,7 @@ pub mod prelude {
     pub use crate::state::State;
     pub use crate::widget::Widget;
     pub use crate::widgets::{
-        Button, Checkbox, Column, Container, Divider, ProgressBar, Row, Slider, Switch, Text,
+        Button, Checkbox, Column, Container, Divider, Image, ProgressBar, Row, Slider, Switch, Text,
     };
 }
 

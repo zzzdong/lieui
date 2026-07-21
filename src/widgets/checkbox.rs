@@ -29,6 +29,7 @@ pub struct Checkbox {
     checked: bool,
     dirty: bool,
     value_callbacks: Vec<ValueCallback>,
+    visible: bool,
 }
 
 impl Checkbox {
@@ -43,6 +44,7 @@ impl Checkbox {
             checked: false,
             dirty: false,
             value_callbacks: Vec::new(),
+            visible: true,
         }
     }
 
@@ -55,6 +57,20 @@ impl Checkbox {
     /// 是否已选中
     pub fn is_checked(&self) -> bool {
         self.checked
+    }
+
+    /// 设置可见性（不可见时不参与布局/渲染/命中测试）
+    pub fn visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
+        self
+    }
+
+    /// 设置可见性（构造后修改）
+    pub fn set_visible(&mut self, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.dirty = true;
+        }
     }
 
     /// 设置选中状态（可变）
@@ -98,6 +114,9 @@ impl Widget for Checkbox {
     }
 
     fn layout(&self, id: WidgetId) -> LayoutNode {
+        if !self.visible {
+            return LayoutNode::new(id).with_fixed_size(Size::new(0.0, 0.0));
+        }
         let measure = TextMeasure::new(&self.label, crate::text::TextStyle::default());
         let label_size = measure.measure(None);
         let width = CHECKBOX_SIZE + CHECKBOX_LABEL_GAP + label_size.width;
@@ -113,6 +132,9 @@ impl Widget for Checkbox {
     }
 
     fn render(&mut self, layout: &LayoutNode, _ctx: &ViewContext) -> Vec<LayeredElement> {
+        if !self.visible {
+            return Vec::new();
+        }
         let mut elements = Vec::new();
         let bounds = layout.computed.content_box;
 
@@ -190,6 +212,9 @@ impl Widget for Checkbox {
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &EventContext) -> EventResult {
+        if !self.visible {
+            return EventResult::Continue;
+        }
         match event {
             Event::Click { .. } => {
                 self.set_checked(!self.checked);

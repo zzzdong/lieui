@@ -6,6 +6,8 @@
 //! - 支持嵌套组合（Group）
 //! - 支持自定义扩展（Custom）
 
+use std::sync::Arc;
+
 use crate::geometry::{Color, Rect};
 use crate::text::TextLayout;
 use kurbo::{BezPath, Point, Rect as KurboRect, Vec2};
@@ -193,7 +195,7 @@ pub enum VisualElement {
     // ---- 图片 ----
     Image {
         bounds: KurboRect,
-        data: Vec<u8>,
+        data: Arc<Vec<u8>>,
         width: u32,
         height: u32,
         opacity: Option<f32>,

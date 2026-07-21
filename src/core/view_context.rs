@@ -2,6 +2,8 @@
 
 use std::cell::{Ref, RefMut};
 
+use winit::event_loop::EventLoop;
+
 use crate::core::WidgetId;
 use crate::core::layers::{LayerType, Layers, WidgetRefMut};
 use crate::event::{EventManager, Key, Modifiers, MouseButton};
@@ -54,6 +56,12 @@ impl ViewContext {
     pub fn set_viewport(&mut self, viewport: Size) {
         self.viewport = viewport;
         self.invalidate_layout();
+    }
+
+    /// 创建事件循环并直接运行（无需调用方传入 `EventLoop`）。
+    pub fn run_blocking(self) {
+        let event_loop = EventLoop::new().unwrap();
+        self.run(event_loop);
     }
 
     // ========== Builder 便捷 API ==========

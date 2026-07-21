@@ -173,7 +173,7 @@ impl Renderer for VelloRenderer {
                 height,
                 opacity,
             } => {
-                self.draw_image(*bounds, data, *width, *height, *opacity);
+                self.draw_image(*bounds, data.as_slice(), *width, *height, *opacity);
             }
             VisualElement::BoxShadow {
                 rect,
@@ -394,35 +394,48 @@ impl Renderer for VelloRenderer {
     fn draw_image(
         &mut self,
         bounds: Rect,
-        _data: &[u8],
-        _width: u32,
-        _height: u32,
-        _opacity: Option<f32>,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        opacity: Option<f32>,
     ) {
-        // 应用变换（矩形变换后可能不是矩形，用路径表示）
-        let transformed_path = self.apply_transform_to_rect(bounds);
+        let w = width as u16;
+        let h = height as u16;
+        let expected = w as usize * h as usize * 4;
+        if expected == 0 || data.len() < expected {
+            return;
+        }
 
-        // TODO: 实现图片渲染
-        // vello_cpu 的 ImageSource API 需要进一步确认
-        // 目前先绘制一个占位矩形
-        let placeholder_color = Self::color_to_vello(&Color::from_rgb8(200, 200, 200));
-        self.ctx.set_paint(placeholder_color);
-        self.ctx.fill_path(&transformed_path);
+        // 把 RGBA8 像素写入一个 vello_cpu Pixmap。
+        let mut pixmap = Pixmap::new(w, h);
+        pixmap.data_as_u8_slice_mut()[..expected].copy_from_slice(&data[..expected]);
 
-        // 绘制对角线表示图片占位符
-        let stroke_color = Self::color_to_vello(&Color::from_rgb8(150, 150, 150));
-        self.ctx.set_paint(stroke_color);
-        self.ctx.set_stroke(KurboStroke::new(1.0));
+        // 使用 Pixmap 变体：像素随场景包一起发送，无需注册/清理，不泄漏。
+        let source = vello_cpu::ImageSource::Pixmap(std::sync::Arc::new(pixmap));
+        let image = vello_cpu::Image {
+            image: source,
+            sampler: vello_cpu::peniko::ImageSampler::default(),
+        };
 
-        // 变换后的对角线
-        let transform = self.current_transform();
-        let mut path = BezPath::new();
-        path.move_to((bounds.x0, bounds.y0));
-        path.line_to((bounds.x1, bounds.y1));
-        path.move_to((bounds.x1, bounds.y0));
-        path.line_to((bounds.x0, bounds.y1));
-        path.apply_affine(transform);
-        self.ctx.stroke_path(&path);
+        let bw = bounds.x1 - bounds.x0;
+        let bh = bounds.y1 - bounds.y0;
+        let sx = bw / width as f64;
+        let sy = bh / height as f64;
+
+        let base = self.current_transform();
+        self.ctx.set_transform(base);
+        self.ctx.set_paint(vello_cpu::PaintType::Image(image));
+        self.ctx.set_paint_transform(Affine::new([
+            sx, 0.0, 0.0, sy, bounds.x0, bounds.y0,
+        ]));
+        if let Some(op) = opacity {
+            self.ctx.push_opacity_layer(op);
+        }
+        self.ctx.fill_rect(&Rect::new(bounds.x0, bounds.y0, bounds.x1, bounds.y1));
+        if opacity.is_some() {
+            self.ctx.pop_layer();
+        }
+        self.ctx.reset_paint_transform();
     }
 
     fn draw_box_shadow(&mut self, rect: Rect, radius: f64, shadow: &BoxShadowDef) {
