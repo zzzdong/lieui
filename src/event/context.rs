@@ -18,6 +18,7 @@ pub struct EventEffects {
     pub needs_render: bool,
     pub needs_layout: bool,
     pub needs_animate: bool,
+    pub needs_rebuild: bool,
 }
 
 impl EventEffects {
@@ -33,6 +34,10 @@ impl EventEffects {
         self.needs_animate = true;
     }
 
+    pub fn request_rebuild(&mut self) {
+        self.needs_rebuild = true;
+    }
+
     pub fn needs_render(&self) -> bool {
         self.needs_render
     }
@@ -45,10 +50,15 @@ impl EventEffects {
         self.needs_animate
     }
 
+    pub fn needs_rebuild(&self) -> bool {
+        self.needs_rebuild
+    }
+
     pub fn clear(&mut self) {
         self.needs_render = false;
         self.needs_layout = false;
         self.needs_animate = false;
+        self.needs_rebuild = false;
     }
 
     /// 合并另一个 EventEffects 的状态
@@ -56,6 +66,7 @@ impl EventEffects {
         self.needs_render |= other.needs_render;
         self.needs_layout |= other.needs_layout;
         self.needs_animate |= other.needs_animate;
+        self.needs_rebuild |= other.needs_rebuild;
     }
 }
 
@@ -168,6 +179,38 @@ impl<'a> EventContext<'a> {
         self.effects.set(e);
     }
 
+    // ========== 动态 Widget 树操作（命令队列模式）==========
+    //
+    // 注意：这些操作会被添加到队列中，在下一帧 `render()` 开始时统一执行。
+    // 因此修改不会立即反映在当前帧的布局/事件处理中。
+    //
+    // 创建新 widget 需要在 setup 阶段完成（需要 &mut self），
+    // 事件回调中只能对已有 widget 做增删关系操作。
+
+    /// 排队：将子节点添加到指定父节点（下一帧生效）
+    pub fn add_child(&self, parent_id: WidgetId, child_id: WidgetId) {
+        self.layers.queue_add_child(parent_id, child_id);
+        self.request_layout();
+    }
+
+    /// 排队：删除指定 widget 及其所有子节点（下一帧生效）
+    pub fn remove_widget(&self, id: WidgetId) {
+        self.layers.queue_remove(id);
+        self.request_layout();
+    }
+
+    /// 排队：将 widget 从父节点分离（成为孤立节点，下一帧生效）
+    pub fn detach_widget(&self, child_id: WidgetId) {
+        self.layers.queue_detach(child_id);
+        self.request_layout();
+    }
+
+    /// 排队：将子节点移动到新父节点（下一帧生效）
+    pub fn reparent_widget(&self, child_id: WidgetId, new_parent: WidgetId) {
+        self.layers.queue_reparent(child_id, new_parent);
+        self.request_layout();
+    }
+
     // ========== 副作用 ==========
 
     /// 请求重新渲染
@@ -181,6 +224,13 @@ impl<'a> EventContext<'a> {
     pub fn request_layout(&self) {
         let mut e = self.effects.get();
         e.request_layout();
+        self.effects.set(e);
+    }
+
+    /// 请求下一次渲染时执行 Builder 重建
+    pub fn request_rebuild(&self) {
+        let mut e = self.effects.get();
+        e.request_rebuild();
         self.effects.set(e);
     }
 

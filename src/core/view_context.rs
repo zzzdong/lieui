@@ -4,6 +4,7 @@ use std::cell::{Ref, RefMut};
 
 use winit::event_loop::EventLoop;
 
+use crate::builder::{BuildContext, BuildSnapshot};
 use crate::core::WidgetId;
 use crate::core::layers::{LayerType, Layers, WidgetRefMut};
 use crate::event::{EventManager, Key, Modifiers, MouseButton};
@@ -28,6 +29,17 @@ pub struct ViewContext {
     event_manager: EventManager,
     /// State -> Widget 绑定回调，每帧渲染前应用
     bindings: Vec<BindingFn>,
+
+    // ========== Builder 模式相关 ==========
+
+    /// 上一帧的构建快照（用于 slot 匹配）
+    build_snapshot: Option<BuildSnapshot>,
+
+    /// 用户注册的 builder 函数（每次 rebuild 时调用，接收 BuildContext）
+    build_fn: Option<Box<dyn FnMut(&mut BuildContext)>>,
+
+    /// 标记是否需要 rebuild（由事件回调通过 EventContext 设置）
+    rebuild_requested: bool,
 }
 
 impl ViewContext {
@@ -40,6 +52,9 @@ impl ViewContext {
             debug_render_tree: false,
             event_manager: EventManager::new(),
             bindings: Vec::new(),
+            build_snapshot: None,
+            build_fn: None,
+            rebuild_requested: false,
         }
     }
 
@@ -69,12 +84,6 @@ impl ViewContext {
     /// 创建 Widget 并添加到指定父节点（一步完成）
     ///
     /// 等价于 `ctx.create(widget)` + `ctx.add_child(parent, child_id)`。
-    ///
-    /// # 示例
-    /// ```ignore
-    /// let root = ctx.create(Container::new());
-    /// let title = ctx.attach(root, Text::new("Hello").font_size(32.0));
-    /// ```
     pub fn attach<W: Widget>(&mut self, parent: WidgetId, widget: W) -> WidgetId {
         let id = self.layers.create_in_base(widget);
         self.layers.tree.add_child(parent, id);
@@ -108,15 +117,11 @@ impl ViewContext {
     }
 
     /// 创建共享状态
-    ///
-    /// 可在多个闭包间克隆使用，配合 `bind_text` 自动同步到 Text widget。
     pub fn state<T>(&self, value: T) -> State<T> {
         State::new(value)
     }
 
     /// 将共享状态绑定到 Text widget
-    ///
-    /// 每帧渲染前会自动用 `f(&state.get())` 更新 Text 内容，无需手动维护 WidgetId。
     pub fn bind_text<T, F>(&mut self, state: &State<T>, text_id: WidgetId, f: F)
     where
         F: Fn(&T) -> String + 'static,
@@ -134,8 +139,6 @@ impl ViewContext {
     }
 
     /// 将共享状态绑定到 ProgressBar widget
-    ///
-    /// 每帧渲染前会自动用 `f(&state.get())` 更新进度值（范围 [0.0, 1.0]）。
     pub fn bind_progress<T, F>(&mut self, state: &State<T>, progress_id: WidgetId, f: F)
     where
         F: Fn(&T) -> f32 + 'static,
@@ -153,15 +156,75 @@ impl ViewContext {
     }
 
     /// 便捷运行入口
-    ///
-    /// 等价于：
-    /// ```ignore
-    /// let app = App::new(ctx);
-    /// app.run(event_loop);
-    /// ```
     pub fn run(self, event_loop: winit::event_loop::EventLoop<()>) {
         let app = crate::app::App::new(self);
         app.run(event_loop);
+    }
+
+    // ========================================================================
+    // Builder 模式 API
+    // ========================================================================
+
+    /// 注册构建函数，该函数会在 `render()` 开始时自动调用
+    ///
+    /// 构建函数使用 `BuildContext` 声明式地描述 UI 结构。
+    /// 每次 rebuild 时，Builder 框架会自动处理 widget 的增删复用。
+    /// 注册构建函数
+    ///
+    /// 该函数在每次 rebuild 时被调用。使用 `BuildContext` 声明式描述 UI 结构。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// vc.set_build_fn(move |bctx| {
+    ///     bctx.column(|bctx| {
+    ///         bctx.text("Hello");
+    ///         bctx.button("Click", |_| {});
+    ///     });
+    /// });
+    /// ```
+    pub fn set_build_fn<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut BuildContext) + 'static,
+    {
+        self.build_fn = Some(Box::new(f));
+    }
+
+    /// 手动触发重建（内部调用存储的 build_fn）
+    ///
+    /// 通常在注册 build_fn 后第一次手动调用；后续由 `render()` 自动管理。
+    pub fn build(&mut self) {
+        self.rebuild_requested = true;
+    }
+
+    /// 执行重建（调用 build_fn + 执行 slot reconciliation）
+    ///
+    /// 注意：此方法不会调用 `apply_pending_ops()`，调用者需确保已在之前执行过。
+    pub fn execute_build(&mut self) {
+        // 用 take 避免借用冲突（build_fn 和 bctx 都借 self）
+        if let Some(mut build_fn) = self.build_fn.take() {
+            let snapshot = self.build_snapshot.take().unwrap_or_default();
+            let mut bctx = BuildContext::new(self, snapshot);
+            build_fn(&mut bctx);
+            let snapshot = bctx.finalize();
+
+            // 重要：将 builder 创建的第一个 widget 设为 Base 层 root
+            // builder 只负责创建 widget 树结构（通过 add_child），
+            // 不设 root 则 perform_layout() 会跳过该层。
+            if let Some(first_id) = snapshot.first_widget_id() {
+                self.layers.set_base_root(first_id);
+            }
+
+            self.build_snapshot = Some(snapshot);
+            self.build_fn = Some(build_fn);
+        }
+
+        self.rebuild_requested = false;
+        self.invalidate_layout();
+    }
+
+    /// 请求下一次 render() 时执行重建
+    pub fn request_rebuild(&mut self) {
+        self.rebuild_requested = true;
     }
 
     // ========== Widget 创建与树操作 ==========
@@ -176,12 +239,6 @@ impl ViewContext {
     }
 
     /// 创建 root widget 并自动设置（`create` + `set_root` 一步完成）
-    ///
-    /// 等价于：
-    /// ```ignore
-    /// let id = ctx.create(widget);
-    /// ctx.set_root(id);
-    /// ```
     pub fn root(&mut self, widget: impl Widget) -> WidgetId {
         let id = self.create(widget);
         self.set_root(id);
@@ -202,6 +259,56 @@ impl ViewContext {
         self.layers.tree.get_mut(id)
     }
 
+    // ========================================================================
+    // 动态 Widget 树操作 API（直接模式，需要 &mut self）
+    // ========================================================================
+
+    /// 从树中删除指定 widget 及其所有子节点
+    ///
+    /// 会自动清理事件管理器中可能持有的对该 widget 的引用（焦点、悬停、鼠标捕获）。
+    pub fn remove(&mut self, id: WidgetId) -> Option<Box<dyn Widget>> {
+        let result = self.layers.tree.remove(id);
+        if result.is_some() {
+            self.cleanup_event_state(id);
+            self.invalidate_layout();
+        }
+        result
+    }
+
+    /// 替换指定位置的 widget（保留 id 和父子关系不变）
+    pub fn replace<W: Widget>(&mut self, id: WidgetId, widget: W) -> Option<Box<dyn Widget>> {
+        let result = self.layers.tree.replace(id, widget);
+        if result.is_some() {
+            self.invalidate_layout();
+        }
+        result
+    }
+
+    /// 将 widget 从父节点分离（保留在树中但成为孤立节点）
+    pub fn detach(&mut self, child_id: WidgetId) {
+        self.layers.tree.detach(child_id);
+        self.invalidate_layout();
+    }
+
+    /// 将子节点移动到新父节点
+    pub fn reparent(&mut self, child_id: WidgetId, new_parent: WidgetId) {
+        self.layers.tree.reparent(child_id, new_parent);
+        self.invalidate_layout();
+    }
+
+    /// 清理事件管理器中可能存在的过期引用
+    fn cleanup_event_state(&mut self, id: WidgetId) {
+        if self.event_manager.focused() == Some(id) {
+            self.event_manager.clear_focused();
+        }
+        if self.event_manager.hovered() == Some(id) {
+            self.event_manager.clear_hovered();
+        }
+        if self.event_manager.mouse_capture() == Some(id) {
+            self.event_manager.clear_mouse_capture();
+        }
+    }
+
     /// 获取 widget（用于布局/事件）
     pub fn get_widget(&self, id: WidgetId) -> Option<WidgetRefMut<'_>> {
         self.layers.get_widget_mut(id)
@@ -209,11 +316,21 @@ impl ViewContext {
 
     // ========== 布局与渲染 ==========
 
+    /// 执行所有排队的 Widget 树操作，然后执行布局
+    pub fn rebuild(&mut self) {
+        if self.layers.apply_pending_ops() {
+            self.invalidate_layout();
+        }
+    }
+
     /// 执行所有层的布局
     pub fn perform_layout(&mut self) {
         if !self.needs_layout {
             return;
         }
+
+        // 先应用排队的操作
+        self.rebuild();
 
         // Base 层
         self.perform_layer_layout(LayerType::Base);
@@ -282,7 +399,15 @@ impl ViewContext {
     }
 
     pub fn render(&mut self) -> Vec<LayeredElement> {
-        // 先应用 State -> Widget 绑定，让 Text 等 widget 有机会变脏
+        // 1. 应用排队的 Widget 树操作（来自 EventContext 的 add_child/remove 等）
+        self.rebuild();
+
+        // 2. 如果请求了 rebuild，执行 Builder 重建
+        if self.rebuild_requested {
+            self.execute_build();
+        }
+
+        // 3. 应用 State -> Widget 绑定，让 Text 等 widget 有机会变脏
         self.apply_bindings();
 
         // 扫描 Widget 脏标记
@@ -467,6 +592,9 @@ impl ViewContext {
 
     /// 应用事件副作用
     fn apply_effects(&mut self, effects: crate::event::EventEffects) {
+        if effects.needs_rebuild() {
+            self.rebuild_requested = true;
+        }
         if effects.needs_render() {
             self.invalidate_render();
         }

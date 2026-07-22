@@ -4,6 +4,10 @@
 //! 所有 Widget 存储在一个共享的 WidgetTree 中，
 //! 每层只维护自己的 root（入口）和 LayoutContext（布局隔离）。
 //! 所有层均用 RefCell 包裹，使 EventContext（持 &Layers）可直接修改各层。
+//!
+//! 动态 Widget 树操作使用命令队列模式：
+//! - 事件回调中通过 `queue_*` 方法排入待办操作
+//! - 主循环通过 `apply_pending_ops()` 批量执行
 
 use crate::core::WidgetId;
 use crate::event::HitTestResult;
@@ -16,6 +20,16 @@ use std::cell::RefCell;
 /// 这些类型来自 WidgetTree（SlotMap + RefCell）
 pub type WidgetRef<'a> = std::cell::Ref<'a, Box<dyn crate::widget::Widget>>;
 pub type WidgetRefMut<'a> = std::cell::RefMut<'a, Box<dyn crate::widget::Widget>>;
+
+/// 待执行的 Widget 树操作（不含 Create/Replace——这些需要 immediate 的 &mut）
+///
+/// 事件回调执行期间将操作暂存至此，主循环的 render() 开始时批量处理。
+enum PendingOp {
+    AddChild(WidgetId, WidgetId),
+    Remove(WidgetId),
+    Detach(WidgetId),
+    Reparent(WidgetId, WidgetId),
+}
 
 /// 层类型（固定 3 层，z-index 递增）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +78,7 @@ impl LayerInfo {
 /// - 所有 Widget 存在共享的 `tree` 中（WidgetId 全局唯一）
 /// - 每层有自己的 root（入口）和 LayoutContext（布局隔离）
 /// - 所有层用 RefCell 包裹，允许 EventContext 通过 &Layers 修改任意层
+/// - 动态树操作通过 pending_ops 命令队列实现，避免借用冲突
 pub struct Layers {
     /// 所有 Widget 的统一存储
     pub tree: WidgetTree,
@@ -76,6 +91,10 @@ pub struct Layers {
 
     /// 模态层
     pub modal: RefCell<LayerInfo>,
+
+    /// 待执行的 Widget 树操作队列
+    /// 事件回调中通过 queue_* 方法添加，主循环中通过 apply_pending_ops 执行
+    pending_ops: RefCell<Vec<PendingOp>>,
 }
 
 impl Default for Layers {
@@ -91,15 +110,71 @@ impl Layers {
             base: RefCell::new(LayerInfo::new()),
             overlay: RefCell::new(LayerInfo::new()),
             modal: RefCell::new(LayerInfo::new()),
+            pending_ops: RefCell::new(Vec::new()),
         }
     }
+
+    // ========================================================================
+    // 命令队列：事件回调中调用（通过 &self），操作被暂存
+    // ========================================================================
+
+    /// 排队：添加子节点
+    pub fn queue_add_child(&self, parent_id: WidgetId, child_id: WidgetId) {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::AddChild(parent_id, child_id));
+    }
+
+    /// 排队：删除 widget
+    pub fn queue_remove(&self, id: WidgetId) {
+        self.pending_ops.borrow_mut().push(PendingOp::Remove(id));
+    }
+
+    /// 排队：分离 widget
+    pub fn queue_detach(&self, child_id: WidgetId) {
+        self.pending_ops.borrow_mut().push(PendingOp::Detach(child_id));
+    }
+
+    /// 排队：移动 widget 到新父节点
+    pub fn queue_reparent(&self, child_id: WidgetId, new_parent: WidgetId) {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::Reparent(child_id, new_parent));
+    }
+
+    /// 执行所有排队的操作（需要 &mut self，由 ViewContext 调用）
+    ///
+    /// 返回是否有任何操作被执行（用于触发布局失效）
+    pub fn apply_pending_ops(&mut self) -> bool {
+        let ops = std::mem::take(&mut *self.pending_ops.borrow_mut());
+        if ops.is_empty() {
+            return false;
+        }
+        for op in ops {
+            match op {
+                PendingOp::AddChild(parent, child) => {
+                    self.tree.add_child(parent, child);
+                }
+                PendingOp::Remove(id) => {
+                    self.tree.remove(id);
+                }
+                PendingOp::Detach(child) => {
+                    self.tree.detach(child);
+                }
+                PendingOp::Reparent(child, new_parent) => {
+                    self.tree.reparent(child, new_parent);
+                }
+            }
+        }
+        true
+    }
+
+    // ========== 用户 API（操作各层）==========
 
     /// 创建 Widget（需要 &mut self，由 ViewContext 调用）
     pub fn create<W: crate::widget::Widget>(&mut self, widget: W) -> WidgetId {
         self.tree.create(widget)
     }
-
-    // ========== 用户 API（操作各层）==========
 
     /// 在 base 层创建 Widget（需要 &mut self）
     pub fn create_in_base<W: crate::widget::Widget>(&mut self, widget: W) -> WidgetId {

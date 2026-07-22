@@ -183,6 +183,92 @@ impl WidgetTree {
         path
     }
 
+    // ========================================================================
+    // 动态树操作（新增 Widget / 移除 Widget / 替换 Widget）
+    // ========================================================================
+
+    /// 删除指定 widget 及其所有子节点（递归）
+    ///
+    /// 返回被删除的 widget（如果存在），并自动：
+    /// 1. 从父节点的 children 中移除
+    /// 2. 如果被删除的是 root，清除 root
+    /// 3. 递归删除所有子节点
+    pub fn remove(&mut self, id: WidgetId) -> Option<Box<dyn Widget>> {
+        if !self.entries.contains_key(id) {
+            return None;
+        }
+
+        // 1. 递归收集所有子孙节点（前序遍历，确保父节点先于子节点被收集）
+        let mut all_ids = Vec::new();
+        self.collect_subtree_ids(id, &mut all_ids);
+
+        // 2. 从父节点的 children 中移除
+        if let Some(entry) = self.entries.get(id) {
+            if let Some(parent_id) = entry.parent {
+                if let Some(parent_entry) = self.entries.get_mut(parent_id) {
+                    parent_entry.children.retain(|cid| *cid != id);
+                }
+            }
+        }
+
+        // 3. 如果删除的是 root，清除 root
+        if self.root == Some(id) {
+            self.root = None;
+        }
+
+        // 4. 从 SlotMap 删除所有节点（逆序：子节点先于父节点被删除，避免残留引用）
+        let mut removed_widget = None;
+        for rid in all_ids.into_iter().rev() {
+            if let Some(entry) = self.entries.remove(rid) {
+                if rid == id {
+                    removed_widget = Some(entry.widget.into_inner());
+                }
+            }
+        }
+
+        removed_widget
+    }
+
+    /// 递归收集子树中所有节点 ID（前序）
+    fn collect_subtree_ids(&self, root_id: WidgetId, ids: &mut Vec<WidgetId>) {
+        ids.push(root_id);
+        if let Some(entry) = self.entries.get(root_id) {
+            let children = entry.children.clone();
+            for child_id in children {
+                self.collect_subtree_ids(child_id, ids);
+            }
+        }
+    }
+
+    /// 替换指定位置的 widget（保留 id 和父子关系）
+    ///
+    /// 用新 widget 替换已有的 widget，保持其 WidgetId 不变，
+    /// 所有父/子关系不受影响。
+    pub fn replace<W: Widget>(&mut self, id: WidgetId, widget: W) -> Option<Box<dyn Widget>> {
+        self.entries
+            .get_mut(id)
+            .map(|entry| entry.widget.replace(Box::new(widget)))
+    }
+
+    /// 将 widget 分离出来（保持其在 SlotMap 中，但脱离父子关系）
+    ///
+    /// 分离后 widget 成为孤立节点，可后续通过 `add_child` 重新挂载
+    pub fn detach(&mut self, child_id: WidgetId) {
+        if let Some(entry) = self.entries.get_mut(child_id) {
+            if let Some(parent_id) = entry.parent.take() {
+                if let Some(parent_entry) = self.entries.get_mut(parent_id) {
+                    parent_entry.children.retain(|cid| *cid != child_id);
+                }
+            }
+        }
+    }
+
+    /// 将子节点移动到新父节点
+    pub fn reparent(&mut self, child_id: WidgetId, new_parent: WidgetId) {
+        self.detach(child_id);
+        self.add_child(new_parent, child_id);
+    }
+
     /// 获取节点数量
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -191,6 +277,11 @@ impl WidgetTree {
     /// 是否为空
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// 迭代所有条目（用于清理操作）
+    pub fn all_ids(&self) -> Vec<WidgetId> {
+        self.entries.keys().collect()
     }
 }
 

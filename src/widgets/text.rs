@@ -92,6 +92,17 @@ impl Text {
         self.cached_layout = None;
     }
 
+    /// 直接替换整个文本样式（可变）
+    ///
+    /// 复制 `TextStyle` 中的所有属性到当前 widget。
+    /// 每次调用都会使缓存失效，触发重新布局。
+    pub fn set_style(&mut self, style: &TextStyle) {
+        self.style.0.font_size = style.0.font_size;
+        self.style.0.brush = style.0.brush.clone();
+        self.dirty = true;
+        self.cached_layout = None;
+    }
+
     /// 获取文本内容
     pub fn text_content(&self) -> &str {
         &self.content

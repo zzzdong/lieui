@@ -1,4 +1,5 @@
 pub mod app;
+pub mod builder;
 pub mod core;
 pub mod event;
 pub mod geometry;
@@ -11,6 +12,7 @@ pub mod widgets;
 
 pub mod prelude {
     pub use crate::app::App;
+    pub use crate::builder::{BuildContext, BuildSnapshot};
     pub use crate::core::{ViewContext, WidgetId};
     pub use crate::event::{Event, EventType, MouseButton};
     pub use crate::geometry::{Color, Point, Rect, Size};
