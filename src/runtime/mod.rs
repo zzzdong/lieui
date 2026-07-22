@@ -87,19 +87,33 @@ impl Runtime {
                 "text" => {
                     if let Some(content) = props.and_then(|p| p.get_str("content")) {
                         let color = props.and_then(|p| p.get_color("color")).unwrap_or(Color::BLACK);
-                        // 文字显示为色块（暂缺字体渲染）
-                        let r = KRect::new(rect.x as f64, rect.y as f64, (rect.x + rect.width) as f64, (rect.y + rect.height) as f64);
-                        elements.push(LE::new(VisualElement::Rect { rect: r, style: FillStrokeStyle::new().with_fill(color) }, 0).with_id(id_as_u64(id)));
-                        let _ = content; // suppress unused warning
+                        let font_size = props.and_then(|p| p.get_f64("font_size")).unwrap_or(16.0);
+                        // 使用 parley 创建文本布局
+                        let layout = crate::text::create_text_layout(content, font_size, color, None);
+                        let pos = kurbo::Point::new(rect.x as f64, rect.y as f64);
+                        elements.push(LE::new(
+                            VisualElement::TextRun {
+                                text: content.to_string(), position: pos, color, font_size,
+                                font_family: "sans-serif".to_string(), rotation: 0.0,
+                                max_width: None, layout: Some(Box::new(layout)),
+                            }, 0,
+                        ).with_id(id_as_u64(id)));
                     }
                 }
                 "button" => {
                     let r = KRect::new(rect.x as f64, rect.y as f64, (rect.x + rect.width) as f64, (rect.y + rect.height) as f64);
                     elements.push(LE::new(
-                        VisualElement::RoundedRect { rect: r, radius: 4.0, style: FillStrokeStyle::new().with_fill(Color::from_rgb8(220, 220, 220)) }, 0,
+                        VisualElement::RoundedRect { rect: r, radius: 4.0, style: FillStrokeStyle::new().with_fill(Color::new(220, 220, 220)) }, 0,
                     ).with_id(id_as_u64(id)));
-                    if let Some(_label) = props.and_then(|p| p.get_str("label")) {
-                        // 按钮标签暂不渲染
+                    if let Some(label) = props.and_then(|p| p.get_str("label")) {
+                        let layout = crate::text::create_text_layout(label, 14.0, Color::BLACK, None);
+                        elements.push(LE::new(
+                            VisualElement::TextRun {
+                                text: label.to_string(), position: kurbo::Point::new((rect.x + 12.0) as f64, (rect.y + 8.0) as f64),
+                                color: Color::BLACK, font_size: 14.0, font_family: "sans-serif".to_string(),
+                                rotation: 0.0, max_width: None, layout: Some(Box::new(layout)),
+                            }, 0,
+                        ).with_id(id_as_u64(id)));
                     }
                 }
                 "image" => {
@@ -114,9 +128,9 @@ impl Runtime {
                 }
                 "checkbox" => {
                     let checked = props.and_then(|p| p.get_bool("checked")).unwrap_or(false);
-                    let fill = if checked { Color::from_rgb8(60, 120, 220) } else { Color::from_rgb8(200, 200, 200) };
+                    let fill = if checked { Color::new(60, 120, 220) } else { Color::new(200, 200, 200) };
                     let r = KRect::new(rect.x as f64, rect.y as f64, (rect.x + 16.0) as f64, (rect.y + 16.0) as f64);
-                    elements.push(LE::new(VisualElement::Rect { rect: r, style: FillStrokeStyle::new().with_fill(fill).with_stroke(Color::from_rgb8(150,150,150), 1.0) }, 0).with_id(id_as_u64(id)));
+                    elements.push(LE::new(VisualElement::Rect { rect: r, style: FillStrokeStyle::new().with_fill(fill).with_stroke(Color::new(150,150,150), 1.0) }, 0).with_id(id_as_u64(id)));
                 }
                 _ => {}
             }

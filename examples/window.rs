@@ -40,7 +40,7 @@ fn main() {
             }
 
             col = col.child(
-                Text::new(&format!("{}", count.get())).font_size(48.0).color(Color::from_rgb8(255, 200, 0))
+                Text::new(&format!("{}", count.get())).font_size(48.0).color(Color::new(255, 200, 0))
             );
 
             col.build()
