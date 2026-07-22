@@ -12,7 +12,7 @@ use winit::window::{Window, WindowId};
 use crate::core::layers::LayerType;
 use crate::geometry::{Point, Size};
 use crate::layout::node::LayoutContext;
-use crate::render::renderer::Renderer;
+use crate::render::renderer::Renderer as RendererTrait;
 use crate::render::VelloRenderer;
 use crate::runtime::Runtime;
 use crate::state;
@@ -23,9 +23,9 @@ pub struct Application<B: Fn() -> ViewNode> {
     runtime: Runtime,
     renderer: VelloRenderer,
     window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     mouse_pos: Point,
     first_layout: Option<LayoutContext>,
+    rendered_once: bool,
 }
 
 impl<B: Fn() -> ViewNode + 'static> Application<B> {
@@ -35,9 +35,9 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
             runtime: Runtime::new(viewport),
             renderer: VelloRenderer::new(viewport.width as u16, viewport.height as u16),
             window: None,
-            surface: None,
             mouse_pos: Point::zero(),
             first_layout: None,
+            rendered_once: false,
         }
     }
 
@@ -62,40 +62,44 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
             let pixmap = self.renderer.render(&elements);
             self.present(pixmap);
         }
+        self.rendered_once = true;
     }
 
     fn present(&mut self, pixmap: vello_cpu::Pixmap) {
-        let Some(surface) = &mut self.surface else { return };
-        let mut buf = match surface.buffer_mut() { Ok(b) => b, Err(_) => return };
-        let w = buf.width().get();
-        let h = buf.height().get();
+        let Some(window) = &self.window else { return };
+        let Ok(ctx) = softbuffer::Context::new(window.clone()) else { return; };
+        let Ok(mut surface) = softbuffer::Surface::new(&ctx, window.clone()) else { return; };
+
+        let s = window.inner_size();
+        let _ = surface.resize(NonZeroU32::new(s.width.max(1)).unwrap(), NonZeroU32::new(s.height.max(1)).unwrap());
+
+        let Ok(mut buf) = surface.buffer_mut() else { return; };
+        let w = buf.width().get() as usize;
+        let h = buf.height().get() as usize;
         if w == 0 || h == 0 { return; }
+
         let data = pixmap.data();
-        for i in 0..(w * h) as usize {
-            let p = if i < data.len() { data[i] } else { continue };
-            let bgra = (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24);
-            buf[i] = bgra;
+        let len = (w * h).min(data.len());
+        for i in 0..len {
+            let p = data[i];
+            buf[i] = (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24);
         }
         let _ = buf.present();
+        // surface 生命周期到此结束 — 但窗口内容已更新
     }
 
     fn init_window(&mut self, el: &ActiveEventLoop) {
         let wa = Window::default_attributes()
             .with_title("LieUI v2")
-            .with_inner_size(LogicalSize::new(1100.0, 780.0));
+            .with_inner_size(LogicalSize::new(600.0, 400.0));
         let window = Rc::new(el.create_window(wa).unwrap());
-        let ctx = softbuffer::Context::new(window.clone()).unwrap();
+        window.set_ime_allowed(true);
+
         let s = window.inner_size();
-        let mut surface = softbuffer::Surface::new(&ctx, window.clone()).unwrap();
-        let _ = surface.resize(
-            NonZeroU32::new(s.width.max(1)).unwrap(),
-            NonZeroU32::new(s.height.max(1)).unwrap(),
-        );
-        self.window = Some(window);
-        self.surface = Some(surface);
         let vp = Size::new(s.width as f32, s.height as f32);
         self.runtime.set_viewport(vp);
-        self.renderer = VelloRenderer::new(s.width as u16, s.height as u16);
+        self.renderer.resize(s.width as u16, s.height as u16);
+        self.window = Some(window);
     }
 
     fn handle_click(&mut self) {
@@ -103,9 +107,7 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         let root = match &layout.root { Some(r) => r, None => return };
         let id = Self::find_clicked_element(root, self.mouse_pos.x, self.mouse_pos.y);
         let Some(id) = id else { return };
-        let props = self.runtime.layers.tree.props(id);
-        let Some(p) = props else { return };
-        let Some(cb_id) = p.get_u32("on_click") else { return };
+        let Some(cb_id) = self.runtime.layers.tree.props(id).and_then(|p| p.get_u32("on_click")) else { return };
         state::invoke_click(cb_id as u64);
     }
 
@@ -118,10 +120,14 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
     }
 }
 
+// ===== winit ApplicationHandler =====
+
 impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_none() { self.init_window(el); }
-        self.build_and_render();
+        if self.window.is_none() {
+            self.init_window(el);
+            if let Some(w) = &self.window { w.request_redraw(); }
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
@@ -129,13 +135,9 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) => {
                 if s.width > 0 && s.height > 0 {
-                    let vp = Size::new(s.width as f32, s.height as f32);
-                    self.runtime.set_viewport(vp);
+                    self.runtime.set_viewport(Size::new(s.width as f32, s.height as f32));
                     self.renderer.resize(s.width as u16, s.height as u16);
-                    if let Some(surf) = &mut self.surface {
-                        let _ = surf.resize(NonZeroU32::new(s.width).unwrap(), NonZeroU32::new(s.height).unwrap());
-                    }
-                    self.build_and_render();
+                    if let Some(w) = &self.window { w.request_redraw(); }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -146,7 +148,7 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                 if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::RedrawRequested => {
-                if state::take_rebuild_requested() {
+                if !self.rendered_once || state::take_rebuild_requested() {
                     self.build_and_render();
                 }
             }
