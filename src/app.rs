@@ -102,6 +102,26 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         true
     }
 
+    /// 仅重绘视觉层（跳过 builder/layout/reconciliation）
+    fn render_visuals(&mut self) {
+        let elements = self.runtime.frame_render_only();
+        if elements.is_empty() { return; }
+        let pix = self.renderer.render(&elements);
+        if let Some(surf) = &mut self.surface {
+            let s = self.window.as_ref().unwrap().inner_size();
+            let _ = surf.resize(NonZeroU32::new(s.width.max(1)).unwrap(), NonZeroU32::new(s.height.max(1)).unwrap());
+            let mut buf = match surf.buffer_mut() { Ok(b) => b, _ => { self.surface = None; return; } };
+            let bw = buf.width().get() as usize;
+            let bh = buf.height().get() as usize;
+            if bw > 0 && bh > 0 {
+                let data = pix.data();
+                let cl = (bw * bh).min(data.len());
+                for i in 0..cl { let p = data[i]; buf[i] = (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24); }
+                let _ = buf.present();
+            }
+        }
+    }
+
     fn init_window(&mut self, el: &ActiveEventLoop) {
         let wa = Window::default_attributes()
             .with_title("LieUI v2")
@@ -180,26 +200,12 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                     self.build_and_render();
                 } else if state::take_rebuild_requested() {
                     self.build_and_render();
+                } else if state::take_redraw_requested() {
+                    // 仅重绘（动画/外部事件触发的视觉更新）
+                    self.render_visuals();
                 } else {
-                    // hover/pressed: 仅重生成渲染树
-                    let elements = self.runtime.frame_render_only();
-                    if !elements.is_empty() {
-                        let pix = self.renderer.render(&elements);
-                        // 直接内联 present 避免跨 impl 方法解析
-                        if let Some(surf) = &mut self.surface {
-                            let s = self.window.as_ref().unwrap().inner_size();
-                            let _ = surf.resize(NonZeroU32::new(s.width.max(1)).unwrap(), NonZeroU32::new(s.height.max(1)).unwrap());
-                            let mut buf = match surf.buffer_mut() { Ok(b) => b, _ => { self.surface = None; return; } };
-                            let bw = buf.width().get() as usize;
-                            let bh = buf.height().get() as usize;
-                            if bw > 0 && bh > 0 {
-                                let data = pix.data();
-                                let cl = (bw * bh).min(data.len());
-                                for i in 0..cl { let p = data[i]; buf[i] = (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24); }
-                                let _ = buf.present();
-                            }
-                        }
-                    }
+                    // hover/pressed（鼠标事件驱动的视觉更新）
+                    self.render_visuals();
                 }
             }
             _ => {}

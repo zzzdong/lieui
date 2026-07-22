@@ -6,16 +6,26 @@ use std::rc::Rc;
 
 thread_local! {
     static REBUILD_REQUESTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REDRAW_REQUESTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CALLBACKS: RefCell<HashMap<u64, Box<dyn Fn()>>> = RefCell::new(HashMap::new());
     static NEXT_CALLBACK_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
-/// 手动请求重建（用于非 State 触发的场景）
+/// 请求全量重建（builder + reconciliation + layout + render）
 pub fn request_rebuild() { REBUILD_REQUESTED.with(|r| r.set(true)); }
 
-/// 检查并清除重建标记（内部使用）
+/// 检查并清除重建标记
 pub(crate) fn take_rebuild_requested() -> bool {
     REBUILD_REQUESTED.with(|r| r.replace(false))
+}
+
+/// 请求仅重绘（不跑 builder/layout，只更新交互状态渲染）
+/// 适用于动画、计时器、hover 等视觉变化
+pub fn request_redraw() { REDRAW_REQUESTED.with(|r| r.set(true)); }
+
+/// 检查并清除重绘标记
+pub(crate) fn take_redraw_requested() -> bool {
+    REDRAW_REQUESTED.with(|r| r.replace(false))
 }
 
 // ---- Callbacks ----
