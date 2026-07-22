@@ -1,0 +1,744 @@
+    Checking lieui v0.2.0 (D:\code\rust\lieui)
+error[E0432]: unresolved import `crate::runtime::element::ElementTree`
+ --> src\core\layers.rs:7:5
+  |
+7 | use crate::runtime::element::ElementTree;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ElementTree` in `runtime::element`
+
+error[E0432]: unresolved import `engine::VelloRenderer`
+ --> src\render\mod.rs:7:9
+  |
+7 | pub use engine::VelloRenderer;
+  |         ^^^^^^^^^^^^^^^^^^^^^ no `VelloRenderer` in `render::engine`
+
+error[E0432]: unresolved import `element::ElementTree`
+ --> src\runtime\mod.rs:6:9
+  |
+6 | pub use element::ElementTree;
+  |         ^^^^^^^^^^^^^^^^^^^^ no `ElementTree` in `runtime::element`
+
+error[E0432]: unresolved imports `crate::runtime::reconciler::Patch`, `crate::runtime::reconciler::Reconciler`, `crate::runtime::reconciler::ReconcilerStats`
+  --> src\runtime\mod.rs:12:34
+   |
+12 | use crate::runtime::reconciler::{Patch, Reconciler, ReconcilerStats};
+   |                                  ^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^ no `ReconcilerStats` in `runtime::reconciler`
+   |                                  |      |
+   |                                  |      no `Reconciler` in `runtime::reconciler`
+   |                                  no `Patch` in `runtime::reconciler`
+
+error[E0432]: unresolved import `crate::layout::node`
+ --> src\core\layers.rs:6:20
+  |
+6 | use crate::layout::node::LayoutContext;
+  |                    ^^^^ could not find `node` in `layout`
+
+error[E0432]: unresolved import `crate::layout::LayoutContext`
+  --> src\runtime\mod.rs:10:5
+   |
+10 | use crate::layout::LayoutContext;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `LayoutContext` in `layout`
+
+error[E0433]: cannot find `node` in `layout`
+   --> src\runtime\mod.rs:106:46
+    |
+106 |     fn collect_visuals(node: &crate::layout::node::LayoutNode, layers: &Layers, elements: &mut Vec<LayeredElement>) {
+    |                                              ^^^^ could not find `node` in `layout`
+
+error[E0433]: cannot find `StyleMap` in `style`
+  --> src\text\mod.rs:40:29
+   |
+40 |         Self(parley::style::StyleMap::new())
+   |                             ^^^^^^^^ could not find `StyleMap` in `style`
+
+error[E0425]: cannot find type `Srgb` in crate `kurbo`
+  --> src\geometry\types.rs:30:40
+   |
+30 | pub struct Color(pub AlphaColor<kurbo::Srgb>);
+   |                                        ^^^^ not found in `kurbo`
+
+error[E0425]: cannot find type `Srgb` in crate `kurbo`
+  --> src\geometry\types.rs:46:47
+   |
+46 |     pub fn inner(&self) -> &AlphaColor<kurbo::Srgb> { &self.0 }
+   |                                               ^^^^ not found in `kurbo`
+
+error[E0425]: cannot find type `Srgb` in crate `kurbo`
+  --> src\geometry\types.rs:47:49
+   |
+47 |     pub fn to_vello(&self) -> AlphaColor<kurbo::Srgb> { self.0 }
+   |                                                 ^^^^ not found in `kurbo`
+
+error[E0425]: cannot find type `StyleMap` in module `parley::style`
+  --> src\text\mod.rs:36:41
+   |
+36 | pub struct TextStyle(pub parley::style::StyleMap);
+   |                                         ^^^^^^^^ not found in `parley::style`
+
+warning: unused imports: `EventContext`, `EventEffects`, and `Event`
+ --> src\core\layers.rs:4:20
+  |
+4 | use crate::event::{Event, EventContext, EventEffects, EventManager, HitTestResult};
+  |                    ^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `kurbo::Rect as KRect`
+ --> src\geometry\types.rs:2:5
+  |
+2 | use kurbo::Rect as KRect;
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `kurbo::Size as KSize`
+ --> src\geometry\types.rs:3:5
+  |
+3 | use kurbo::Size as KSize;
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `kurbo::Vec2`
+ --> src\geometry\types.rs:4:5
+  |
+4 | use kurbo::Vec2;
+  |     ^^^^^^^^^^^
+
+warning: unused import: `crate::layout::box_model::LayoutConstraint`
+ --> src\layout\flex.rs:3:5
+  |
+3 | use crate::layout::box_model::LayoutConstraint;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::core::ElementId`
+ --> src\layout\measurable.rs:3:5
+  |
+3 | use crate::core::ElementId;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BoxStyle`
+ --> src\layout\measurable.rs:4:32
+  |
+4 | use crate::layout::box_model::{BoxStyle, IntrinsicSize, LayoutConstraint};
+  |                                ^^^^^^^^
+
+warning: unused import: `PropValue`
+ --> src\layout\measurable.rs:5:34
+  |
+5 | use crate::view::node::{PropMap, PropValue};
+  |                                  ^^^^^^^^^
+
+warning: unused import: `Rect`
+ --> src\render\visual.rs:5:30
+  |
+5 | use crate::geometry::{Color, Rect};
+  |                              ^^^^
+
+warning: unused import: `crate::geometry::Color`
+  --> src\view\mod.rs:14:5
+   |
+14 | use crate::geometry::Color;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0107]: missing generics for struct `parley::Layout`
+  --> src\render\visual.rs:87:28
+   |
+87 |         layout: Option<Box<TextLayout>>,
+   |                            ^^^^^^^^^^ expected 1 generic argument
+   |
+note: struct defined here, with 1 generic parameter: `B`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\layout\layout.rs:25:12
+   |
+25 | pub struct Layout<B: Brush> {
+   |            ^^^^^^ -
+help: add missing generic argument
+   |
+87 |         layout: Option<Box<TextLayout<B>>>,
+   |                                      +++
+
+error[E0119]: conflicting implementations of trait `Default` for type `ElementId`
+  --> src\core\id.rs:6:1
+   |
+ 6 | / slotmap::new_key_type! {
+ 7 | |     /// Runtime 侧 Element 的唯一标识符。
+ 8 | |     ///
+ 9 | |     /// - 数值型（u64），拷贝成本极低
+...  |
+12 | |     pub struct ElementId;
+13 | | }
+   | |_^ conflicting implementation for `ElementId`
+...
+22 |   impl Default for ElementId {
+   |   -------------------------- first implementation here
+   |
+   = note: this error originates in the derive macro `Default` which comes from the expansion of the macro `slotmap::new_key_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:14:40
+   |
+14 |     pub static LAYOUT_CONTEXT: RefCell<PLayoutContext<ColorBrush>> =
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:14:40
+   |
+14 |     pub static LAYOUT_CONTEXT: RefCell<PLayoutContext<ColorBrush>> =
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0107]: missing generics for struct `parley::Layout`
+  --> src\text\mod.rs:68:17
+   |
+68 |     ) -> Option<TextLayout> {
+   |                 ^^^^^^^^^^ expected 1 generic argument
+   |
+note: struct defined here, with 1 generic parameter: `B`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\layout\layout.rs:25:12
+   |
+25 | pub struct Layout<B: Brush> {
+   |            ^^^^^^ -
+help: add missing generic argument
+   |
+68 |     ) -> Option<TextLayout<B>> {
+   |                           +++
+
+error[E0308]: mismatched types
+  --> src\core\id.rs:18:9
+   |
+17 |     pub fn as_ffi(&self) -> u64 {
+   |                             --- expected `u64` because of return type
+18 |         self.0
+   |         ^^^^^^ expected `u64`, found `KeyData`
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:14:32
+   |
+14 |     pub static LAYOUT_CONTEXT: RefCell<PLayoutContext<ColorBrush>> =
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:14:32
+   |
+14 |     pub static LAYOUT_CONTEXT: RefCell<PLayoutContext<ColorBrush>> =
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:12:1
+   |
+12 | / thread_local! {
+13 | |     pub static FONT_CONTEXT: RefCell<FontContext> = RefCell::new(FontContext::default());
+14 | |     pub static LAYOUT_CONTEXT: RefCell<PLayoutContext<ColorBrush>> =
+15 | |         RefCell::new(PLayoutContext::new());
+16 | | }
+   | |_^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:12:1
+   |
+12 | / thread_local! {
+13 | |     pub static FONT_CONTEXT: RefCell<FontContext> = RefCell::new(FontContext::default());
+14 | |     pub static LAYOUT_CONTEXT: RefCell<PLayoutContext<ColorBrush>> =
+15 | |         RefCell::new(PLayoutContext::new());
+16 | | }
+   | |_^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:15:9
+   |
+15 |         RefCell::new(PLayoutContext::new());
+   |         ^^^^^^^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:15:9
+   |
+15 |         RefCell::new(PLayoutContext::new());
+   |         ^^^^^^^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:15:22
+   |
+15 |         RefCell::new(PLayoutContext::new());
+   |                      ^^^^^^^^^^^^^^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:15:22
+   |
+15 |         RefCell::new(PLayoutContext::new());
+   |                      ^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0308]: mismatched types
+  --> src\text\mod.rs:44:47
+   |
+44 |         self.0.insert(StyleProperty::FontSize(size));
+   |                       ----------------------- ^^^^ expected `f32`, found `f64`
+   |                       |
+   |                       arguments to this enum variant are incorrect
+   |
+note: tuple variant defined here
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\style\mod.rs:77:5
+   |
+77 |     FontSize(f32),
+   |     ^^^^^^^^
+
+error[E0308]: mismatched types
+  --> src\text\mod.rs:48:65
+   |
+48 |         self.0.insert(StyleProperty::FontWeight(FontWeight::new(weight)));
+   |                                                 --------------- ^^^^^^ expected `f32`, found `i32`
+   |                                                 |
+   |                                                 arguments to this function are incorrect
+   |
+note: associated function defined here
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parlance-0.1.0\src\font.rs:56:18
+   |
+56 |     pub const fn new(weight: f32) -> Self {
+   |                  ^^^
+help: you can convert an `i32` to an `f32`, producing the floating point representation of the integer, rounded if necessary
+   |
+48 |         self.0.insert(StyleProperty::FontWeight(FontWeight::new(weight as f32)));
+   |                                                                        ++++++
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:71:13
+   |
+71 | /             LAYOUT_CONTEXT.with(|lc| {
+72 | |                 let mut layout_cx = lc.borrow_mut();
+73 | |                 let mut builder = layout_cx.ranged_builder(&mut font_cx, text, scale);
+74 | |                 builder.push_default(&style.0);
+...  |
+80 | |             })
+   | |______________^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:71:13
+   |
+71 | /             LAYOUT_CONTEXT.with(|lc| {
+72 | |                 let mut layout_cx = lc.borrow_mut();
+73 | |                 let mut builder = layout_cx.ranged_builder(&mut font_cx, text, scale);
+74 | |                 builder.push_default(&style.0);
+...  |
+80 | |             })
+   | |______________^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+  --> src\text\mod.rs:71:34
+   |
+71 |             LAYOUT_CONTEXT.with(|lc| {
+   |                                  ^^ no implementation for `ColorBrush == ColorBrush`
+   |
+   = help: the trait `PartialEq` is not implemented for `ColorBrush`
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+   |
+20 + #[derive(PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+  --> src\text\mod.rs:71:34
+   |
+71 |             LAYOUT_CONTEXT.with(|lc| {
+   |                                  ^^ the trait `Default` is not implemented for `ColorBrush`
+   |
+   = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+  --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+   |
+23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+   |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+   |
+20 + #[derive(Default)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0599]: the method `ranged_builder` exists for struct `RefMut<'_, LayoutContext<ColorBrush>>`, but its trait bounds were not satisfied
+  --> src\text\mod.rs:73:45
+   |
+20 | pub struct ColorBrush(Color);
+   | --------------------- doesn't satisfy `ColorBrush: Default`, `ColorBrush: PartialEq` or `ColorBrush: parley::Brush`
+...
+73 |                 let mut builder = layout_cx.ranged_builder(&mut font_cx, text, scale);
+   |                                             ^^^^^^^^^^^^^^ method cannot be called on `RefMut<'_, LayoutContext<ColorBrush>>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `ColorBrush: PartialEq`
+           which is required by `ColorBrush: parley::Brush`
+           `ColorBrush: Default`
+           which is required by `ColorBrush: parley::Brush`
+help: consider annotating `ColorBrush` with `#[derive(Default, PartialEq)]`
+   |
+20 + #[derive(Default, PartialEq)]
+21 | pub struct ColorBrush(Color);
+   |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+   --> src\text\mod.rs:113:9
+    |
+113 | /         LAYOUT_CONTEXT.with(|lc| {
+114 | |             f(&mut fc.borrow_mut(), &mut lc.borrow_mut())
+115 | |         })
+    | |__________^ no implementation for `ColorBrush == ColorBrush`
+    |
+    = help: the trait `PartialEq` is not implemented for `ColorBrush`
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+    |
+ 20 + #[derive(PartialEq)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+   --> src\text\mod.rs:113:9
+    |
+113 | /         LAYOUT_CONTEXT.with(|lc| {
+114 | |             f(&mut fc.borrow_mut(), &mut lc.borrow_mut())
+115 | |         })
+    | |__________^ the trait `Default` is not implemented for `ColorBrush`
+    |
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+    |
+ 20 + #[derive(Default)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+   --> src\text\mod.rs:113:30
+    |
+113 |         LAYOUT_CONTEXT.with(|lc| {
+    |                              ^^ no implementation for `ColorBrush == ColorBrush`
+    |
+    = help: the trait `PartialEq` is not implemented for `ColorBrush`
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+    |
+ 20 + #[derive(PartialEq)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+   --> src\text\mod.rs:113:30
+    |
+113 |         LAYOUT_CONTEXT.with(|lc| {
+    |                              ^^ the trait `Default` is not implemented for `ColorBrush`
+    |
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+    |
+ 20 + #[derive(Default)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+   --> src\text\mod.rs:114:42
+    |
+114 |             f(&mut fc.borrow_mut(), &mut lc.borrow_mut())
+    |                                          ^^^^^^^^^^^^^^^ no implementation for `ColorBrush == ColorBrush`
+    |
+    = help: the trait `PartialEq` is not implemented for `ColorBrush`
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+    |
+ 20 + #[derive(PartialEq)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+   --> src\text\mod.rs:114:42
+    |
+114 |             f(&mut fc.borrow_mut(), &mut lc.borrow_mut())
+    |                                          ^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ColorBrush`
+    |
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+    |
+ 20 + #[derive(Default)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: can't compare `ColorBrush` with `ColorBrush`
+   --> src\text\mod.rs:114:37
+    |
+114 |             f(&mut fc.borrow_mut(), &mut lc.borrow_mut())
+    |                                     ^^^^^^^^^^^^^^^^^^^^ no implementation for `ColorBrush == ColorBrush`
+    |
+    = help: the trait `PartialEq` is not implemented for `ColorBrush`
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(PartialEq)]`
+    |
+ 20 + #[derive(PartialEq)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0277]: the trait bound `ColorBrush: Default` is not satisfied
+   --> src\text\mod.rs:114:37
+    |
+114 |             f(&mut fc.borrow_mut(), &mut lc.borrow_mut())
+    |                                     ^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ColorBrush`
+    |
+    = note: required for `ColorBrush` to implement `parley::Brush`
+note: required by a bound in `LayoutContext`
+   --> C:\Users\Digital\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\parley-0.11.0\src\context.rs:23:29
+    |
+ 23 | pub struct LayoutContext<B: Brush = [u8; 4]> {
+    |                             ^^^^^ required by this bound in `LayoutContext`
+help: consider annotating `ColorBrush` with `#[derive(Default)]`
+    |
+ 20 + #[derive(Default)]
+ 21 | pub struct ColorBrush(Color);
+    |
+
+error[E0282]: type annotations needed
+  --> src\view\callback.rs:70:38
+   |
+70 |     registry.register(Box::new(move |data| {
+   |                                      ^^^^
+71 |         if data.len() >= 8 {
+   |            ---- type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+70 |     registry.register(Box::new(move |data: /* Type */| {
+   |                                          ++++++++++++
+
+error: implementation of `Fn` is not general enough
+  --> src\view\callback.rs:65:5
+   |
+65 |     registry.register(Box::new(move |_| f()))
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `Fn` is not general enough
+   |
+   = note: closure with signature `fn(&'2 [u8])` must implement `Fn<(&'1 [u8],)>`, for any lifetime `'1`...
+   = note: ...but it actually implements `Fn<(&'2 [u8],)>`, for some specific lifetime `'2`
+
+error: implementation of `FnOnce` is not general enough
+  --> src\view\callback.rs:65:5
+   |
+65 |     registry.register(Box::new(move |_| f()))
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `FnOnce` is not general enough
+   |
+   = note: closure with signature `fn(&'2 [u8])` must implement `FnOnce<(&'1 [u8],)>`, for any lifetime `'1`...
+   = note: ...but it actually implements `FnOnce<(&'2 [u8],)>`, for some specific lifetime `'2`
+
+warning: unused variable: `other`
+   --> src\view\node.rs:144:27
+    |
+144 |     pub fn type_eq(&self, other: &PropMap) -> bool {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_other`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0521]: borrowed data escapes outside of method
+   --> src\view\primitives.rs:128:22
+    |
+118 |     pub(crate) fn register_callbacks(&self, registry: &mut CallbackRegistry) -> PropMap {
+    |                                      -----
+    |                                      |
+    |                                      `self` is a reference that is only valid in the method body
+    |                                      let's call the lifetime of this reference `'1`
+...
+128 |             let id = register_void(registry, move || (cb)());
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |                      |
+    |                      `self` escapes the method body here
+    |                      argument requires that `'1` must outlive `'static`
+
+warning: variable does not need to be mutable
+  --> src\view\mod.rs:47:12
+   |
+47 |     fn key(mut self, key: impl Into<String>) -> KeyedView<Self> {
+   |            ----^^^^
+   |            |
+   |            help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0107, E0119, E0277, E0282, E0308, E0425, E0432, E0433, E0521...
+For more information about an error, try `rustc --explain E0107`.
+warning: `lieui` (lib) generated 12 warnings
+error: could not compile `lieui` (lib) due to 51 previous errors; 12 warnings emitted

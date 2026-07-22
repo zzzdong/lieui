@@ -1,3 +1,4 @@
-pub mod types;
+//! 基础几何类型
 
-pub use types::{Color, Point, Rect, Size};
+mod types;
+pub use types::*;

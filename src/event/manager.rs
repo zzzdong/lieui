@@ -1,52 +1,23 @@
-// src/event/manager.rs
-//! 事件管理器
+//! EventManager — 事件管理器
 //!
-//! 改进：
-//! - 单次 hit-test，消除重复命中测试
-//! - 完整三阶段事件传播：Capture → Target → Bubble
-//! - 简化 API，减少参数传递
+//! 管理焦点/悬停状态和事件分发。
+//! 使用 ElementId handle 而非直接引用。
 
-use crate::core::WidgetId;
-use crate::core::layers::{LayerType, Layers};
-use crate::event::{Event, EventContext, EventEffects, Key, Modifiers, MouseButton};
+use crate::core::ElementId;
+use crate::event::{
+    Event, EventContext, EventEffects, EventPhase, HitTestResult, Key, Modifiers, MouseButton,
+};
 use crate::geometry::Point;
 
-/// 事件传播阶段
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventPhase {
-    /// 捕获阶段：从根到目标父级
-    Capture,
-    /// 目标阶段：目标元素本身
-    Target,
-    /// 冒泡阶段：从目标父级到根
-    Bubble,
-}
-
-/// 命中测试结果（缓存，避免重复计算）
-#[derive(Debug, Clone)]
-pub struct HitTestResult {
-    /// 命中的目标 widget
-    pub target: WidgetId,
-    /// 从根到目标的路径
-    pub path: Vec<WidgetId>,
-}
-
 /// 事件管理器
-///
-/// 管理焦点状态和事件分发逻辑
 pub struct EventManager {
-    /// 当前焦点 widget
-    focused: Option<WidgetId>,
-    /// 当前捕获鼠标事件的 widget（拖拽时使用）
-    mouse_capture: Option<WidgetId>,
-    /// 鼠标是否按下
+    focused: Option<ElementId>,
+    mouse_capture: Option<ElementId>,
     mouse_down: bool,
-    /// 当前悬停的 widget
-    hovered: Option<WidgetId>,
+    hovered: Option<ElementId>,
 }
 
 impl EventManager {
-    /// 创建新的事件管理器
     pub fn new() -> Self {
         Self {
             focused: None,
@@ -56,201 +27,191 @@ impl EventManager {
         }
     }
 
-    /// 获取当前焦点 widget
-    pub fn focused(&self) -> Option<WidgetId> {
+    // ---- 查询 ----
+
+    pub fn focused(&self) -> Option<ElementId> {
         self.focused
     }
 
-    /// 获取当前悬停的 widget
-    pub fn hovered(&self) -> Option<WidgetId> {
+    pub fn hovered(&self) -> Option<ElementId> {
         self.hovered
     }
 
-    /// 获取鼠标捕获 widget
-    pub fn mouse_capture(&self) -> Option<WidgetId> {
+    pub fn mouse_capture(&self) -> Option<ElementId> {
         self.mouse_capture
     }
 
-    // ========================================================================
-    // 动态 Widget 树变动的清理方法
-    // ========================================================================
+    // ---- 清理 ----
 
-    /// 清除焦点（不触发事件，用于被删除的 widget）
     pub fn clear_focused(&mut self) {
         self.focused = None;
     }
 
-    /// 清除悬停（不触发事件，用于被删除的 widget）
     pub fn clear_hovered(&mut self) {
         self.hovered = None;
     }
 
-    /// 清除鼠标捕获（不触发事件，用于被删除的 widget）
     pub fn clear_mouse_capture(&mut self) {
         self.mouse_capture = None;
     }
 
-    // ========================================================================
-    // 鼠标事件处理
-    // ========================================================================
+    // ---- 事件处理（存根：真正的分发逻辑在 Runtime 中通过 Layers 完成）----
 
-    /// 处理鼠标按下事件
+    /// 处理鼠标按下
     ///
-    /// 调用方已通过 `Layers::layer_hit_test_with_path` 计算好命中结果，
-    /// 避免在事件分发期间持有布局根节点的借用。
+    /// 由 Runtime 调用，传入 hit-test 结果。
     pub fn handle_mouse_down(
         &mut self,
         point: Point,
         button: MouseButton,
         hit: &HitTestResult,
-        layers: &Layers,
-        current_layer: LayerType,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         self.mouse_down = true;
         let mut effects = EventEffects::default();
 
         // 处理焦点变化
         if self.focused != Some(hit.target) {
-            let focus_effects = self.handle_focus_change(Some(hit.target), layers);
+            let focus_effects = self.handle_focus_change(Some(hit.target), &mut handler);
             effects.merge(&focus_effects);
         }
 
-        // 检查是否能捕获鼠标
-        if Self::widget_can_focus(layers, hit.target) {
-            self.mouse_capture = Some(hit.target);
-        }
-
-        // 三阶段分发（使用缓存的 hit 结果）
-        let ctx = EventContext::new(layers, current_layer);
+        // 三阶段分发
+        let mut ctx = EventContext::with_target(hit.target);
         let event = Event::MouseDown {
             x: point.x,
             y: point.y,
             button,
         };
-        self.dispatch_three_phase(&event, hit, layers, &ctx);
+        dispatch_three_phase(&event, hit, &mut handler, &mut ctx);
         effects.merge(&ctx.take_effects());
 
         effects
     }
 
-    /// 处理鼠标释放事件
-    ///
-    /// 调用方已通过 `Layers::layer_hit_test_with_path` 计算好释放点的命中结果。
+    /// 处理鼠标释放
     pub fn handle_mouse_up(
         &mut self,
         point: Point,
         button: MouseButton,
         hit: &HitTestResult,
-        layers: &Layers,
-        current_layer: LayerType,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
-        self.mouse_down = false;
         let mut effects = EventEffects::default();
 
-        let event = Event::MouseUp {
-            x: point.x,
-            y: point.y,
-            button,
-        };
-
-        // 如果有捕获，直接分发给捕获的 widget
         if let Some(capture) = self.mouse_capture.take() {
-            let ctx = EventContext::new(layers, current_layer);
-            Self::invoke(capture, &event, layers, &ctx);
+            // 直接分发给捕获的 element
+            let mut ctx = EventContext::with_target(capture);
+            let event = Event::MouseUp {
+                x: point.x,
+                y: point.y,
+                button,
+            };
+            handler(capture, &event, &mut ctx);
             effects.merge(&ctx.take_effects());
 
-            // 检查是否是有效的点击（释放位置仍在捕获的 widget 内）
+            // 检查点击
             if hit.target == capture {
-                // 发送 Click 事件
-                let click_event = Event::Click { button };
-                let ctx = EventContext::new(layers, current_layer);
-                Self::invoke(capture, &click_event, layers, &ctx);
+                let mut ctx = EventContext::with_target(capture);
+                handler(capture, &Event::Click { button }, &mut ctx);
                 effects.merge(&ctx.take_effects());
             }
         } else {
-            let ctx = EventContext::new(layers, current_layer);
-            self.dispatch_three_phase(&event, hit, layers, &ctx);
+            let mut ctx = EventContext::with_target(hit.target);
+            dispatch_three_phase(
+                &Event::MouseUp {
+                    x: point.x,
+                    y: point.y,
+                    button,
+                },
+                hit,
+                &mut handler,
+                &mut ctx,
+            );
             effects.merge(&ctx.take_effects());
 
-            // 发送 Click 事件
-            let click_event = Event::Click { button };
-            let ctx = EventContext::new(layers, current_layer);
-            self.dispatch_three_phase(&click_event, hit, layers, &ctx);
+            let mut ctx = EventContext::with_target(hit.target);
+            dispatch_three_phase(&Event::Click { button }, hit, &mut handler, &mut ctx);
             effects.merge(&ctx.take_effects());
         }
 
+        self.mouse_down = false;
         effects
     }
 
-    /// 处理鼠标移动事件
-    ///
-    /// `hit` 由调用方通过 `Layers::layer_hit_test_with_path` 计算得到，
-    /// 用于事件分发和悬停状态更新，避免二次 hit-test。
+    /// 处理鼠标移动
     pub fn handle_mouse_move(
         &mut self,
         point: Point,
         hit: Option<&HitTestResult>,
-        layers: &Layers,
-        current_layer: LayerType,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
+        let mut effects = EventEffects::default();
+
         let event = Event::MouseMove {
             x: point.x,
             y: point.y,
         };
-        let mut effects = EventEffects::default();
-        let current_hover = hit.map(|h| h.target);
 
-        // 如果有鼠标捕获，直接分发给捕获的 widget；否则分发给命中目标
         if let Some(capture) = self.mouse_capture {
-            let ctx = EventContext::new(layers, current_layer);
-            Self::invoke(capture, &event, layers, &ctx);
+            let mut ctx = EventContext::with_target(capture);
+            handler(capture, &event, &mut ctx);
             effects.merge(&ctx.take_effects());
         } else if let Some(hit) = hit {
-            let ctx = EventContext::new(layers, current_layer);
-            self.dispatch_three_phase(&event, hit, layers, &ctx);
+            let mut ctx = EventContext::with_target(hit.target);
+            dispatch_three_phase(&event, hit, &mut handler, &mut ctx);
             effects.merge(&ctx.take_effects());
         }
 
-        // 处理悬停状态变化（复用已经计算好的命中结果）
-        let hover_effects = self.handle_hover_change_with_target(current_hover, layers);
-        effects.merge(&hover_effects);
+        // 悬停状态变化
+        let current_hover = hit.map(|h| h.target);
+        if current_hover != self.hovered {
+            if let Some(prev) = self.hovered {
+                let mut ctx = EventContext::with_target(prev);
+                handler(prev, &Event::MouseLeave, &mut ctx);
+                effects.merge(&ctx.take_effects());
+            }
+            if let Some(cur) = current_hover {
+                let mut ctx = EventContext::with_target(cur);
+                handler(cur, &Event::MouseEnter, &mut ctx);
+                effects.merge(&ctx.take_effects());
+            }
+            self.hovered = current_hover;
+        }
 
         effects
     }
 
-    /// 处理鼠标滚轮事件
-    ///
-    /// 调用方已通过 `Layers::layer_hit_test_with_path` 计算好命中结果。
+    /// 处理鼠标滚轮
     pub fn handle_wheel(
         &mut self,
         point: Point,
         delta_x: f32,
         delta_y: f32,
         hit: &HitTestResult,
-        layers: &Layers,
-        current_layer: LayerType,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
-        let event = Event::MouseWheel {
-            delta_x,
-            delta_y,
-            x: point.x,
-            y: point.y,
-        };
-
-        let ctx = EventContext::new(layers, current_layer);
-        self.dispatch_three_phase(&event, hit, layers, &ctx);
+        let mut ctx = EventContext::with_target(hit.target);
+        dispatch_three_phase(
+            &Event::MouseWheel {
+                delta_x,
+                delta_y,
+                x: point.x,
+                y: point.y,
+            },
+            hit,
+            &mut handler,
+            &mut ctx,
+        );
         ctx.take_effects()
     }
 
-    // ========================================================================
-    // 焦点管理
-    // ========================================================================
+    // ---- 焦点管理 ----
 
-    /// 设置焦点到指定 widget
     pub fn handle_focus_change(
         &mut self,
-        new_focus: Option<WidgetId>,
-        layers: &Layers,
+        new_focus: Option<ElementId>,
+        handler: &mut impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         let old_focus = self.focused;
         let mut effects = EventEffects::default();
@@ -259,17 +220,15 @@ impl EventManager {
             return effects;
         }
 
-        // 焦点离开旧元素
         if let Some(old_id) = old_focus {
-            let ctx = EventContext::new(layers, LayerType::Base);
-            Self::invoke(old_id, &Event::FocusOut, layers, &ctx);
+            let mut ctx = EventContext::with_target(old_id);
+            handler(old_id, &Event::FocusOut, &mut ctx);
             effects.merge(&ctx.take_effects());
         }
 
-        // 焦点进入新元素
         if let Some(new_id) = new_focus {
-            let ctx = EventContext::new(layers, LayerType::Base);
-            Self::invoke(new_id, &Event::FocusIn, layers, &ctx);
+            let mut ctx = EventContext::with_target(new_id);
+            handler(new_id, &Event::FocusIn, &mut ctx);
             effects.merge(&ctx.take_effects());
         }
 
@@ -277,214 +236,75 @@ impl EventManager {
         effects
     }
 
-    /// 处理窗口失焦（清除焦点状态）
-    pub fn handle_window_unfocus(&mut self, layers: &Layers) -> EventEffects {
-        let mut effects = EventEffects::default();
-        if let Some(focused) = self.focused.take() {
-            let ctx = EventContext::new(layers, LayerType::Base);
-            Self::invoke(focused, &Event::FocusOut, layers, &ctx);
-            effects.merge(&ctx.take_effects());
-        }
-        effects
-    }
+    // ---- 键盘事件 ----
 
-    // ========================================================================
-    // 键盘事件处理
-    // ========================================================================
-
-    /// 处理键盘按下
     pub fn handle_key_down(
         &mut self,
         key: Key,
         modifiers: Modifiers,
-        layers: &Layers,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
-        self.dispatch_to_focused(&Event::KeyDown { key, modifiers }, layers)
+        if let Some(target) = self.focused {
+            let mut ctx = EventContext::with_target(target);
+            handler(target, &Event::KeyDown { key, modifiers }, &mut ctx);
+            ctx.take_effects()
+        } else {
+            EventEffects::default()
+        }
     }
 
-    /// 处理键盘释放
     pub fn handle_key_up(
         &mut self,
         key: Key,
         modifiers: Modifiers,
-        layers: &Layers,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
-        self.dispatch_to_focused(&Event::KeyUp { key, modifiers }, layers)
-    }
-
-    // ========================================================================
-    // IME 事件处理
-    // ========================================================================
-
-    /// 处理 IME 预编辑事件
-    pub fn handle_ime_preedit(
-        &mut self,
-        text: String,
-        cursor_start: Option<usize>,
-        cursor_end: Option<usize>,
-        layers: &Layers,
-    ) -> EventEffects {
-        self.dispatch_to_focused(
-            &Event::ImePreedit {
-                text,
-                cursor_start,
-                cursor_end,
-            },
-            layers,
-        )
-    }
-
-    /// 处理 IME 提交事件
-    pub fn handle_ime_commit(&mut self, text: String, layers: &Layers) -> EventEffects {
-        self.dispatch_to_focused(&Event::ImeCommit { text }, layers)
-    }
-
-    /// 处理 IME 禁用事件
-    pub fn handle_ime_disabled(&mut self, layers: &Layers) -> EventEffects {
-        self.dispatch_to_focused(&Event::ImeDisabled, layers)
-    }
-
-    // ========================================================================
-    // 内部：事件分发
-    // ========================================================================
-
-    /// 三阶段事件分发：Capture → Target → Bubble
-    ///
-    /// 使用缓存的 HitTestResult，避免重复 hit-test
-    fn dispatch_three_phase(
-        &self,
-        event: &Event,
-        hit: &HitTestResult,
-        layers: &Layers,
-        ctx: &EventContext<'_>,
-    ) {
-        let target = hit.target;
-        let path = &hit.path;
-
-        // Phase 1: Capture（从根到目标父级）
-        // 路径: [Root, ..., Parent, Target]
-        // Capture 需要遍历 Root → ... → Parent（不包括 Target）
-        for &id in path.iter().rev().skip(1) {
-            ctx.set_phase(EventPhase::Capture);
-            Self::invoke(id, event, layers, ctx);
-            if ctx.is_stopped() {
-                return;
-            }
-        }
-
-        // Phase 2: Target
-        ctx.set_phase(EventPhase::Target);
-        Self::invoke(target, event, layers, ctx);
-        if ctx.is_stopped() {
-            return;
-        }
-
-        // Phase 3: Bubble（从目标父级到根）
-        for &id in path.iter().rev().skip(1) {
-            ctx.set_phase(EventPhase::Bubble);
-            Self::invoke(id, event, layers, ctx);
-            if ctx.is_stopped() {
-                return;
-            }
-        }
-    }
-
-    /// 向焦点元素分发事件（三阶段）
-    fn dispatch_to_focused(&self, event: &Event, layers: &Layers) -> EventEffects {
-        let mut effects = EventEffects::default();
         if let Some(target) = self.focused {
-            let path = layers.path_to(target);
-            let ctx = EventContext::new(layers, LayerType::Base);
-            self.dispatch_three_phase_with_path(event, &path, target, layers, &ctx);
-            effects.merge(&ctx.take_effects());
+            let mut ctx = EventContext::with_target(target);
+            handler(target, &Event::KeyUp { key, modifiers }, &mut ctx);
+            ctx.take_effects()
+        } else {
+            EventEffects::default()
         }
-        effects
-    }
-
-    /// 三阶段分发（已知路径）
-    fn dispatch_three_phase_with_path(
-        &self,
-        event: &Event,
-        path: &[WidgetId],
-        target: WidgetId,
-        layers: &Layers,
-        ctx: &EventContext<'_>,
-    ) {
-        // Phase 1: Capture
-        for &id in path.iter().rev().skip(1) {
-            ctx.set_phase(EventPhase::Capture);
-            Self::invoke(id, event, layers, ctx);
-            if ctx.is_stopped() {
-                return;
-            }
-        }
-
-        // Phase 2: Target
-        ctx.set_phase(EventPhase::Target);
-        Self::invoke(target, event, layers, ctx);
-        if ctx.is_stopped() {
-            return;
-        }
-
-        // Phase 3: Bubble
-        for &id in path.iter().rev().skip(1) {
-            ctx.set_phase(EventPhase::Bubble);
-            Self::invoke(id, event, layers, ctx);
-            if ctx.is_stopped() {
-                return;
-            }
-        }
-    }
-
-    /// 调用单个 widget 的事件处理
-    fn invoke(id: WidgetId, event: &Event, layers: &Layers, ctx: &EventContext<'_>) {
-        if let Some(mut widget) = layers.get_widget_mut(id) {
-            let _ = widget.handle_event(event, ctx);
-        }
-    }
-
-    /// 检查 widget 是否可以接受焦点
-    fn widget_can_focus(layers: &Layers, id: WidgetId) -> bool {
-        layers
-            .get_widget(id)
-            .map(|w| w.can_focus())
-            .unwrap_or(false)
-    }
-
-    /// 处理悬停状态变化
-    fn handle_hover_change_with_target(
-        &mut self,
-        current_hover: Option<WidgetId>,
-        layers: &Layers,
-    ) -> EventEffects {
-        let prev_hover = self.hovered;
-        let mut effects = EventEffects::default();
-
-        if current_hover == prev_hover {
-            return effects;
-        }
-
-        // 发送 MouseLeave 事件给之前悬停的 widget
-        if let Some(prev_id) = prev_hover {
-            let ctx = EventContext::new(layers, LayerType::Base);
-            Self::invoke(prev_id, &Event::MouseLeave, layers, &ctx);
-            effects.merge(&ctx.take_effects());
-        }
-
-        // 发送 MouseEnter 事件给当前悬停的 widget
-        if let Some(current_id) = current_hover {
-            let ctx = EventContext::new(layers, LayerType::Base);
-            Self::invoke(current_id, &Event::MouseEnter, layers, &ctx);
-            effects.merge(&ctx.take_effects());
-        }
-
-        self.hovered = current_hover;
-        effects
     }
 }
 
 impl Default for EventManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---- 三阶段事件分发 ----
+
+pub fn dispatch_three_phase(
+    event: &Event,
+    hit: &HitTestResult,
+    handler: &mut impl FnMut(ElementId, &Event, &mut EventContext),
+    ctx: &mut EventContext,
+) {
+    // Phase 1: Capture（从根到目标父级）
+    for &id in hit.path.iter().rev().skip(1) {
+        ctx.set_phase(EventPhase::Capture);
+        handler(id, event, ctx);
+        if ctx.is_stopped() {
+            return;
+        }
+    }
+
+    // Phase 2: Target
+    ctx.set_phase(EventPhase::Target);
+    handler(hit.target, event, ctx);
+    if ctx.is_stopped() {
+        return;
+    }
+
+    // Phase 3: Bubble（从目标父级到根）
+    for &id in hit.path.iter().rev().skip(1) {
+        ctx.set_phase(EventPhase::Bubble);
+        handler(id, event, ctx);
+        if ctx.is_stopped() {
+            return;
+        }
     }
 }

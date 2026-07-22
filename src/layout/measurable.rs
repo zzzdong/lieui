@@ -1,97 +1,31 @@
-// src/layout/measurable.rs
-//! 可测量尺寸 trait 和实现
-//!
-//! 改进：
-//! - TextMeasure 添加 create_layout 方法，返回完整布局（不只是尺寸）
+//! Measurable trait
 
-use crate::geometry::Size;
-use crate::text::{TextEngine, TextLayout, TextStyle};
+use crate::layout::box_model::{IntrinsicSize, LayoutConstraint};
+use crate::view::node::PropMap;
 
-/// 可测量尺寸 trait
-///
-/// 用于需要动态计算尺寸的 widget（如 Text）
-pub trait Measurable: Send + Sync {
-    /// 测量尺寸
-    ///
-    /// # 参数
-    /// - `max_width`: 最大可用宽度，None 表示无限制
-    fn measure(&self, max_width: Option<f32>) -> Size;
-
-    /// 克隆自身
-    fn clone_box(&self) -> Box<dyn Measurable>;
+pub trait Measurable {
+    fn measure(&self, props: &PropMap, constraint: &LayoutConstraint) -> IntrinsicSize;
 }
 
-impl Clone for Box<dyn Measurable> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
-
-impl std::fmt::Debug for dyn Measurable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Measurable").finish()
-    }
-}
-
-/// 文本测量器
-///
-/// 专门用于 Text widget 的尺寸测量和布局创建
-#[derive(Clone)]
-pub struct TextMeasure {
-    /// 文本内容
-    pub content: String,
-    /// 文本样式
-    pub style: TextStyle,
-}
-
-impl TextMeasure {
-    /// 创建新的文本测量器
-    pub fn new(content: impl Into<String>, style: TextStyle) -> Self {
-        Self {
-            content: content.into(),
-            style,
+pub struct DefaultMeasurer;
+impl Measurable for DefaultMeasurer {
+    fn measure(&self, props: &PropMap, constraint: &LayoutConstraint) -> IntrinsicSize {
+        let mut w = 0.0f32;
+        let mut h = 0.0f32;
+        if let Some(content) = props.get_str("content") {
+            let font_size = props.get_f32("font_size").unwrap_or(16.0) as f64;
+            let max_w = if constraint.max_width < f32::MAX { Some(constraint.max_width as f64) } else { None };
+            w = crate::text::TextEngine::measure_width(content, font_size, max_w) as f32;
+            h = crate::text::TextEngine::measure_height(content, font_size, max_w) as f32;
         }
-    }
-
-    /// 创建完整的文本布局（用于缓存）
-    ///
-    /// 返回 TextLayout 对象，包含所有 glyph 位置信息
-    pub fn create_layout(&self, max_width: Option<f32>) -> TextLayout {
-        TextEngine::layout(&self.content, &self.style, 1.0, max_width)
-    }
-}
-
-impl Measurable for TextMeasure {
-    fn measure(&self, max_width: Option<f32>) -> Size {
-        let layout = self.create_layout(max_width);
-        Size::new(layout.width(), layout.height())
-    }
-
-    fn clone_box(&self) -> Box<dyn Measurable> {
-        Box::new(self.clone())
-    }
-}
-
-/// 固定尺寸测量器
-///
-/// 用于尺寸固定的 widget
-#[derive(Clone, Copy, Debug)]
-pub struct FixedMeasure {
-    pub size: Size,
-}
-
-impl FixedMeasure {
-    pub fn new(size: Size) -> Self {
-        Self { size }
-    }
-}
-
-impl Measurable for FixedMeasure {
-    fn measure(&self, _max_width: Option<f32>) -> Size {
-        self.size
-    }
-
-    fn clone_box(&self) -> Box<dyn Measurable> {
-        Box::new(*self)
+        if let Some(label) = props.get_str("label") {
+            w = w.max(crate::text::TextEngine::measure_width(label, 14.0, None) as f32 + 24.0);
+            h = h.max(32.0);
+        }
+        if let Some(fw) = props.get_f32("width") { w = fw; }
+        if let Some(fh) = props.get_f32("height") { h = fh; }
+        w = w.clamp(constraint.min_width, constraint.max_width);
+        h = h.clamp(constraint.min_height, constraint.max_height);
+        IntrinsicSize::new(w, h)
     }
 }

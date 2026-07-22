@@ -1,16 +1,14 @@
-[package]
+﻿[package]
 name = "lieui"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition = "2021"
+description = "A Rust GUI library with C/S architecture and builder-driven UI"
 
 [dependencies]
 log = "0.4"
 vello_cpu = "0.0.9"
 kurbo = "0.13.1"
 parley = "0.11.0"
-winit = "0.30"
-softbuffer = "0.4"
-clipboard-rs = "0.3"
 slotmap = "1.0"
 
 [[example]]
@@ -22,5 +20,5 @@ name = "counter"
 path = "examples/counter.rs"
 
 [[example]]
-name = "control_panel"
-path = "examples/control_panel.rs"
+name = "builder_pdfkit"
+path = "examples/builder_pdfkit.rs"

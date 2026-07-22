@@ -1,38 +1,25 @@
-pub mod app;
-pub mod builder;
+﻿pub mod app;
 pub mod core;
 pub mod event;
 pub mod geometry;
 pub mod layout;
 pub mod render;
+pub mod runtime;
 pub mod state;
 pub mod text;
-pub mod widget;
-pub mod widgets;
+pub mod view;
 
 pub mod prelude {
-    pub use crate::app::App;
-    pub use crate::builder::{BuildContext, BuildSnapshot};
-    pub use crate::core::{ViewContext, WidgetId};
-    pub use crate::event::{Event, EventType, MouseButton};
+    pub use crate::app::Application;
+    pub use crate::core::ElementId;
+    pub use crate::event::{Event, EventType, MouseButton, Key};
     pub use crate::geometry::{Color, Point, Rect, Size};
-    pub use crate::layout::LayoutConstraint;
+    pub use crate::layout::{LayoutConstraint, BoxStyle};
+    pub use crate::render::visual::{LayeredElement, VisualElement};
+    pub use crate::render::{Renderer, VelloRenderer};
+    pub use crate::runtime::Runtime;
     pub use crate::state::State;
-    pub use crate::widget::Widget;
-    pub use crate::widgets::{
-        Button, Checkbox, Column, Container, Divider, Image, ProgressBar, Row, Slider, Switch, Text,
-    };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_create_widget() {
-        let mut ctx = core::ViewContext::new(geometry::Size::new(800.0, 600.0));
-        let text = widgets::Text::new("Hello");
-        let id = ctx.create(text);
-        assert!(ctx.get::<widgets::Text>(id).is_some());
-    }
+    pub use crate::view::node::PropMap;
+    pub use crate::view::primitives::{Button, Checkbox, Column, Container, Divider, Image, Row, Text};
+    pub use crate::view::{KeyedView, View, ViewExt, ViewNode};
 }

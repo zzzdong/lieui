@@ -1,306 +1,37 @@
-// src/core/layers.rs
-//! 三层架构：Base → Overlay → Modal
-//!
-//! 所有 Widget 存储在一个共享的 WidgetTree 中，
-//! 每层只维护自己的 root（入口）和 LayoutContext（布局隔离）。
-//! 所有层均用 RefCell 包裹，使 EventContext（持 &Layers）可直接修改各层。
-//!
-//! 动态 Widget 树操作使用命令队列模式：
-//! - 事件回调中通过 `queue_*` 方法排入待办操作
-//! - 主循环通过 `apply_pending_ops()` 批量执行
-
-use crate::core::WidgetId;
-use crate::event::HitTestResult;
-use crate::geometry::Point;
-use crate::layout::{LayoutContext, LayoutNode};
-use crate::widget::WidgetTree;
+﻿//! Layers — 三层架构 (Base/Overlay/Modal)
 use std::cell::RefCell;
+use crate::core::ElementId;
+use crate::event::EventManager;
+use crate::layout::node::LayoutContext;
+use crate::runtime::element::ElementTree;
 
-/// 类型别名：简化 Widget 跨层查找的返回类型写法
-/// 这些类型来自 WidgetTree（SlotMap + RefCell）
-pub type WidgetRef<'a> = std::cell::Ref<'a, Box<dyn crate::widget::Widget>>;
-pub type WidgetRefMut<'a> = std::cell::RefMut<'a, Box<dyn crate::widget::Widget>>;
-
-/// 待执行的 Widget 树操作（不含 Create/Replace——这些需要 immediate 的 &mut）
-///
-/// 事件回调执行期间将操作暂存至此，主循环的 render() 开始时批量处理。
-enum PendingOp {
-    AddChild(WidgetId, WidgetId),
-    Remove(WidgetId),
-    Detach(WidgetId),
-    Reparent(WidgetId, WidgetId),
-}
-
-/// 层类型（固定 3 层，z-index 递增）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayerType {
-    /// z = 0，主内容层
-    Base,
-    /// z = 1，浮动层（float 按钮、toast 等）
-    Overlay,
-    /// z = 2，模态层（modal dialog）
-    Modal,
-}
-
+pub enum LayerType { Base, Overlay, Modal }
 impl LayerType {
-    /// 对应的 z-index 基准值（渲染排序用）
-    pub fn z_index(&self) -> i32 {
-        match self {
-            LayerType::Base => 0,
-            LayerType::Overlay => 1000,
-            LayerType::Modal => 2000,
-        }
-    }
-
-    /// 事件派发顺序：从高 z 到低 z
-    pub fn dispatch_order() -> [LayerType; 3] {
-        [LayerType::Modal, LayerType::Overlay, LayerType::Base]
-    }
+    pub fn z_index(&self) -> i32 { match self { LayerType::Base => 0, LayerType::Overlay => 1000, LayerType::Modal => 2000 } }
 }
 
-/// 单层状态
-pub struct LayerInfo {
-    root: Option<WidgetId>,
-    layout: LayoutContext,
-}
+struct LayerInfo { root: Option<ElementId>, layout: LayoutContext }
+impl LayerInfo { fn new() -> Self { Self { root: None, layout: LayoutContext::new() } } }
 
-impl LayerInfo {
-    fn new() -> Self {
-        Self {
-            root: None,
-            layout: LayoutContext::new(),
-        }
-    }
-}
-
-/// 三层架构容器
-///
-/// - 所有 Widget 存在共享的 `tree` 中（WidgetId 全局唯一）
-/// - 每层有自己的 root（入口）和 LayoutContext（布局隔离）
-/// - 所有层用 RefCell 包裹，允许 EventContext 通过 &Layers 修改任意层
-/// - 动态树操作通过 pending_ops 命令队列实现，避免借用冲突
 pub struct Layers {
-    /// 所有 Widget 的统一存储
-    pub tree: WidgetTree,
-
-    /// 主内容层
-    pub base: RefCell<LayerInfo>,
-
-    /// 浮动层
-    pub overlay: RefCell<LayerInfo>,
-
-    /// 模态层
-    pub modal: RefCell<LayerInfo>,
-
-    /// 待执行的 Widget 树操作队列
-    /// 事件回调中通过 queue_* 方法添加，主循环中通过 apply_pending_ops 执行
-    pending_ops: RefCell<Vec<PendingOp>>,
+    pub tree: ElementTree,
+    base: RefCell<LayerInfo>,
+    _overlay: RefCell<LayerInfo>,
+    _modal: RefCell<LayerInfo>,
+    pub event_manager: RefCell<EventManager>,
 }
-
-impl Default for Layers {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Layers {
-    pub fn new() -> Self {
-        Self {
-            tree: WidgetTree::new(),
-            base: RefCell::new(LayerInfo::new()),
-            overlay: RefCell::new(LayerInfo::new()),
-            modal: RefCell::new(LayerInfo::new()),
-            pending_ops: RefCell::new(Vec::new()),
-        }
+    pub fn new() -> Self { Self { tree: ElementTree::new(), base: RefCell::new(LayerInfo::new()), _overlay: RefCell::new(LayerInfo::new()), _modal: RefCell::new(LayerInfo::new()), event_manager: RefCell::new(EventManager::new()) } }
+    pub fn set_base_root(&mut self, id: ElementId) { self.base.borrow_mut().root = Some(id); }
+    pub fn layer_root(&self, lt: LayerType) -> Option<ElementId> {
+        match lt { LayerType::Base => self.base.borrow().root, _ => None }
     }
-
-    // ========================================================================
-    // 命令队列：事件回调中调用（通过 &self），操作被暂存
-    // ========================================================================
-
-    /// 排队：添加子节点
-    pub fn queue_add_child(&self, parent_id: WidgetId, child_id: WidgetId) {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::AddChild(parent_id, child_id));
+    pub fn with_layout<R>(&self, lt: LayerType, f: impl FnOnce(&LayoutContext) -> R) -> R {
+        match lt { LayerType::Base => f(&self.base.borrow().layout), _ => unreachable!() }
     }
-
-    /// 排队：删除 widget
-    pub fn queue_remove(&self, id: WidgetId) {
-        self.pending_ops.borrow_mut().push(PendingOp::Remove(id));
-    }
-
-    /// 排队：分离 widget
-    pub fn queue_detach(&self, child_id: WidgetId) {
-        self.pending_ops.borrow_mut().push(PendingOp::Detach(child_id));
-    }
-
-    /// 排队：移动 widget 到新父节点
-    pub fn queue_reparent(&self, child_id: WidgetId, new_parent: WidgetId) {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::Reparent(child_id, new_parent));
-    }
-
-    /// 执行所有排队的操作（需要 &mut self，由 ViewContext 调用）
-    ///
-    /// 返回是否有任何操作被执行（用于触发布局失效）
-    pub fn apply_pending_ops(&mut self) -> bool {
-        let ops = std::mem::take(&mut *self.pending_ops.borrow_mut());
-        if ops.is_empty() {
-            return false;
-        }
-        for op in ops {
-            match op {
-                PendingOp::AddChild(parent, child) => {
-                    self.tree.add_child(parent, child);
-                }
-                PendingOp::Remove(id) => {
-                    self.tree.remove(id);
-                }
-                PendingOp::Detach(child) => {
-                    self.tree.detach(child);
-                }
-                PendingOp::Reparent(child, new_parent) => {
-                    self.tree.reparent(child, new_parent);
-                }
-            }
-        }
-        true
-    }
-
-    // ========== 用户 API（操作各层）==========
-
-    /// 创建 Widget（需要 &mut self，由 ViewContext 调用）
-    pub fn create<W: crate::widget::Widget>(&mut self, widget: W) -> WidgetId {
-        self.tree.create(widget)
-    }
-
-    /// 在 base 层创建 Widget（需要 &mut self）
-    pub fn create_in_base<W: crate::widget::Widget>(&mut self, widget: W) -> WidgetId {
-        self.tree.create(widget)
-    }
-
-    /// 设置 base 层根节点
-    pub fn set_base_root(&mut self, root_id: WidgetId) {
-        self.base.borrow_mut().root = Some(root_id);
-    }
-
-    /// 显示 Modal 层（设置 modal 层根节点）
-    pub fn show_modal(&self, root_id: WidgetId) {
-        self.modal.borrow_mut().root = Some(root_id);
-    }
-
-    /// 隐藏 Modal 层（清除 modal 层根节点和布局）
-    pub fn hide_modal(&self) {
-        let mut modal = self.modal.borrow_mut();
-        modal.root = None;
-        modal.layout = LayoutContext::new(); // ← 清除布局，防止 build_render_tree 使用旧布局
-    }
-
-    /// 显示 Overlay 层
-    pub fn show_overlay(&self, root_id: WidgetId) {
-        self.overlay.borrow_mut().root = Some(root_id);
-    }
-
-    /// 隐藏 Overlay 层（清除 overlay 层根节点和布局）
-    pub fn hide_overlay(&self) {
-        let mut overlay = self.overlay.borrow_mut();
-        overlay.root = None;
-        overlay.layout = LayoutContext::new(); // ← 同步清除布局
-    }
-
-    // ========== 布局相关 ==========
-
-    /// 获取指定层根节点 ID
-    pub fn layer_root(&self, lt: LayerType) -> Option<WidgetId> {
-        match lt {
-            LayerType::Base => self.base.borrow().root,
-            LayerType::Overlay => self.overlay.borrow().root,
-            LayerType::Modal => self.modal.borrow().root,
-        }
-    }
-
-    /// 克隆指定层的布局根节点（用于事件派发，不持有 borrow）
-    pub fn layer_layout_root(&self, lt: LayerType) -> Option<crate::layout::LayoutNode> {
-        match lt {
-            LayerType::Base => self.base.borrow().layout.root.clone(),
-            LayerType::Overlay => self.overlay.borrow().layout.root.clone(),
-            LayerType::Modal => self.modal.borrow().layout.root.clone(),
-        }
-    }
-
-    /// 设置指定层的布局上下文（统一用 RefCell）
-    pub fn set_layer_layout(&self, lt: LayerType, ctx: LayoutContext) {
-        match lt {
-            LayerType::Base => self.base.borrow_mut().layout = ctx,
-            LayerType::Overlay => self.overlay.borrow_mut().layout = ctx,
-            LayerType::Modal => self.modal.borrow_mut().layout = ctx,
-        }
-    }
-
-    /// 检查某层是否有内容
-    pub fn layer_has_content(&self, lt: LayerType) -> bool {
-        self.layer_root(lt).is_some()
-    }
-
-    /// 在某层做命中测试
-    pub fn layer_hit_test(&self, lt: LayerType, point: Point) -> Option<WidgetId> {
-        self.with_layer(lt, |layer| layer.layout.root.as_ref()?.hit_test(point))
-    }
-
-    /// 在某层做命中测试，并返回目标与其从根到目标的路径
-    ///
-    /// 只借用布局根节点做命中测试，不会克隆整棵布局树
-    pub fn layer_hit_test_with_path(&self, lt: LayerType, point: Point) -> Option<HitTestResult> {
-        let target = self.with_layer(lt, |layer| layer.layout.root.as_ref()?.hit_test(point))?;
-        let path = self.path_to(target);
-        Some(HitTestResult { target, path })
-    }
-
-    /// 在持有布局根节点借用的前提下执行操作，避免 `LayoutNode` 整棵克隆
-    pub fn with_layer_layout_root<R>(
-        &self,
-        lt: LayerType,
-        f: impl FnOnce(&LayoutNode) -> R,
-    ) -> Option<R> {
-        self.with_layer(lt, |layer| layer.layout.root.as_ref().map(f))
-    }
-
-    // ========== Widget 跨层查找 ==========
-
-    /// 获取 Widget 的不可变引用（跨层查找）
-    pub fn get_widget(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
-        self.tree.get_widget_immut(id)
-    }
-
-    /// 获取 Widget 的可变引用（跨层查找）
-    pub fn get_widget_mut(&self, id: WidgetId) -> Option<WidgetRefMut<'_>> {
-        self.tree.get_widget(id)
-    }
-
-    /// 查找 Widget 到根的路径（跨层，因为所有 widget 在同一 tree 中）
-    pub fn path_to(&self, target: WidgetId) -> Vec<WidgetId> {
-        self.tree.path_to(target)
-    }
-
-    // ========== 辅助闭包方法（供 EventContext 使用）==========
-
-    /// 在指定层上执行只读操作（不持有 borrow 超过闭包）
-    pub fn with_layer<T>(&self, lt: LayerType, f: impl FnOnce(&LayerInfo) -> T) -> T {
-        match lt {
-            LayerType::Base => f(&self.base.borrow()),
-            LayerType::Overlay => f(&self.overlay.borrow()),
-            LayerType::Modal => f(&self.modal.borrow()),
-        }
-    }
-
-    /// 在指定层上执行可变操作
-    pub fn with_layer_mut<T>(&self, lt: LayerType, f: impl FnOnce(&mut LayerInfo) -> T) -> T {
-        match lt {
-            LayerType::Base => f(&mut self.base.borrow_mut()),
-            LayerType::Overlay => f(&mut self.overlay.borrow_mut()),
-            LayerType::Modal => f(&mut self.modal.borrow_mut()),
-        }
+    pub fn with_layout_mut<R>(&self, lt: LayerType, f: impl FnOnce(&mut LayoutContext) -> R) -> R {
+        match lt { LayerType::Base => f(&mut self.base.borrow_mut().layout), _ => unreachable!() }
     }
 }
+impl Default for Layers { fn default() -> Self { Self::new() } }

@@ -1,28 +1,61 @@
 //! 事件传播控制
-//!
-//! 提供简单的事件传播控制机制
 
-/// 事件传播控制器
-///
-/// 用于在事件回调中控制事件是否继续传播
-#[derive(Default, Clone, Copy)]
-pub struct Propagation {
-    stopped: bool,
+use crate::core::ElementId;
+
+/// 命中测试结果（缓存，避免重复计算）
+#[derive(Debug, Clone)]
+pub struct HitTestResult {
+    pub target: ElementId,
+    pub path: Vec<ElementId>,
 }
 
-impl Propagation {
-    /// 创建新的传播控制器
-    pub fn new() -> Self {
-        Self::default()
+/// 事件传播阶段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventPhase {
+    Capture,
+    Target,
+    Bubble,
+}
+
+/// 事件传播控制
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Propagation {
+    Continue,
+    Stop,
+}
+
+/// 事件副作用
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventEffects {
+    needs_rebuild: bool,
+    needs_layout: bool,
+    needs_render: bool,
+}
+
+impl EventEffects {
+    pub fn needs_rebuild(&self) -> bool {
+        self.needs_rebuild
+    }
+    pub fn needs_layout(&self) -> bool {
+        self.needs_layout
+    }
+    pub fn needs_render(&self) -> bool {
+        self.needs_render
     }
 
-    /// 停止事件传播
-    pub fn stop(&mut self) {
-        self.stopped = true;
+    pub fn request_rebuild(&mut self) {
+        self.needs_rebuild = true;
+    }
+    pub fn request_layout(&mut self) {
+        self.needs_layout = true;
+    }
+    pub fn request_render(&mut self) {
+        self.needs_render = true;
     }
 
-    /// 是否已停止传播
-    pub fn is_stopped(&self) -> bool {
-        self.stopped
+    pub fn merge(&mut self, other: &EventEffects) {
+        self.needs_rebuild = self.needs_rebuild || other.needs_rebuild;
+        self.needs_layout = self.needs_layout || other.needs_layout;
+        self.needs_render = self.needs_render || other.needs_render;
     }
 }

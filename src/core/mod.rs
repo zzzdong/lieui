@@ -1,7 +1,6 @@
+//! 核心类型
 pub mod id;
 pub mod layers;
-pub mod view_context;
 
-pub use id::WidgetId;
-pub use layers::{LayerType, Layers};
-pub use view_context::ViewContext;
+pub use id::ElementId;
+pub use layers::*;

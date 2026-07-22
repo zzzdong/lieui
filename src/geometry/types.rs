@@ -1,318 +1,40 @@
-// src/geometry/types.rs
+﻿//! 基础几何类型（Point, Size, Rect, Color）
 
-use vello_cpu::color::{AlphaColor, Srgb};
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point { pub x: f32, pub y: f32 }
 impl Point {
-    pub const ZERO: Self = Self::new(0.0, 0.0);
-
-    pub const fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-
-    pub const fn zero() -> Self {
-        Self::new(0.0, 0.0)
-    }
-
-    // 两点距离
-    pub fn distance_to(&self, other: Point) -> f32 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
-    }
+    pub const fn new(x: f32, y: f32) -> Self { Self { x, y } }
+    pub const fn zero() -> Self { Self { x: 0.0, y: 0.0 } }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Size {
-    pub width: f32,
-    pub height: f32,
-}
-
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Size { pub width: f32, pub height: f32 }
 impl Size {
-    pub const ZERO: Self = Self::new(0.0, 0.0);
-
-    pub const fn new(width: f32, height: f32) -> Self {
-        Self { width, height }
-    }
-
-    pub const fn zero() -> Self {
-        Self::new(0.0, 0.0)
-    }
-
-    /// 将尺寸限制在 min 和 max 之间
-    pub fn clamp(&self, min: Size, max: Size) -> Size {
-        Size::new(
-            self.width.clamp(min.width, max.width),
-            self.height.clamp(min.height, max.height),
-        )
-    }
+    pub const fn new(width: f32, height: f32) -> Self { Self { width, height } }
+    pub const fn zero() -> Self { Self { width: 0.0, height: 0.0 } }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect { pub x: f32, pub y: f32, pub width: f32, pub height: f32 }
 impl Rect {
-    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    pub const fn zero() -> Self {
-        Self::new(0.0, 0.0, 0.0, 0.0)
-    }
-
-    pub fn contains(&self, point: Point) -> bool {
-        point.x >= self.x
-            && point.x <= self.x + self.width
-            && point.y >= self.y
-            && point.y <= self.y + self.height
-    }
-
-    pub fn center(&self) -> Point {
-        Point::new(self.x + self.width / 2.0, self.y + self.height / 2.0)
-    }
-
-    pub fn size(&self) -> Size {
-        Size::new(self.width, self.height)
-    }
-
-    pub fn translate(&self, dx: f32, dy: f32) -> Self {
-        Self::new(self.x + dx, self.y + dy, self.width, self.height)
-    }
-}
-
-/// 带等圆角的矩形（四个角半径相同）
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RoundedRect {
-    pub rect: Rect,
-    pub radius: f32,
-}
-
-impl RoundedRect {
-    pub fn new(rect: Rect, radius: f32) -> Self {
-        // 校正半径不超过矩形边长的一半
-        let radius = radius.min(rect.width / 2.0).min(rect.height / 2.0);
-        Self { rect, radius }
-    }
-
-    /// 精确命中测试：点是否在圆角矩形内
-    pub fn contains(&self, point: Point) -> bool {
-        let r = self.radius;
-        let rect = &self.rect;
-
-        // 1. 快速排除：在整体矩形外
-        if !rect.contains(point) {
-            return false;
-        }
-
-        // 2. 内部矩形（无圆角影响的区域）
-        let inner_rect = Rect::new(
-            rect.x + r,
-            rect.y + r,
-            rect.width - 2.0 * r,
-            rect.height - 2.0 * r,
-        );
-        if inner_rect.contains(point) {
-            return true;
-        }
-
-        // 3. 检查四个角
-        // 左上角圆心
-        if point.x < rect.x + r && point.y < rect.y + r {
-            let cx = rect.x + r;
-            let cy = rect.y + r;
-            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
-        }
-        // 右上角
-        if point.x > rect.x + rect.width - r && point.y < rect.y + r {
-            let cx = rect.x + rect.width - r;
-            let cy = rect.y + r;
-            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
-        }
-        // 左下角
-        if point.x < rect.x + r && point.y > rect.y + rect.height - r {
-            let cx = rect.x + r;
-            let cy = rect.y + rect.height - r;
-            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
-        }
-        // 右下角
-        if point.x > rect.x + rect.width - r && point.y > rect.y + rect.height - r {
-            let cx = rect.x + rect.width - r;
-            let cy = rect.y + rect.height - r;
-            return Point::new(point.x, point.y).distance_to(Point::new(cx, cy)) <= r;
-        }
-
-        // 在四条边平直区域
-        true
-    }
-
-    /// 获取内部矩形（用于布局内容放置）
-    pub fn inner_rect(&self) -> Rect {
-        let r = self.radius;
-        Rect::new(
-            self.rect.x + r,
-            self.rect.y + r,
-            self.rect.width - 2.0 * r,
-            self.rect.height - 2.0 * r,
-        )
-    }
-
-    /// 转为此形状的 kurbo 表示（用于渲染）
-    pub fn to_kurbo_rounded_rect(&self) -> vello_cpu::kurbo::RoundedRect {
-        vello_cpu::kurbo::RoundedRect::from_rect(
-            vello_cpu::kurbo::Rect::new(
-                self.rect.x as f64,
-                self.rect.y as f64,
-                (self.rect.x + self.rect.width) as f64,
-                (self.rect.y + self.rect.height) as f64,
-            ),
-            self.radius as f64,
-        )
-    }
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self { Self { x, y, width, height } }
+    pub fn contains(&self, point: Point) -> bool { point.x >= self.x && point.x <= self.x + self.width && point.y >= self.y && point.y <= self.y + self.height }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Color(pub AlphaColor<Srgb>);
-
+pub struct Color { pub r: f32, pub g: f32, pub b: f32, pub a: f32 }
 impl Color {
-    pub const WHITE: Self = Self(AlphaColor::WHITE);
-    pub const BLACK: Self = Self(AlphaColor::BLACK);
-    pub const RED: Self = Self(AlphaColor::from_rgb8(255, 0, 0));
-    pub const GREEN: Self = Self(AlphaColor::from_rgb8(0, 128, 0));
-    pub const BLUE: Self = Self(AlphaColor::from_rgb8(0, 0, 255));
-    pub const TRANSPARENT: Self = Self(AlphaColor::from_rgba8(0, 0, 0, 0));
-
-    /// 从 RGB 值创建颜色（0-255）
-    pub const fn from_rgb8(r: u8, g: u8, b: u8) -> Self {
-        Self(AlphaColor::from_rgb8(r, g, b))
+    pub const fn from_rgb8(r: u8, g: u8, b: u8) -> Self { Self::from_rgba8(r, g, b, 255) }
+    pub const fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self { Self { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 } }
+    pub fn from_hex(hex: &str) -> Self {
+        let h = hex.trim_start_matches('#');
+        if h.len() == 6 { Self::from_rgb8(u8::from_str_radix(&h[0..2], 16).unwrap_or(0), u8::from_str_radix(&h[2..4], 16).unwrap_or(0), u8::from_str_radix(&h[4..6], 16).unwrap_or(0)) }
+        else if h.len() == 8 { Self::from_rgba8(u8::from_str_radix(&h[0..2], 16).unwrap_or(0), u8::from_str_radix(&h[2..4], 16).unwrap_or(0), u8::from_str_radix(&h[4..6], 16).unwrap_or(0), u8::from_str_radix(&h[6..8], 16).unwrap_or(255)) }
+        else { Self::BLACK }
     }
-
-    /// 从 RGBA 值创建颜色（0-255）
-    pub const fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self(AlphaColor::from_rgba8(r, g, b, a))
-    }
-
-    pub fn rgb(r: f32, g: f32, b: f32) -> Self {
-        Self(AlphaColor::from_rgb8(
-            (r * 255.0) as u8,
-            (g * 255.0) as u8,
-            (b * 255.0) as u8,
-        ))
-    }
-
-    pub fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
-        Self(AlphaColor::from_rgba8(
-            (r * 255.0) as u8,
-            (g * 255.0) as u8,
-            (b * 255.0) as u8,
-            (a * 255.0) as u8,
-        ))
-    }
-
-    pub fn from_hex(hex: &str) -> Option<Self> {
-        let hex = hex.trim_start_matches('#');
-        match hex.len() {
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                Some(Self(AlphaColor::from_rgb8(r, g, b)))
-            }
-            8 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-                Some(Self(AlphaColor::from_rgba8(r, g, b, a)))
-            }
-            3 => {
-                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-                Some(Self(AlphaColor::from_rgb8(r, g, b)))
-            }
-            _ => None,
-        }
-    }
-
-    pub fn to_hex(&self) -> String {
-        let rgba = self.0.to_rgba8();
-        format!("#{:02X}{:02X}{:02X}", rgba.r, rgba.g, rgba.b)
-    }
-
-    pub fn with_alpha(&self, alpha: f32) -> Self {
-        let rgba = self.0.to_rgba8();
-        Self(AlphaColor::from_rgba8(
-            rgba.r,
-            rgba.g,
-            rgba.b,
-            (alpha * 255.0) as u8,
-        ))
-    }
-
-    /// 获取内部 AlphaColor
-    pub fn inner(&self) -> AlphaColor<Srgb> {
-        self.0
-    }
-
-    /// 转换为 vello_cpu 颜色（用于渲染）
-    pub fn to_vello(&self) -> AlphaColor<Srgb> {
-        self.0
-    }
+    pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    pub const RED: Color = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const TRANSPARENT: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 }
-
-impl Default for Color {
-    fn default() -> Self {
-        Self::BLACK
-    }
-}
-
-/// 从十六进制颜色字符串直接转换
-///
-/// 支持 `"#RRGGBB"`、`"#RRGGBBAA"`、`"#RGB"` 格式。
-/// 解析失败时回退为黑色。
-impl From<&str> for Color {
-    fn from(hex: &str) -> Self {
-        Self::from_hex(hex).unwrap_or(Self::BLACK)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_rect_contains() {
-        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
-        assert!(rect.contains(Point::new(50.0, 50.0)));
-        assert!(rect.contains(Point::new(0.0, 0.0)));
-        assert!(rect.contains(Point::new(100.0, 100.0)));
-        assert!(!rect.contains(Point::new(101.0, 50.0)));
-        assert!(!rect.contains(Point::new(50.0, 101.0)));
-    }
-
-    #[test]
-    fn test_color_hex() {
-        // 使用可以精确表示的颜色值
-        let color = Color::rgb(1.0, 0.0, 0.0);
-        assert_eq!(color.to_hex(), "#FF0000");
-
-        let parsed = Color::from_hex("#FF8000").unwrap();
-        let rgba = parsed.0.to_rgba8();
-        assert!((rgba.r as f32 / 255.0 - 1.0).abs() < 0.01);
-        assert!((rgba.g as f32 / 255.0 - 0.5).abs() < 0.01);
-        assert!((rgba.b as f32 / 255.0 - 0.0).abs() < 0.01);
-    }
-}
+impl Default for Color { fn default() -> Self { Self::BLACK } }

@@ -1,48 +1,33 @@
-use lieui::core::ViewContext;
+//! LieUI v2 示例 — 构建 ViewTree 并渲染为像素图
+
 use lieui::geometry::Size;
-use lieui::layout::JustifyContent;
-use lieui::widgets::{Container, TextInput};
-use winit::event_loop::EventLoop;
+use lieui::prelude::*;
+use lieui::render::VelloRenderer;
+use lieui::view::View;
 
 fn main() {
-    let event_loop = EventLoop::new().unwrap();
+    let viewport = Size::new(800.0, 600.0);
+    let mut app = Application::new(viewport);
+    let mut renderer = VelloRenderer::new(800, 600);
 
-    let mut ctx = ViewContext::new(Size::new(800.0, 600.0));
-    ctx.debug_render_tree = true;
+    let view_tree = Column::new()
+        .child(Text::new("Hello from LieUI v2!").font_size(32.0).color(lieui::geometry::Color::RED))
+        .child(Text::new("This is built with View trait + Runtime reconciler.").font_size(18.0))
+        .build();
 
-    let root = ctx.root(Container::new().background("#F0F0F0"));
-    let column = ctx.create(
-        ctx.column()
-            .spacing(20.0)
-            .expand(true)
-            .justify(JustifyContent::Center),
-    );
-    ctx.add_child(root, column);
+    println!("ViewTree built! {} children", view_tree.children.len());
+    println!("First child content: {:?}", view_tree.children[0].props.get_str("content"));
 
-    ctx.attach(column, ctx.text("LieUI Window Demo").font_size(32.0));
-    ctx.attach(
-        column,
-        ctx.text("A minimal Rust GUI library").font_size(16.0),
-    );
+    let elements = app.run_once(|| view_tree.clone());
+    println!("Runtime: {} layered elements", elements.len());
+    println!("Debug: {:?}", app.debug_stats());
 
-    let btn = ctx.button("Click Me!").on_click(|_ctx| {
-        println!("Clicked!");
-    });
-    ctx.attach(column, btn);
+    let pixmap = renderer.render(&elements);
+    println!("Rendered {}x{} pixmap", pixmap.width(), pixmap.height());
 
-    ctx.attach(column, ctx.text("TextInput Demo:").font_size(18.0));
-    ctx.attach(
-        column,
-        TextInput::new().placeholder("单行输入...").width(300.0),
-    );
-    ctx.attach(
-        column,
-        TextInput::new()
-            .placeholder("多行输入...\n支持换行")
-            .width(300.0)
-            .height(150.0)
-            .multiline(true),
-    );
+    let center_idx = (pixmap.height() as usize / 2) * pixmap.width() as usize + (pixmap.width() as usize / 2);
+    let center = pixmap.data()[center_idx];
+    println!("Center pixel: RGBA({},{},{},{})", center.r, center.g, center.b, center.a);
 
-    ctx.run(event_loop);
+    println!("\n=== LieUI v2 Hello example completed! ===");
 }

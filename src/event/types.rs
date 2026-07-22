@@ -1,3 +1,6 @@
+//! 事件类型定义
+
+/// 事件类型标签（用于分类匹配）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     MouseMove,
@@ -16,54 +19,22 @@ pub enum EventType {
     ImeDisabled,
 }
 
+/// 事件
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    MouseMove {
-        x: f32,
-        y: f32,
-    },
-    MouseDown {
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
-    MouseUp {
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
+    MouseMove { x: f32, y: f32 },
+    MouseDown { button: MouseButton, x: f32, y: f32 },
+    MouseUp { button: MouseButton, x: f32, y: f32 },
     MouseEnter,
     MouseLeave,
-    Click {
-        button: MouseButton,
-    },
-    MouseWheel {
-        delta_x: f32,
-        delta_y: f32,
-        x: f32,
-        y: f32,
-    },
-    KeyDown {
-        key: Key,
-        modifiers: Modifiers,
-    },
-    KeyUp {
-        key: Key,
-        modifiers: Modifiers,
-    },
+    Click { button: MouseButton },
+    MouseWheel { delta_x: f32, delta_y: f32, x: f32, y: f32 },
+    KeyDown { key: Key, modifiers: Modifiers },
+    KeyUp { key: Key, modifiers: Modifiers },
     FocusIn,
     FocusOut,
-    /// IME 预编辑状态更新
-    ImePreedit {
-        text: String,
-        cursor_start: Option<usize>,
-        cursor_end: Option<usize>,
-    },
-    /// IME 提交最终文本
-    ImeCommit {
-        text: String,
-    },
-    /// IME 被禁用
+    ImePreedit { text: String, cursor_start: Option<usize>, cursor_end: Option<usize> },
+    ImeCommit { text: String },
     ImeDisabled,
 }
 
@@ -130,14 +101,11 @@ pub struct Modifiers {
 /// 事件处理结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventResult {
-    /// 继续传播
     Continue,
-    /// 停止传播
     Stop,
 }
 
 impl EventResult {
-    /// 是否停止传播
     pub fn is_stopped(&self) -> bool {
         matches!(self, EventResult::Stop)
     }
