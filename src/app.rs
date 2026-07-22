@@ -113,13 +113,24 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         self.window = Some(window);
     }
 
+    fn hit_test(&self) -> Option<crate::core::ElementId> {
+        let layout = match &self.first_layout { Some(l) => l, None => return None };
+        let root = match &layout.root { Some(r) => r, None => return None };
+        Self::deepest_at(root, self.mouse_pos.x, self.mouse_pos.y)
+    }
+
     fn handle_click(&mut self) {
-        let layout = match &self.first_layout { Some(l) => l, None => return };
-        let root = match &layout.root { Some(r) => r, None => return };
-        let id = Self::deepest_at(root, self.mouse_pos.x, self.mouse_pos.y);
-        let Some(id) = id else { return };
+        let id = match self.hit_test() { Some(i) => i, None => return };
         let Some(cb_id) = self.runtime.layers.tree.props(id).and_then(|p| p.get_u32("on_click")) else { return };
         state::invoke_click(cb_id as u64);
+    }
+
+    fn handle_hover(&mut self) {
+        let id = self.hit_test();
+        if id != self.runtime.hovered_id {
+            self.runtime.hovered_id = id;
+            if let Some(w) = &self.window { w.request_redraw(); }
+        }
     }
 
     fn deepest_at(node: &crate::layout::node::LayoutNode, px: f32, py: f32) -> Option<crate::core::ElementId> {
@@ -152,9 +163,16 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = Point::new(position.x as f32, position.y as f32);
+                self.handle_hover();
+                if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
+                self.runtime.pressed_id = self.hit_test();
                 self.handle_click();
+                if let Some(w) = &self.window { w.request_redraw(); }
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, .. } => {
+                self.runtime.pressed_id = None;
                 if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::RedrawRequested => {
