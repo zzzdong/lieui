@@ -40,7 +40,20 @@ impl LayoutContext {
         let Some(root_id) = tree.root() else { return; };
         let constraint = LayoutConstraint::loose((viewport.width, viewport.height));
         let full = Self::build_tree(root_id, constraint, tree, None);
+        // 后处理：将相对坐标转为绝对坐标
+        let full = Self::flatten_positions(full, 0.0, 0.0);
         self.root = Some(full);
+    }
+
+    /// 将子节点的相对位置 + 父节点绝对位置 = 子节点最终绝对位置
+    fn flatten_positions(mut node: LayoutNode, px: f32, py: f32) -> LayoutNode {
+        let ax = node.computed.x + px;
+        let ay = node.computed.y + py;
+        node.computed.x = ax;
+        node.computed.y = ay;
+        let children = std::mem::take(&mut node.children);
+        node.children = children.into_iter().map(|c| Self::flatten_positions(c, ax, ay)).collect();
+        node
     }
     fn build_tree(id: ElementId, constraint: LayoutConstraint, tree: &ElementTree, _pt: Option<&str>) -> LayoutNode {
         let measurer = DefaultMeasurer;
@@ -173,10 +186,15 @@ impl LayoutContext {
             // 计算 cross axis 偏移 + 设置最终位置
             for (i, mut child) in raw_children.into_iter().enumerate() {
                 let main_off = offsets.get(i).copied().unwrap_or(0.0);
+                let (cross_parent, cross_child) = match tn {
+                    "column" => (cw, child.computed.width),
+                    "row" => (ch, child.computed.height),
+                    _ => (0.0, 0.0),
+                };
                 let cross_off = match align {
-                    "center" => (cw - child.computed.width) / 2.0,
-                    "end" => (cw - child.computed.width).max(0.0),
-                    _ => 0.0, // "start" / "stretch"
+                    "center" => (cross_parent - cross_child) / 2.0,
+                    "end" => (cross_parent - cross_child).max(0.0),
+                    _ => 0.0,
                 };
                 match tn {
                     "column" => { child.computed.x = cross_off; child.computed.y = main_off; }
