@@ -28,7 +28,7 @@ pub fn register_click(f: Box<dyn Fn()>) -> u64 {
 
 pub fn invoke_click(id: u64) {
     CALLBACKS.with(|c| {
-        if let Some(f) = c.borrow_mut().remove(&id) {
+        if let Some(f) = c.borrow().get(&id) {
             f();
         }
     });

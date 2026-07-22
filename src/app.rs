@@ -54,6 +54,9 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         let ph = self.renderer.height() as u16;
         if pw == 0 || ph == 0 { return; }
 
+        // 清理旧回调用，确保重建时新 Button 注册新回调
+        crate::state::clear_callbacks();
+
         // 1. 构建 View 树 → Runtime
         let view_tree = (self.builder)();
         self.runtime.submit_view_tree(view_tree);
