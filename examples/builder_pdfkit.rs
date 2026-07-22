@@ -1,68 +1,44 @@
-//! Builder 示例：模拟 pdfkit 的页面选择功能（v2 API）
-//! 展示动态 ViewTree 构建 + State 驱动 + 自动重建
+//! PDFKit 示例 — Viev 树构建 + 状态驱动 + 头跑测试
 
-use lieui::geometry::{Color, Size};
+use lieui::geometry::Size;
 use lieui::prelude::*;
+use lieui::render::VelloRenderer;
+use lieui::runtime::Runtime;
 use lieui::state::State;
 use lieui::view::View;
-use lieui::render::VelloRenderer;
 
-struct PdfModel {
-    page_count: usize,
-    current_page: usize,
-    selected: Vec<bool>,
+fn build_page_ui(count: usize, checked: &[bool], current: usize) -> impl View {
+    let mut col = Column::new();
+    col = col.child(Text::new(&format!("{} pages loaded, {} selected", count, checked.iter().filter(|&&v| v).count())).font_size(14.0));
+    for i in 0..count {
+        let label = format!("Page {}  [{}]", i + 1, if checked.get(i).copied().unwrap_or(false) { "✓" } else { " " });
+        col = col.child(Text::new(&label).font_size(12.0));
+    }
+    col = col.child(Text::new(&format!("Page {} / {}", current + 1, count)).font_size(14.0));
+    col
 }
-impl PdfModel { fn new(n: usize) -> Self { Self { page_count: n, current_page: 0, selected: vec![false; n] } } }
 
 fn main() {
-    let viewport = Size::new(600.0, 500.0);
-    let mut app = Application::new(viewport);
+    let mut runtime = Runtime::new(Size::new(600.0, 500.0));
     let mut renderer = VelloRenderer::new(600, 500);
-    let model = State::new(PdfModel::new(20));
-    let checked_count = State::new(0usize);
+    let checked = State::new(vec![false; 20]);
+    let current = State::new(0usize);
 
-    let elements = app.run_once(|| {
-        let m = model.get();
-        let page_count = m.page_count;
-        let current_page = m.current_page;
+    // 初始：10 pages
+    let vt = build_page_ui(10, &*checked.get(), *current.get()).build();
+    runtime.submit_view_tree(vt);
+    let e = runtime.frame();
+    let _px = renderer.render(&e);
+    println!("Frame 1: {} elements, tree {}", e.len(), runtime.debug_stats.element_count);
 
-        // 更新选中计数
-        let c = m.selected.iter().filter(|&&v| v).count();
-        let cc = checked_count.clone();
-        cc.set(c);
+    // 选中 page 5
+    checked.update(|v| v[5] = true);
+    current.set(5);
+    let vt2 = build_page_ui(10, &*checked.get(), *current.get()).build();
+    runtime.submit_view_tree(vt2);
+    let e2 = runtime.frame();
+    let _px2 = renderer.render(&e2);
+    println!("Frame 2 (page 6 selected): {} elements, reconciler {:?}", e2.len(), runtime.debug_stats.reconciler);
 
-        let mut col = Column::new();
-
-        // 工具按钮行
-        let mut tool_row = Row::new();
-        tool_row = tool_row.child(Text::new(&format!("{} pages loaded", page_count)).font_size(14.0));
-        tool_row = tool_row.child(Text::new(&format!("[{} selected]", *checked_count.get())).font_size(14.0).color(Color::RED));
-        col = col.child(tool_row);
-
-        // 页面列表
-        for i in 0..page_count {
-            let checked = m.selected.get(i).copied().unwrap_or(false);
-            let label = format!("Page {}  [{}]", i + 1, if checked { "✓" } else { " " });
-            col = col.child(Text::new(&label).font_size(12.0));
-        }
-
-        // 导航
-        let mut nav_row = Row::new();
-        let prev_label = if current_page > 0 {
-            format!("‹ Prev (page {})", current_page)
-        } else {
-            "‹ Prev".to_string()
-        };
-        nav_row = nav_row.child(Text::new(&prev_label).font_size(14.0));
-        nav_row = nav_row.child(Text::new(&format!("Page {} / {}", current_page + 1, page_count)).font_size(14.0));
-        nav_row = nav_row.child(Text::new("Next ›").font_size(14.0));
-        col = col.child(nav_row);
-
-        col.build()
-    });
-
-    let pixmap = renderer.render(&elements);
-    println!("PDFKit UI: {} elements rendered, {}x{} pixmap", elements.len(), pixmap.width(), pixmap.height());
-    println!("Debug: {:?}", app.debug_stats());
     println!("\n=== PDFKit example completed! ===");
 }
