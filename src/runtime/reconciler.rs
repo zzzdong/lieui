@@ -2,7 +2,7 @@
 
 use crate::core::ElementId;
 use crate::runtime::element::ElementTree;
-use crate::view::node::{PropMap, PropValue, ViewNode};
+use crate::view::node::{PropMap, ViewNode};
 
 #[derive(Debug)]
 pub enum Patch {
@@ -80,19 +80,6 @@ impl Reconciler {
 }
 
 fn props_equal(a: &PropMap, b: &PropMap) -> bool {
-    if a.len() != b.len() { return false; }
-    for (k, v) in a.iter() {
-        match b.get(k) {
-            Some(bv) => {
-                match (v, bv) {
-                    (PropValue::Str(a), PropValue::Str(b)) => if a != b { return false; },
-                    (PropValue::F32(a), PropValue::F32(b)) => if (a - b).abs() > 0.001 { return false; },
-                    (PropValue::F64(a), PropValue::F64(b)) => if (a - b).abs() > 0.001 { return false; },
-                    _ => if std::mem::discriminant(v) != std::mem::discriminant(bv) { return false; },
-                }
-            }
-            None => return false,
-        }
-    }
-    true
+    // PropValue 已 derive PartialEq，直接按 entries 逐元素比较
+    a.entries == b.entries
 }

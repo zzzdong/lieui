@@ -49,20 +49,57 @@ impl VelloRenderer {
 
 impl Renderer for VelloRenderer {
     fn render(&mut self, elements: &[LayeredElement]) -> Pixmap {
-        // 背景
         self.ctx.set_paint(AlphaColor::from_rgba8(240, 240, 240, 255));
         self.ctx.fill_rect(&Rect::new(0.0, 0.0, self.width as f64, self.height as f64));
 
-        for e in elements { self.draw(&e.element); }
+        let mut images = Vec::new();
+        for e in elements {
+            match &e.element {
+                VisualElement::Image { .. } => images.push(e.clone()),
+                _ => self.draw(&e.element),
+            }
+        }
 
         self.ctx.flush();
         let mut pix = Pixmap::new(self.width, self.height);
         self.ctx.render_to_pixmap(&mut self.resources, &mut pix);
+
+        // 后处理：在 pixmap 上直接 blit 图像
+        for img in &images {
+            Self::blit_image(&mut pix, img);
+        }
         pix
     }
 }
 
 impl VelloRenderer {
+    /// 在 Pixmap 上直接 blit RGBA 图像数据
+    fn blit_image(pix: &mut vello_cpu::Pixmap, img: &LayeredElement) {
+        if let VisualElement::Image { bounds, data, width, height, .. } = &img.element {
+            let pw = pix.width() as usize;
+            let ph = pix.height() as usize;
+            let ix = bounds.x0.max(0.0) as usize;
+            let iy = bounds.y0.max(0.0) as usize;
+            let iw = *width as usize;
+            let ih = *height as usize;
+            let d = pix.data_mut();
+            for row in 0..ih {
+                let py = iy + row;
+                if py >= ph { break; }
+                for col in 0..iw {
+                    let px = ix + col;
+                    if px >= pw { break; }
+                    let si = (row * iw + col) * 4;
+                    if si + 3 >= data.len() { break; }
+                    // RGBA → PremulRgba8
+                    let r = data[si]; let g = data[si+1];
+                    let b = data[si+2]; let a = data[si+3];
+                    d[py * pw + px] = vello_cpu::color::PremulRgba8::from_u8_array([r, g, b, a]);
+                }
+            }
+        }
+    }
+
     fn draw(&mut self, el: &VisualElement) {
         match el {
             VisualElement::Rect { rect, style } => {

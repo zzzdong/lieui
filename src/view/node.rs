@@ -14,7 +14,7 @@ pub enum PropValue {
 }
 
 #[derive(Debug, Clone)]
-pub struct PropMap { entries: Vec<(&'static str, PropValue)> }
+pub struct PropMap { pub(crate) entries: Vec<(&'static str, PropValue)> }
 
 impl PropMap {
     pub fn new() -> Self { Self { entries: Vec::new() } }
