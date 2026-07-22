@@ -1,19 +1,10 @@
-﻿//! View 基本类型实现（v2）
+﻿//! View 基本类型实现（v2）— 返回类型安全的 ViewNode 变体
 
 use crate::geometry::Color;
 use crate::state;
 use crate::view::node::{PropMap, PropValue, ViewNode};
 use crate::view::View;
 use crate::layout::flex::{JustifyContent, AlignItems};
-
-// ===== 工具函数 =====
-fn justify_str(j: &JustifyContent) -> &'static str {
-    match j { JustifyContent::Start => "start", JustifyContent::Center => "center", JustifyContent::End => "end",
-              JustifyContent::SpaceBetween => "space-between", JustifyContent::SpaceAround => "space-around", JustifyContent::SpaceEvenly => "space-evenly" }
-}
-fn align_str(a: &AlignItems) -> &'static str {
-    match a { AlignItems::Start => "start", AlignItems::Center => "center", AlignItems::End => "end", AlignItems::Stretch => "stretch" }
-}
 
 // ===== Text =====
 pub struct Text { content: String, font_size: f64, color: Color }
@@ -24,7 +15,7 @@ impl Text {
 }
 impl View for Text {
     fn build(&self) -> ViewNode {
-        ViewNode { type_name: "text", key: None, props: PropMap::from_array([("content", PropValue::Str(self.content.clone())), ("font_size", PropValue::F64(self.font_size)), ("color", PropValue::Color(self.color))]), children: Vec::new() }
+        ViewNode::Text { content: self.content.clone(), font_size: self.font_size, color: self.color, key: None }
     }
 }
 
@@ -39,10 +30,7 @@ impl Button {
 }
 impl View for Button {
     fn build(&self) -> ViewNode {
-        let mut p = PropMap::new();
-        p.set("label", PropValue::Str(self.label.clone()));
-        if let Some(id) = self.callback_id { p.set("on_click", PropValue::U32(id as u32)); }
-        ViewNode { type_name: "button", key: None, props: p, children: Vec::new() }
+        ViewNode::Button { label: self.label.clone(), on_click: self.callback_id, key: None }
     }
 }
 
@@ -53,11 +41,11 @@ impl Image {
 }
 impl View for Image {
     fn build(&self) -> ViewNode {
-        ViewNode { type_name: "image", key: None, props: PropMap::from_array([("data", PropValue::Bytes(self.data.clone())), ("img_w", PropValue::U32(self.w)), ("img_h", PropValue::U32(self.h))]), children: Vec::new() }
+        ViewNode::Image { data: self.data.clone(), w: self.w, h: self.h, key: None }
     }
 }
 
-// ===== Checkbox（标签+点击）=====
+// ===== Checkbox =====
 pub struct Checkbox { checked: bool, label: String, callback_id: Option<u64> }
 impl Checkbox {
     pub fn new(checked: bool) -> Self { Self { checked, label: String::new(), callback_id: None } }
@@ -69,15 +57,11 @@ impl Checkbox {
 }
 impl View for Checkbox {
     fn build(&self) -> ViewNode {
-        let mut p = PropMap::new();
-        p.set("checked", PropValue::Bool(self.checked));
-        p.set("label", PropValue::Str(self.label.clone()));
-        if let Some(id) = self.callback_id { p.set("on_click", PropValue::U32(id as u32)); }
-        ViewNode { type_name: "checkbox", key: None, props: p, children: Vec::new() }
+        ViewNode::Checkbox { checked: self.checked, label: self.label.clone(), on_click: self.callback_id, key: None }
     }
 }
 
-// ===== Container（支持 expand 和 flex 属性）=====
+// ===== Container =====
 pub struct Container { expand: bool, children: Vec<Box<dyn View>> }
 impl Container {
     pub fn new() -> Self { Self { expand: false, children: Vec::new() } }
@@ -86,13 +70,11 @@ impl Container {
 }
 impl View for Container {
     fn build(&self) -> ViewNode {
-        let mut p = PropMap::new();
-        p.set("expand", PropValue::Bool(self.expand));
-        ViewNode { type_name: "container", key: None, props: p, children: self.children.iter().map(|c| c.build()).collect() }
+        ViewNode::Container { expand: self.expand, key: None, children: self.children.iter().map(|c| c.build()).collect() }
     }
 }
 
-// ===== Column（支持 Flex justify/align）=====
+// ===== Column =====
 pub struct Column { spacing: f32, justify: JustifyContent, align: AlignItems, expand: bool, children: Vec<Box<dyn View>> }
 impl Column {
     pub fn new() -> Self { Self { spacing: 4.0, justify: JustifyContent::Start, align: AlignItems::Start, expand: false, children: Vec::new() } }
@@ -105,16 +87,15 @@ impl Column {
 }
 impl View for Column {
     fn build(&self) -> ViewNode {
-        let mut p = PropMap::new();
-        p.set("justify", PropValue::Str(justify_str(&self.justify).into()));
-        p.set("align", PropValue::Str(align_str(&self.align).into()));
-        p.set("spacing", PropValue::F32(self.spacing));
-        p.set("expand", PropValue::Bool(self.expand));
-        ViewNode { type_name: "column", key: None, props: p, children: self.children.iter().map(|c| c.build()).collect() }
+        ViewNode::Column {
+            justify: self.justify, align: self.align, spacing: self.spacing,
+            expand: self.expand, key: None,
+            children: self.children.iter().map(|c| c.build()).collect(),
+        }
     }
 }
 
-// ===== Row（支持 Flex justify/align）=====
+// ===== Row =====
 pub struct Row { spacing: f32, justify: JustifyContent, align: AlignItems, expand: bool, children: Vec<Box<dyn View>> }
 impl Row {
     pub fn new() -> Self { Self { spacing: 4.0, justify: JustifyContent::Start, align: AlignItems::Center, expand: false, children: Vec::new() } }
@@ -127,17 +108,16 @@ impl Row {
 }
 impl View for Row {
     fn build(&self) -> ViewNode {
-        let mut p = PropMap::new();
-        p.set("justify", PropValue::Str(justify_str(&self.justify).into()));
-        p.set("align", PropValue::Str(align_str(&self.align).into()));
-        p.set("spacing", PropValue::F32(self.spacing));
-        p.set("expand", PropValue::Bool(self.expand));
-        ViewNode { type_name: "row", key: None, props: p, children: self.children.iter().map(|c| c.build()).collect() }
+        ViewNode::Row {
+            justify: self.justify, align: self.align, spacing: self.spacing,
+            expand: self.expand, key: None,
+            children: self.children.iter().map(|c| c.build()).collect(),
+        }
     }
 }
 
 // ===== Divider =====
 pub struct Divider;
 impl View for Divider {
-    fn build(&self) -> ViewNode { ViewNode { type_name: "divider", key: None, props: PropMap::new(), children: Vec::new() } }
+    fn build(&self) -> ViewNode { ViewNode::Divider { key: None } }
 }

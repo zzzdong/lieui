@@ -26,7 +26,7 @@ pub struct KeyedView<T> { pub(crate) inner: T, pub(crate) key: String }
 impl<T: View> View for KeyedView<T> {
     fn build(&self) -> ViewNode {
         let mut node = self.inner.build();
-        node.key = Some(self.key.clone());
+        node.set_key(self.key.clone());
         node
     }
 }
