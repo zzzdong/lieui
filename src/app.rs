@@ -27,6 +27,8 @@ pub struct Application<B: Fn() -> ViewNode> {
     mouse_pos: Point,
     first_layout: Option<LayoutContext>,
     rendered_once: bool,
+    prev_hover: Option<crate::core::ElementId>,
+    prev_pressed: Option<crate::core::ElementId>,
 }
 
 impl<B: Fn() -> ViewNode + 'static> Application<B> {
@@ -35,11 +37,9 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
             builder,
             runtime: Runtime::new(viewport),
             renderer: VelloRenderer::new(viewport.width as u16, viewport.height as u16),
-            window: None,
-            surface: None,
-            mouse_pos: Point::zero(),
-            first_layout: None,
-            rendered_once: false,
+            window: None, surface: None,
+            mouse_pos: Point::zero(), first_layout: None,
+            rendered_once: false, prev_hover: None, prev_pressed: None,
         }
     }
 
@@ -141,14 +141,35 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
 
     fn handle_click(&mut self) {
         let id = match self.hit_test() { Some(i) => i, None => return };
-        let Some(cb_id) = self.runtime.layers.tree.props(id).and_then(|p| p.get_u32("on_click")) else { return };
-        state::invoke_click(cb_id as u64);
+        // 设置 pressed 状态
+        if self.runtime.layers.tree.contains(id) {
+            let mut s = self.runtime.layers.tree.state(id);
+            s.pressed = true; self.runtime.layers.tree.set_state(id, s);
+        }
+        // 触发回调
+        if let Some(cb_id) = self.runtime.layers.tree.props(id).and_then(|p| p.get_u32("on_click")) {
+            state::invoke_click(cb_id as u64);
+        }
     }
 
     fn handle_hover(&mut self) {
-        let id = self.hit_test();
-        if id != self.runtime.hovered_id {
-            self.runtime.hovered_id = id;
+        let new = self.hit_test();
+        if new != self.prev_hover {
+            // 旧元素取消 hover
+            if let Some(old) = self.prev_hover {
+                if self.runtime.layers.tree.contains(old) {
+                    let mut s = self.runtime.layers.tree.state(old);
+                    s.hovered = false; self.runtime.layers.tree.set_state(old, s);
+                }
+            }
+            // 新元素设置 hover
+            if let Some(nid) = new {
+                if self.runtime.layers.tree.contains(nid) {
+                    let mut s = self.runtime.layers.tree.state(nid);
+                    s.hovered = true; self.runtime.layers.tree.set_state(nid, s);
+                }
+            }
+            self.prev_hover = new;
             if let Some(w) = &self.window { w.request_redraw(); }
         }
     }
@@ -187,12 +208,20 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                 if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
-                self.runtime.pressed_id = self.hit_test();
+                let id = self.hit_test();
+                self.prev_pressed = id;
                 self.handle_click();
                 if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::MouseInput { state: ElementState::Released, .. } => {
-                self.runtime.pressed_id = None;
+                // 清除所有元素的 pressed 状态
+                if let Some(pid) = self.prev_pressed {
+                    if self.runtime.layers.tree.contains(pid) {
+                        let mut s = self.runtime.layers.tree.state(pid);
+                        s.pressed = false; self.runtime.layers.tree.set_state(pid, s);
+                    }
+                }
+                self.prev_pressed = None;
                 if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::RedrawRequested => {

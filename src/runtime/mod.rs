@@ -13,8 +13,6 @@ use crate::view::node::ViewNode;
 pub struct Runtime {
     pub layers: Layers, viewport: Size, needs_layout: bool, needs_render: bool,
     pending_view_tree: Option<ViewNode>, pub debug_stats: DebugStats,
-    pub hovered_id: Option<crate::core::ElementId>,
-    pub pressed_id: Option<crate::core::ElementId>,
 }
 #[derive(Debug, Default)]
 pub struct DebugStats { pub reconciler: crate::runtime::reconciler::ReconcilerStats, pub element_count: usize }
@@ -23,8 +21,7 @@ fn id_as_u64(id: crate::core::ElementId) -> u64 { id.as_ffi() }
 impl Runtime {
     pub fn new(viewport: Size) -> Self {
         Self { layers: Layers::new(), viewport, needs_layout: true, needs_render: true,
-            pending_view_tree: None, debug_stats: DebugStats::default(),
-            hovered_id: None, pressed_id: None }
+            pending_view_tree: None, debug_stats: DebugStats::default() }
     }
     pub fn set_viewport(&mut self, vp: Size) { self.viewport = vp; self.needs_layout = true; self.needs_render = true; }
     pub fn submit_view_tree(&mut self, vt: ViewNode) { self.pending_view_tree = Some(vt); self.needs_render = true; }
@@ -64,16 +61,13 @@ impl Runtime {
 
     fn build_render_tree(&self) -> Vec<LayeredElement> {
         let mut e = Vec::new();
-        let hov = self.hovered_id; let pre = self.pressed_id;
         self.layers.with_layout(LayerType::Base, |l| {
-            if let Some(ref r) = l.root { Self::cv(r, &self.layers, &mut e, hov, pre); }
+            if let Some(ref r) = l.root { Self::cv(r, &self.layers, &mut e); }
         });
         e.sort_by_key(|x| x.z_index); e
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn cv(node: &crate::layout::node::LayoutNode, layers: &Layers, elements: &mut Vec<LayeredElement>,
-          hovered: Option<crate::core::ElementId>, pressed: Option<crate::core::ElementId>) {
+    fn cv(node: &crate::layout::node::LayoutNode, layers: &Layers, elements: &mut Vec<LayeredElement>) {
         let id = node.id;
         let tn = node.type_name;
         if !tn.is_empty() {
@@ -96,8 +90,8 @@ impl Runtime {
                     }
                 }
                 "button" => {
-                    let (hh, pp) = (Some(id) == hovered, Some(id) == pressed);
-                    let bg = if pp { Color::new(180,200,220) } else if hh { Color::new(200,215,230) } else { Color::new(220,220,220) };
+                    let st = layers.tree.state(id);
+                    let bg = if st.pressed { Color::new(180,200,220) } else if st.hovered { Color::new(200,215,230) } else { Color::new(220,220,220) };
                     let k = KRect::new(r.x as f64, r.y as f64, (r.x+r.width) as f64, (r.y+r.height) as f64);
                     elements.push(LE::new(VisualElement::RoundedRect { rect: k, radius: 4.0, style: FillStrokeStyle::new().with_fill(bg) }, 0).with_id(id_as_u64(id)));
                     if let Some(lb) = p.and_then(|x| x.get_str("label")) {
@@ -137,6 +131,6 @@ impl Runtime {
                 _ => {}
             }
         }
-        for child in &node.children { Self::cv(child, layers, elements, hovered, pressed); }
+        for child in &node.children { Self::cv(child, layers, elements); }
     }
 }
