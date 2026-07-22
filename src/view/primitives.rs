@@ -77,14 +77,19 @@ impl View for Checkbox {
     }
 }
 
-// ===== Container =====
-pub struct Container { children: Vec<Box<dyn View>> }
+// ===== Container（支持 expand 和 flex 属性）=====
+pub struct Container { expand: bool, children: Vec<Box<dyn View>> }
 impl Container {
-    pub fn new() -> Self { Self { children: Vec::new() } }
+    pub fn new() -> Self { Self { expand: false, children: Vec::new() } }
     pub fn child(mut self, c: impl View + 'static) -> Self { self.children.push(Box::new(c)); self }
+    pub fn expand(mut self, v: bool) -> Self { self.expand = v; self }
 }
 impl View for Container {
-    fn build(&self) -> ViewNode { ViewNode { type_name: "container", key: None, props: PropMap::new(), children: self.children.iter().map(|c| c.build()).collect() } }
+    fn build(&self) -> ViewNode {
+        let mut p = PropMap::new();
+        p.set("expand", PropValue::Bool(self.expand));
+        ViewNode { type_name: "container", key: None, props: p, children: self.children.iter().map(|c| c.build()).collect() }
+    }
 }
 
 // ===== Column（支持 Flex justify/align）=====
