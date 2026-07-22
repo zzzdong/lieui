@@ -1,0 +1,100 @@
+    Checking lieui v0.2.0 (D:\code\rust\lieui)
+warning: unused imports: `BoxStyle` and `ComputedLayout`
+ --> src\layout\context.rs:8:54
+  |
+8 | use crate::layout::{LayoutConstraint, IntrinsicSize, BoxStyle, ComputedLayout};
+  |                                                      ^^^^^^^^  ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Size`
+ --> src\layout\node.rs:4:36
+  |
+4 | use crate::geometry::{Point, Rect, Size};
+  |                                    ^^^^
+
+warning: unused import: `LayoutConstraint`
+ --> src\layout\node.rs:5:73
+  |
+5 | use crate::layout::box_model::{BoxStyle, ComputedLayout, IntrinsicSize, LayoutConstraint};
+  |                                                                         ^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\app.rs:62:38
+    |
+ 62 |             self.first_layout = Some(layout.clone());
+    |                                 ---- ^^^^^^^^^^^^^^ expected `LayoutContext`, found `&LayoutContext`
+    |                                 |
+    |                                 arguments to this enum variant are incorrect
+    |
+note: `layout::context::LayoutContext` does not implement `Clone`, so `&layout::context::LayoutContext` was cloned instead
+   --> src\app.rs:62:38
+    |
+ 62 |             self.first_layout = Some(layout.clone());
+    |                                      ^^^^^^
+help: the type constructed contains `&layout::context::LayoutContext` due to the type of the argument passed
+   --> src\app.rs:62:33
+    |
+ 62 |             self.first_layout = Some(layout.clone());
+    |                                 ^^^^^--------------^
+    |                                      |
+    |                                      this argument influences the type of `Some`
+note: tuple variant defined here
+   --> C:\Users\Digital\.rustup\toolchains\stable-x86_64-pc-windows-gnullvm\lib/rustlib/src/rust\library\core\src\option.rs:608:5
+    |
+608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ^^^^
+help: consider annotating `layout::context::LayoutContext` with `#[derive(Clone)]`
+   --> src\layout\context.rs:11:1
+    |
+ 11 + #[derive(Clone)]
+ 12 | pub struct LayoutContext { pub root: Option<LayoutNode> }
+    |
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+  --> src\layout\context.rs:49:30
+   |
+49 |             let constraint = LayoutConstraint::tight(viewport);
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^----------
+   |                                                     ||
+   |                                                     |expected `f32`, found `Size`
+   |                                                     argument #2 of type `f32` is missing
+   |
+note: associated function defined here
+  --> src\layout\box_model.rs:24:18
+   |
+24 |     pub const fn tight(width: f32, height: f32) -> Self {
+   |                  ^^^^^ ----------  -----------
+help: provide the argument
+   |
+49 -             let constraint = LayoutConstraint::tight(viewport);
+49 +             let constraint = LayoutConstraint::tight(/* f32 */, /* f32 */);
+   |
+
+error[E0599]: no method named `clone` found for struct `layout::context::LayoutContext` in the current scope
+  --> src\runtime\mod.rs:70:77
+   |
+70 |         self.layers.with_layout_mut(LayerType::Base, |layout| *layout = ctx.clone());
+   |                                                                             ^^^^^ method not found in `layout::context::LayoutContext`
+   |
+  ::: src\layout\context.rs:11:1
+   |
+11 | pub struct LayoutContext { pub root: Option<LayoutNode> }
+   | ------------------------ method `clone` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`
+
+warning: unused variable: `n`
+   --> src\layout\context.rs:136:49
+    |
+136 |     fn start(j: JustifyContent, s: f32, f: f32, n: usize) -> f32 {
+    |                                                 ^ help: if this is intentional, prefix it with an underscore: `_n`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0061, E0308, E0599.
+For more information about an error, try `rustc --explain E0061`.
+warning: `lieui` (lib) generated 4 warnings
+error: could not compile `lieui` (lib) due to 3 previous errors; 4 warnings emitted

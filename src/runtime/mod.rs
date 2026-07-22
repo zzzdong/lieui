@@ -7,7 +7,7 @@ pub use element::ElementTree;
 
 use crate::core::layers::{LayerType, Layers};
 use crate::geometry::Size;
-use crate::layout::node::LayoutContext;
+use crate::layout::context::LayoutContext;
 use crate::render::visual::LayeredElement;
 use crate::runtime::reconciler::Reconciler;
 use crate::state;
@@ -62,7 +62,11 @@ impl Runtime {
 
     fn perform_layout(&mut self) {
         let mut ctx = LayoutContext::new();
-        ctx.compute(self.viewport, &self.layers.tree);
+        // 两阶段布局：collect（构建树 + 读 flex 属性）→ compute（计算位置）
+        if let Some(root_id) = self.layers.tree.root() {
+            ctx.collect(root_id, &self.layers.tree);
+            ctx.compute(self.viewport);
+        }
         self.layers.with_layout_mut(LayerType::Base, |layout| *layout = ctx.clone());
     }
 
@@ -77,7 +81,8 @@ impl Runtime {
 
     fn collect_visuals(node: &crate::layout::node::LayoutNode, layers: &Layers, elements: &mut Vec<LayeredElement>) {
         let id = node.id;
-        if let Some(type_name) = layers.tree.type_name(id) {
+        let type_name = node.type_name;
+        if !type_name.is_empty() {
             let props = layers.tree.props(id);
             let rect = node.bounds();
             use crate::geometry::Color;

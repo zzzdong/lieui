@@ -11,7 +11,7 @@ use winit::window::{Window, WindowId};
 
 use crate::core::layers::LayerType;
 use crate::geometry::{Point, Size};
-use crate::layout::node::LayoutContext;
+use crate::layout::context::LayoutContext;
 use crate::render::renderer::Renderer as _;
 use crate::render::VelloRenderer;
 use crate::runtime::Runtime;
