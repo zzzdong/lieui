@@ -50,6 +50,12 @@ impl Runtime {
         else { Vec::new() }
     }
 
+    /// 仅重新生成渲染树（不跑 builder/reconciliation/layout）
+    /// 用于 hover/pressed 等视觉交互更新
+    pub fn frame_render_only(&self) -> Vec<LayeredElement> {
+        self.build_render_tree()
+    }
+
     fn perform_layout(&mut self) {
         let mut ctx = LayoutContext::new();
         if let Some(rid) = self.layers.tree.root() { ctx.collect(rid, &self.layers.tree); ctx.compute(self.viewport); }
