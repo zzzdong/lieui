@@ -1,33 +1,27 @@
-//! LieUI v2 头跑测试 — 构建 ViewTree 并渲染为像素图
+//! Hello v2 — 窗口版，诊断 UI 元素渲染
 
-use lieui::geometry::Size;
+use lieui::geometry::{Color, Size};
 use lieui::prelude::*;
-use lieui::render::VelloRenderer;
-use lieui::runtime::Runtime;
+use lieui::state::State;
 use lieui::view::View;
 
 fn main() {
-    let mut runtime = Runtime::new(Size::new(800.0, 600.0));
-    let mut renderer = VelloRenderer::new(800, 600);
+    let count = State::new(0);
 
-    let view_tree = Column::new()
-        .child(Text::new("Hello from LieUI v2!").font_size(32.0).color(lieui::geometry::Color::RED))
-        .child(Text::new("Runtime + Renderer headless test.").font_size(18.0))
-        .build();
+    let app = Application::new(
+        move || {
+            Column::new()
+                .child(Text::new("Hello LieUI v2!").font_size(32.0).color(Color::RED))
+                .child(Text::new(&format!("Count: {}", count.get())).font_size(24.0))
+                .child(Button::new("+1").on_click({
+                    let c = count.clone();
+                    move || c.update(|v| *v += 1)
+                }))
+                .child(Text::new("(click button)").font_size(14.0))
+                .build()
+        },
+        Size::new(600.0, 400.0),
+    );
 
-    println!("ViewTree built! {} children", view_tree.children.len());
-
-    runtime.submit_view_tree(view_tree);
-    let elements = runtime.frame();
-    println!("Runtime: {} layered elements", elements.len());
-    println!("Debug: {:?}", runtime.debug_stats);
-
-    let pixmap = renderer.render(&elements);
-    println!("Rendered {}x{} pixmap", pixmap.width(), pixmap.height());
-
-    let mid = (pixmap.height() as usize / 2) * pixmap.width() as usize + (pixmap.width() as usize / 2);
-    let c = pixmap.data()[mid];
-    println!("Center pixel: RGBA({},{},{},{})", c.r, c.g, c.b, c.a);
-
-    println!("\n=== LieUI v2 Hello completed! ===");
+    app.run();
 }

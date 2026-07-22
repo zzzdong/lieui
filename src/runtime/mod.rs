@@ -82,15 +82,15 @@ impl Runtime {
             let rect = node.bounds();
             use crate::geometry::Color;
             use crate::render::visual::{FillStrokeStyle, LayeredElement as LE, VisualElement};
-            use kurbo::Rect as KRect;
+            use crate::render::visual::KRect;
             match type_name {
                 "text" => {
                     if let Some(content) = props.and_then(|p| p.get_str("content")) {
-                        elements.push(LE::new(
-                            VisualElement::TextRun { text: content.to_string(), position: kurbo::Point::new(rect.x as f64, rect.y as f64),
-                                color: props.and_then(|p| p.get_color("color")).unwrap_or(Color::BLACK), font_size: 16.0,
-                                font_family: "sans-serif".to_string(), rotation: 0.0, max_width: None, layout: None }, 0,
-                        ).with_id(id_as_u64(id)));
+                        let color = props.and_then(|p| p.get_color("color")).unwrap_or(Color::BLACK);
+                        // 文字显示为色块（暂缺字体渲染）
+                        let r = KRect::new(rect.x as f64, rect.y as f64, (rect.x + rect.width) as f64, (rect.y + rect.height) as f64);
+                        elements.push(LE::new(VisualElement::Rect { rect: r, style: FillStrokeStyle::new().with_fill(color) }, 0).with_id(id_as_u64(id)));
+                        let _ = content; // suppress unused warning
                     }
                 }
                 "button" => {
@@ -98,11 +98,8 @@ impl Runtime {
                     elements.push(LE::new(
                         VisualElement::RoundedRect { rect: r, radius: 4.0, style: FillStrokeStyle::new().with_fill(Color::from_rgb8(220, 220, 220)) }, 0,
                     ).with_id(id_as_u64(id)));
-                    if let Some(label) = props.and_then(|p| p.get_str("label")) {
-                        elements.push(LE::new(
-                            VisualElement::TextRun { text: label.to_string(), position: kurbo::Point::new((rect.x + 12.0) as f64, (rect.y + 8.0) as f64),
-                                color: Color::BLACK, font_size: 14.0, font_family: "sans-serif".to_string(), rotation: 0.0, max_width: None, layout: None }, 0,
-                        ).with_id(id_as_u64(id)));
+                    if let Some(_label) = props.and_then(|p| p.get_str("label")) {
+                        // 按钮标签暂不渲染
                     }
                 }
                 "image" => {

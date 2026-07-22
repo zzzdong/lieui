@@ -22,9 +22,11 @@ impl Reconciler {
     pub fn diff(&mut self, view_node: &ViewNode, parent_id: ElementId, tree: &ElementTree, patches: &mut Vec<Patch>) {
         let existing = tree.children_of(parent_id);
         let mut matched = Vec::new();
+        let mut used = std::collections::HashSet::new();
         for (pos, child_node) in view_node.children.iter().enumerate() {
-            match self.find_match(child_node, &existing, tree) {
+            match self.find_match(child_node, &existing, &used, tree) {
                 Ok(id) => {
+                    used.insert(id);
                     matched.push(id);
                     if !props_equal(&child_node.props, tree.props(id).unwrap_or(&PropMap::new())) {
                         patches.push(Patch::Update { id, props: child_node.props.clone() });
@@ -46,13 +48,9 @@ impl Reconciler {
         }
     }
 
-    fn find_match(&self, view_node: &ViewNode, existing: &[ElementId], tree: &ElementTree) -> Result<ElementId, ()> {
-        if let Some(ref key) = view_node.key {
-            for id in existing {
-                if let Some(ek) = tree.key(*id) { if ek == *key { return Ok(*id); } }
-            }
-        }
+    fn find_match(&self, view_node: &ViewNode, existing: &[ElementId], used: &std::collections::HashSet<ElementId>, tree: &ElementTree) -> Result<ElementId, ()> {
         for id in existing {
+            if used.contains(id) { continue; }
             if let Some(tn) = tree.type_name(*id) { if tn == view_node.type_name { return Ok(*id); } }
         }
         Err(())

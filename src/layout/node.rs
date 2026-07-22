@@ -2,6 +2,7 @@
 
 use crate::core::ElementId;
 use crate::layout::box_model::{BoxStyle, ComputedLayout, IntrinsicSize, LayoutConstraint};
+use crate::layout::measurable::{DefaultMeasurer, Measurable};
 use crate::runtime::element::ElementTree;
 
 #[derive(Debug, Clone)]
@@ -20,11 +21,6 @@ impl LayoutNode {
                computed: ComputedLayout::default(), dirty: true, children: Vec::new() }
     }
     pub fn bounds(&self) -> crate::geometry::Rect { self.computed.rect() }
-    pub fn find(&self, target: ElementId) -> Option<&LayoutNode> {
-        if self.id == target { return Some(self); }
-        for child in &self.children { if let Some(f) = child.find(target) { return Some(f); } }
-        None
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,20 +36,63 @@ impl LayoutContext {
     pub fn compute(&mut self, viewport: crate::geometry::Size, tree: &ElementTree) {
         let Some(root_id) = tree.root() else { return; };
         let constraint = LayoutConstraint::loose((viewport.width, viewport.height));
-        let full = Self::build_tree(root_id, constraint, tree);
+        let full = Self::build_tree(root_id, constraint, tree, None);
         self.root = Some(full);
     }
 
-    fn build_tree(id: ElementId, constraint: LayoutConstraint, tree: &ElementTree) -> LayoutNode {
-        let intrinsic = tree.intrinsic(id);
+    fn build_tree(id: ElementId, constraint: LayoutConstraint, tree: &ElementTree, _parent_type: Option<&str>) -> LayoutNode {
+        let measurer = DefaultMeasurer;
+        let intrinsic = tree.props(id)
+            .map(|p| measurer.measure(p, &constraint))
+            .unwrap_or(IntrinsicSize::zero());
+        tree.set_intrinsic(id, intrinsic);
+
+        let type_name = tree.type_name(id).unwrap_or("");
+
+        let mut y_off = 0.0f32;
+        let mut x_off = 0.0f32;
+        let spacing = 4.0f32;
+        let mut children = Vec::new();
+
+        for child_id in tree.children_of(id) {
+            let child = Self::build_tree(child_id, constraint, tree, Some(type_name));
+            match type_name {
+                "column" => {
+                    let mut c = child;
+                    c.computed.x = 0.0;
+                    c.computed.y = y_off;
+                    y_off += c.computed.height + spacing;
+                    children.push(c);
+                }
+                "row" => {
+                    let mut c = child;
+                    c.computed.x = x_off;
+                    c.computed.y = 0.0;
+                    x_off += c.computed.width + spacing;
+                    children.push(c);
+                }
+                _ => {
+                    children.push(child);
+                }
+            }
+        }
+
+        let w = if type_name == "column" {
+            // Column 宽度为最大子宽度
+            children.iter().map(|c| c.computed.width).fold(0.0f32, f32::max)
+        } else {
+            constraint.max_width.min(intrinsic.width).max(constraint.min_width)
+        };
+        let h = match type_name {
+            "column" => y_off.max(1.0),
+            "row" => children.iter().map(|c| c.computed.height).fold(0.0f32, f32::max),
+            _ => constraint.max_height.min(intrinsic.height).max(constraint.min_height),
+        };
+
         let mut node = LayoutNode::new(id);
         node.intrinsic = intrinsic;
-        let w = constraint.max_width.min(intrinsic.width).max(constraint.min_width);
-        let h = constraint.max_height.min(intrinsic.height).max(constraint.min_height);
         node.computed = ComputedLayout { x: 0.0, y: 0.0, width: w, height: h };
-        for child_id in tree.children_of(id) {
-            node.children.push(Self::build_tree(child_id, constraint, tree));
-        }
+        node.children = children;
         node
     }
 }
