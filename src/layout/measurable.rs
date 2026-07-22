@@ -20,9 +20,17 @@ impl Measurable for DefaultMeasurer {
             h = mh as f32;
         }
         if let Some(label) = props.get_str("label") {
-            let (mw, _) = crate::text::TextEngine::measure_text(label, 14.0, None);
+            let (mw, _mh) = crate::text::TextEngine::measure_text(label, 14.0, None);
             w = w.max(mw as f32 + 24.0);
             h = h.max(32.0);
+        }
+        // checkbox: 方框(20px) + 标签文字
+        if props.get_str("checked").is_some() || props.get_bool("checked").is_some() {
+            let label_w = props.get_str("label").map(|l| {
+                crate::text::TextEngine::measure_text(l, 14.0, None).0 as f32
+            }).unwrap_or(0.0);
+            w = w.max(20.0 + label_w + 8.0);
+            h = h.max(24.0);
         }
         if let Some(fw) = props.get_f32("width") { w = fw; }
         if let Some(fh) = props.get_f32("height") { h = fh; }

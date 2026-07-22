@@ -133,9 +133,20 @@ impl Runtime {
                 }
                 "checkbox" => {
                     let checked = props.and_then(|p| p.get_bool("checked")).unwrap_or(false);
+                    // 方框（使用 layout 高度，固定宽=高）
+                    let box_size = rect.height.min(24.0);
+                    let cb = KRect::new(rect.x as f64, rect.y as f64, (rect.x + box_size) as f64, (rect.y + box_size) as f64);
                     let fill = if checked { Color::new(60, 120, 220) } else { Color::new(200, 200, 200) };
-                    let r = KRect::new(rect.x as f64, rect.y as f64, (rect.x + 16.0) as f64, (rect.y + 16.0) as f64);
-                    elements.push(LE::new(VisualElement::Rect { rect: r, style: FillStrokeStyle::new().with_fill(fill).with_stroke(Color::new(150,150,150), 1.0) }, 0).with_id(id_as_u64(id)));
+                    elements.push(LE::new(VisualElement::Rect { rect: cb, style: FillStrokeStyle::new().with_fill(fill).with_stroke(Color::new(150,150,150), 1.0) }, 0).with_id(id_as_u64(id)));
+                    // 标签文字
+                    if let Some(label) = props.and_then(|p| p.get_str("label")) {
+                        let layout = crate::text::create_text_layout(label, 14.0, Color::BLACK, None);
+                        elements.push(LE::new(VisualElement::TextRun {
+                            text: label.to_string(), position: kurbo::Point::new((rect.x + box_size + 6.0) as f64, (rect.y + 4.0) as f64),
+                            color: Color::BLACK, font_size: 14.0, font_family: "sans-serif".to_string(),
+                            rotation: 0.0, max_width: None, layout: Some(Box::new(layout)),
+                        }, 0).with_id(id_as_u64(id)));
+                    }
                 }
                 _ => {}
             }

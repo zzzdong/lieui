@@ -57,15 +57,23 @@ impl View for Image {
     }
 }
 
-// ===== Checkbox =====
-pub struct Checkbox { checked: bool, label: String }
+// ===== Checkbox（标签+点击）=====
+pub struct Checkbox { checked: bool, label: String, callback_id: Option<u64> }
 impl Checkbox {
-    pub fn new(checked: bool) -> Self { Self { checked, label: String::new() } }
+    pub fn new(checked: bool) -> Self { Self { checked, label: String::new(), callback_id: None } }
     pub fn label(mut self, s: impl Into<String>) -> Self { self.label = s.into(); self }
+    pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
+        self.callback_id = Some(state::register_click(Box::new(f)));
+        self
+    }
 }
 impl View for Checkbox {
     fn build(&self) -> ViewNode {
-        ViewNode { type_name: "checkbox", key: None, props: PropMap::from_array([("checked", PropValue::Bool(self.checked)), ("label", PropValue::Str(self.label.clone()))]), children: Vec::new() }
+        let mut p = PropMap::new();
+        p.set("checked", PropValue::Bool(self.checked));
+        p.set("label", PropValue::Str(self.label.clone()));
+        if let Some(id) = self.callback_id { p.set("on_click", PropValue::U32(id as u32)); }
+        ViewNode { type_name: "checkbox", key: None, props: p, children: Vec::new() }
     }
 }
 
