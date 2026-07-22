@@ -74,8 +74,13 @@ impl LayoutContext {
             _ => (0.0, 0.0),
         };
 
-        // 容器自身尺寸
+        // 读取 expand 属性
+        let expand = props.and_then(|p| p.get_bool("expand")).unwrap_or(false);
+
+        // 容器自身尺寸（expand 时撑满主轴；否则 fit content）
         let (w, h) = match tn {
+            "column" if expand => (constraint.max_width, constraint.max_height),
+            "row" if expand => (constraint.max_width, constraint.max_height),
             "column" => (max_cross.max(intrinsic.width).max(constraint.min_width), total_main.max(constraint.min_height)),
             "row" => (total_main.max(intrinsic.width).max(constraint.min_width), max_cross.max(intrinsic.height).max(constraint.min_height)),
             _ => (constraint.max_width.min(intrinsic.width).max(constraint.min_width),
@@ -133,24 +138,23 @@ impl LayoutContext {
                     }
                     "space-around" => {
                         let gap2 = if n > 0 { free_main / n as f32 } else { 0.0 };
-                        let half = gap2 / 2.0;
                         let mut o = Vec::with_capacity(n);
-                        let mut cur = half;
-                        for _ in &raw_children {
+                        let mut cur = gap2 / 2.0;
+                        for c in &raw_children {
                             o.push(cur);
-                            cur += gap2 + (if tn == "row" { 0.0 } else { 0.0 });
+                            let sz = if tn == "column" { c.computed.height } else { c.computed.width };
+                            cur += sz + gap2;
                         }
-                        // 修正: space-around 每个子项两边间距相等
-                        let _ = (half, gap2);
                         o
                     }
                     "space-evenly" => {
                         let gap2 = if n > 0 { free_main / (n + 1) as f32 } else { 0.0 };
                         let mut o = Vec::with_capacity(n);
                         let mut cur = gap2;
-                        for _ in &raw_children {
+                        for c in &raw_children {
                             o.push(cur);
-                            cur += gap2 + (if tn == "row" { 0.0 } else { 0.0 });
+                            let sz = if tn == "column" { c.computed.height } else { c.computed.width };
+                            cur += sz + gap2;
                         }
                         o
                     }

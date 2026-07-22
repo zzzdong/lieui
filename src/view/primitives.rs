@@ -80,14 +80,15 @@ impl View for Container {
 }
 
 // ===== Column（支持 Flex justify/align）=====
-pub struct Column { spacing: f32, justify: JustifyContent, align: AlignItems, children: Vec<Box<dyn View>> }
+pub struct Column { spacing: f32, justify: JustifyContent, align: AlignItems, expand: bool, children: Vec<Box<dyn View>> }
 impl Column {
-    pub fn new() -> Self { Self { spacing: 4.0, justify: JustifyContent::Start, align: AlignItems::Start, children: Vec::new() } }
+    pub fn new() -> Self { Self { spacing: 4.0, justify: JustifyContent::Start, align: AlignItems::Start, expand: false, children: Vec::new() } }
     pub fn child(mut self, c: impl View + 'static) -> Self { self.children.push(Box::new(c)); self }
     pub fn spacing(mut self, s: f32) -> Self { self.spacing = s; self }
     pub fn justify_content(mut self, j: JustifyContent) -> Self { self.justify = j; self }
     pub fn align_items(mut self, a: AlignItems) -> Self { self.align = a; self }
-    pub fn center(mut self) -> Self { self.justify = JustifyContent::Center; self.align = AlignItems::Center; self }
+    pub fn expand(mut self, v: bool) -> Self { self.expand = v; self }
+    pub fn center(mut self) -> Self { self.justify = JustifyContent::Center; self.align = AlignItems::Center; self.expand = true; self }
 }
 impl View for Column {
     fn build(&self) -> ViewNode {
@@ -95,19 +96,21 @@ impl View for Column {
         p.set("justify", PropValue::Str(justify_str(&self.justify).into()));
         p.set("align", PropValue::Str(align_str(&self.align).into()));
         p.set("spacing", PropValue::F32(self.spacing));
+        p.set("expand", PropValue::Bool(self.expand));
         ViewNode { type_name: "column", key: None, props: p, children: self.children.iter().map(|c| c.build()).collect() }
     }
 }
 
 // ===== Row（支持 Flex justify/align）=====
-pub struct Row { spacing: f32, justify: JustifyContent, align: AlignItems, children: Vec<Box<dyn View>> }
+pub struct Row { spacing: f32, justify: JustifyContent, align: AlignItems, expand: bool, children: Vec<Box<dyn View>> }
 impl Row {
-    pub fn new() -> Self { Self { spacing: 4.0, justify: JustifyContent::Start, align: AlignItems::Center, children: Vec::new() } }
+    pub fn new() -> Self { Self { spacing: 4.0, justify: JustifyContent::Start, align: AlignItems::Center, expand: false, children: Vec::new() } }
     pub fn child(mut self, c: impl View + 'static) -> Self { self.children.push(Box::new(c)); self }
     pub fn spacing(mut self, s: f32) -> Self { self.spacing = s; self }
     pub fn justify_content(mut self, j: JustifyContent) -> Self { self.justify = j; self }
     pub fn align_items(mut self, a: AlignItems) -> Self { self.align = a; self }
-    pub fn center(mut self) -> Self { self.justify = JustifyContent::Center; self.align = AlignItems::Center; self }
+    pub fn expand(mut self, v: bool) -> Self { self.expand = v; self }
+    pub fn center(mut self) -> Self { self.justify = JustifyContent::Center; self.align = AlignItems::Center; self.expand = true; self }
 }
 impl View for Row {
     fn build(&self) -> ViewNode {
@@ -115,6 +118,7 @@ impl View for Row {
         p.set("justify", PropValue::Str(justify_str(&self.justify).into()));
         p.set("align", PropValue::Str(align_str(&self.align).into()));
         p.set("spacing", PropValue::F32(self.spacing));
+        p.set("expand", PropValue::Bool(self.expand));
         ViewNode { type_name: "row", key: None, props: p, children: self.children.iter().map(|c| c.build()).collect() }
     }
 }
