@@ -14,22 +14,34 @@ fn main() {
 
     let vt = Column::new()
         .child(Text::new("Counter").font_size(48.0))
-        .child(Text::new(&count.get().to_string()).font_size(72.0))
+        .child(Text::new(count.get().to_string()).font_size(72.0))
         .build();
     runtime.submit_view_tree(vt);
     let e = runtime.frame();
     let _px = renderer.render(&e);
-    println!("Frame 1: {} elements, tree {}", e.len(), runtime.debug_stats.element_count);
+    println!(
+        "Frame 1: {} elements, tree {}",
+        e.len(),
+        runtime.debug_stats.element_count
+    );
 
     count.set(5);
     let vt2 = Column::new()
         .child(Text::new("Counter").font_size(48.0))
-        .child(Text::new(&count.get().to_string()).font_size(72.0).color(lieui::geometry::Color::RED))
-        .child(Text::new(&format!("Count = {}", count.get())).font_size(14.0))
+        .child(
+            Text::new(count.get().to_string())
+                .font_size(72.0)
+                .color(lieui::geometry::Color::RED),
+        )
+        .child(Text::new(format!("Count = {}", count.get())).font_size(14.0))
         .build();
     runtime.submit_view_tree(vt2);
     let e2 = runtime.frame();
     let _px2 = renderer.render(&e2);
-    println!("Frame 2: {} elements, reconciler {:?}", e2.len(), runtime.debug_stats.reconciler);
+    println!(
+        "Frame 2: {} elements, reconciler {:?}",
+        e2.len(),
+        runtime.debug_stats.reconciler
+    );
     println!("\n=== Counter completed! ===");
 }

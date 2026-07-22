@@ -1,6 +1,6 @@
 //! 布局约束与盒模型
 
-use crate::geometry::Rect;
+use crate::geometry::{Color, Rect};
 
 /// 布局约束
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -163,7 +163,7 @@ impl Default for ComputedLayout {
 }
 
 /// 盒样式
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BoxStyle {
     /// 外边距
     pub margin: EdgeInsets,
@@ -178,6 +178,12 @@ pub struct BoxStyle {
     pub fixed_height: Option<f32>,
     /// expand 填满可用空间
     pub expand: bool,
+    /// 背景色
+    pub background_color: Option<Color>,
+    /// 悬停背景色（用于 Button 等交互组件）
+    pub hover_background: Option<Color>,
+    /// 按下背景色
+    pub pressed_background: Option<Color>,
 }
 
 impl BoxStyle {
@@ -194,19 +200,5 @@ impl BoxStyle {
     pub fn expand(mut self, v: bool) -> Self {
         self.expand = v;
         self
-    }
-}
-
-impl Default for BoxStyle {
-    fn default() -> Self {
-        Self {
-            margin: EdgeInsets::zero(),
-            padding: EdgeInsets::zero(),
-            min_size: None,
-            max_size: None,
-            fixed_width: None,
-            fixed_height: None,
-            expand: false,
-        }
     }
 }

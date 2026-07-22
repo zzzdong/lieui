@@ -9,6 +9,7 @@ use crate::event::{EventEffects, EventPhase, Propagation};
 ///
 /// 在事件冒泡/捕获期间传递给 Element 的事件处理器。
 /// 通过 handle 而非直接引用访问 Runtime 状态。
+#[derive(Default)]
 pub struct EventContext {
     /// 当前事件目标
     target_id: Option<ElementId>,

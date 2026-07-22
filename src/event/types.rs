@@ -22,19 +22,49 @@ pub enum EventType {
 /// 事件
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    MouseMove { x: f32, y: f32 },
-    MouseDown { button: MouseButton, x: f32, y: f32 },
-    MouseUp { button: MouseButton, x: f32, y: f32 },
+    MouseMove {
+        x: f32,
+        y: f32,
+    },
+    MouseDown {
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    },
+    MouseUp {
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    },
     MouseEnter,
     MouseLeave,
-    Click { button: MouseButton },
-    MouseWheel { delta_x: f32, delta_y: f32, x: f32, y: f32 },
-    KeyDown { key: Key, modifiers: Modifiers },
-    KeyUp { key: Key, modifiers: Modifiers },
+    Click {
+        button: MouseButton,
+    },
+    MouseWheel {
+        delta_x: f32,
+        delta_y: f32,
+        x: f32,
+        y: f32,
+    },
+    KeyDown {
+        key: Key,
+        modifiers: Modifiers,
+    },
+    KeyUp {
+        key: Key,
+        modifiers: Modifiers,
+    },
     FocusIn,
     FocusOut,
-    ImePreedit { text: String, cursor_start: Option<usize>, cursor_end: Option<usize> },
-    ImeCommit { text: String },
+    ImePreedit {
+        text: String,
+        cursor_start: Option<usize>,
+        cursor_end: Option<usize>,
+    },
+    ImeCommit {
+        text: String,
+    },
     ImeDisabled,
 }
 

@@ -10,16 +10,18 @@ pub struct HitTestResult {
 }
 
 /// 事件传播阶段
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EventPhase {
-    Capture,
+    #[default]
     Target,
+    Capture,
     Bubble,
 }
 
 /// 事件传播控制
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Propagation {
+    #[default]
     Continue,
     Stop,
 }

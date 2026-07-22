@@ -1,7 +1,6 @@
-﻿//! Runtime — v2 核心"服务端"
+//! Runtime — v2 核心"服务端"
 pub mod element;
 pub mod reconciler;
-pub use element::ElementTree;
 use crate::core::layers::{LayerType, Layers};
 use crate::geometry::Size;
 use crate::layout::context::LayoutContext;
@@ -9,22 +8,41 @@ use crate::render::visual::LayeredElement;
 use crate::runtime::reconciler::Reconciler;
 use crate::state;
 use crate::view::node::ViewNode;
+pub use element::ElementTree;
 
 pub struct Runtime {
-    pub layers: Layers, viewport: Size, needs_layout: bool, needs_render: bool,
-    pending_view_tree: Option<ViewNode>, pub debug_stats: DebugStats,
+    pub layers: Layers,
+    pub(crate) viewport: Size,
+    needs_layout: bool,
+    needs_render: bool,
+    pending_view_tree: Option<ViewNode>,
+    pub debug_stats: DebugStats,
 }
 #[derive(Debug, Default)]
-pub struct DebugStats { pub reconciler: crate::runtime::reconciler::ReconcilerStats, pub element_count: usize }
-fn id_as_u64(id: crate::core::ElementId) -> u64 { id.as_ffi() }
-
+pub struct DebugStats {
+    pub reconciler: crate::runtime::reconciler::ReconcilerStats,
+    pub element_count: usize,
+}
 impl Runtime {
     pub fn new(viewport: Size) -> Self {
-        Self { layers: Layers::new(), viewport, needs_layout: true, needs_render: true,
-            pending_view_tree: None, debug_stats: DebugStats::default() }
+        Self {
+            layers: Layers::new(),
+            viewport,
+            needs_layout: true,
+            needs_render: true,
+            pending_view_tree: None,
+            debug_stats: DebugStats::default(),
+        }
     }
-    pub fn set_viewport(&mut self, vp: Size) { self.viewport = vp; self.needs_layout = true; self.needs_render = true; }
-    pub fn submit_view_tree(&mut self, vt: ViewNode) { self.pending_view_tree = Some(vt); self.needs_render = true; }
+    pub fn set_viewport(&mut self, vp: Size) {
+        self.viewport = vp;
+        self.needs_layout = true;
+        self.needs_render = true;
+    }
+    pub fn submit_view_tree(&mut self, vt: ViewNode) {
+        self.pending_view_tree = Some(vt);
+        self.needs_render = true;
+    }
 
     pub fn frame(&mut self) -> Vec<LayeredElement> {
         if state::take_rebuild_requested() || self.pending_view_tree.is_some() {
@@ -32,19 +50,64 @@ impl Runtime {
                 let mut r = Reconciler::new();
                 if self.layers.layer_root(LayerType::Base).is_none() {
                     let id = self.layers.tree.create_from_node(&vt);
-                    self.layers.tree.set_root(id); self.layers.set_base_root(id);
-                    let mut p = Vec::new(); r.diff(&vt, id, &self.layers.tree, &mut p); r.apply(p, &mut self.layers.tree);
+                    self.layers.tree.set_root(id);
+                    self.layers.set_base_root(id);
+                    let mut p = Vec::new();
+                    r.diff(&vt, id, &self.layers.tree, &mut p);
+                    r.apply(p, &mut self.layers.tree);
                 } else {
                     let rid = self.layers.layer_root(LayerType::Base).unwrap();
-                    let mut p = Vec::new(); r.diff(&vt, rid, &self.layers.tree, &mut p); r.apply(p, &mut self.layers.tree);
+                    let mut p = Vec::new();
+                    r.diff(&vt, rid, &self.layers.tree, &mut p);
+                    r.apply(p, &mut self.layers.tree);
                     self.debug_stats.reconciler = r.stats;
                 }
                 self.needs_layout = true;
             }
         }
-        if self.needs_layout { self.perform_layout(); self.needs_layout = false; }
-        if self.needs_render { self.needs_render = false; self.debug_stats.element_count = self.layers.tree.len(); self.build_render_tree() }
-        else { Vec::new() }
+
+        // 处理 Modal / Overlay 的显示/隐藏请求
+        if let Some(pending) = state::take_pending_modal() {
+            match pending {
+                Some(view) => {
+                    let id = self.layers.tree.create_from_node(&view);
+                    self.layers.show_modal(id);
+                }
+                None => {
+                    if let Some(rid) = self.layers.layer_root(LayerType::Modal) {
+                        self.layers.tree.remove(rid);
+                    }
+                    self.layers.hide_modal();
+                }
+            }
+            self.needs_layout = true;
+        }
+        if let Some(pending) = state::take_pending_overlay() {
+            match pending {
+                Some(view) => {
+                    let id = self.layers.tree.create_from_node(&view);
+                    self.layers.show_overlay(id);
+                }
+                None => {
+                    if let Some(rid) = self.layers.layer_root(LayerType::Overlay) {
+                        self.layers.tree.remove(rid);
+                    }
+                    self.layers.hide_overlay();
+                }
+            }
+            self.needs_layout = true;
+        }
+        if self.needs_layout {
+            self.perform_layout();
+            self.needs_layout = false;
+        }
+        if self.needs_render {
+            self.needs_render = false;
+            self.debug_stats.element_count = self.layers.tree.len();
+            self.build_render_tree()
+        } else {
+            Vec::new()
+        }
     }
 
     /// 仅重新生成渲染树（不跑 builder/reconciliation/layout）
@@ -54,83 +117,58 @@ impl Runtime {
     }
 
     fn perform_layout(&mut self) {
-        let mut ctx = LayoutContext::new();
-        if let Some(rid) = self.layers.tree.root() { ctx.collect(rid, &self.layers.tree); ctx.compute(self.viewport); }
-        self.layers.with_layout_mut(LayerType::Base, |l| *l = ctx.clone());
+        for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
+            if let Some(rid) = self.layers.layer_root(lt) {
+                let mut ctx = LayoutContext::new();
+                ctx.collect(rid, &self.layers.tree);
+                ctx.compute(self.viewport);
+                self.layers.set_layer_layout(lt, ctx);
+            } else {
+                self.layers.set_layer_layout(lt, LayoutContext::new());
+            }
+        }
     }
 
     fn build_render_tree(&self) -> Vec<LayeredElement> {
         let mut e = Vec::new();
-        self.layers.with_layout(LayerType::Base, |l| {
-            if let Some(ref r) = l.root { Self::cv(r, &self.layers, &mut e); }
-        });
-        e.sort_by_key(|x| x.z_index); e
+        for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
+            let z = lt.z_index();
+            self.layers.with_layout(lt, |l| {
+                if let Some(ref r) = l.root {
+                    Self::cv(
+                        r,
+                        z,
+                        &self.layers,
+                        &mut e,
+                        crate::core::state::ElementState::default(),
+                    );
+                }
+            });
+        }
+        e.sort_by_key(|x| x.z_index);
+        e
     }
 
-    fn cv(node: &crate::layout::node::LayoutNode, layers: &Layers, elements: &mut Vec<LayeredElement>) {
+    fn cv(
+        node: &crate::layout::node::LayoutNode,
+        z_index: i32,
+        layers: &Layers,
+        elements: &mut Vec<LayeredElement>,
+        inherited_state: crate::core::state::ElementState,
+    ) {
+        use crate::view::node::NodeType;
         let id = node.id;
-        let tn = node.type_name;
-        if !tn.is_empty() {
-            let p = layers.tree.props(id);
-            let r = node.bounds();
-            use crate::geometry::Color;
-            use crate::render::visual::{FillStrokeStyle, LayeredElement as LE, VisualElement};
-            use crate::render::visual::KRect;
-            match tn {
-                "text" => {
-                    if let Some(c) = p.and_then(|x| x.get_str("content")) {
-                        let cl = p.and_then(|x| x.get_color("color")).unwrap_or(Color::BLACK);
-                        let fs = p.and_then(|x| x.get_f64("font_size")).unwrap_or(16.0);
-                        let lay = crate::text::create_text_layout(c, fs, cl, None);
-                        elements.push(LE::new(VisualElement::TextRun {
-                            text: c.to_string(), position: kurbo::Point::new(r.x as f64, r.y as f64),
-                            color: cl, font_size: fs, font_family: "sans-serif".to_string(),
-                            rotation: 0.0, max_width: None, layout: Some(Box::new(lay)),
-                        }, 0).with_id(id_as_u64(id)));
-                    }
-                }
-                "button" => {
-                    let st = layers.tree.state(id);
-                    let bg = if st.pressed { Color::new(180,200,220) } else if st.hovered { Color::new(200,215,230) } else { Color::new(220,220,220) };
-                    let k = KRect::new(r.x as f64, r.y as f64, (r.x+r.width) as f64, (r.y+r.height) as f64);
-                    elements.push(LE::new(VisualElement::RoundedRect { rect: k, radius: 4.0, style: FillStrokeStyle::new().with_fill(bg) }, 0).with_id(id_as_u64(id)));
-                    if let Some(lb) = p.and_then(|x| x.get_str("label")) {
-                        let lay = crate::text::create_text_layout(lb, 14.0, Color::BLACK, None);
-                        elements.push(LE::new(VisualElement::TextRun {
-                            text: lb.to_string(), position: kurbo::Point::new((r.x+12.0) as f64,(r.y+8.0) as f64),
-                            color: Color::BLACK, font_size: 14.0, font_family: "sans-serif".to_string(),
-                            rotation: 0.0, max_width: None, layout: Some(Box::new(lay)),
-                        }, 0).with_id(id_as_u64(id)));
-                    }
-                }
-                "image" => {
-                    if let Some(d) = p.and_then(|x| x.get_bytes("data")) {
-                        let iw = p.and_then(|x| x.get_u32("img_w")).unwrap_or(r.width as u32);
-                        let ih = p.and_then(|x| x.get_u32("img_h")).unwrap_or(r.height as u32);
-                        elements.push(LE::new(VisualElement::Image {
-                            bounds: KRect::new(r.x as f64,r.y as f64,(r.x+r.width) as f64,(r.y+r.height) as f64),
-                            data: std::sync::Arc::new(d.to_vec()), width: iw, height: ih, opacity: None,
-                        }, 0).with_id(id_as_u64(id)));
-                    }
-                }
-                "checkbox" => {
-                    let ck = p.and_then(|x| x.get_bool("checked")).unwrap_or(false);
-                    let bs = r.height.min(24.0);
-                    let cb = KRect::new(r.x as f64,r.y as f64,(r.x+bs) as f64,(r.y+bs) as f64);
-                    let fl = if ck { Color::new(60,120,220) } else { Color::new(200,200,200) };
-                    elements.push(LE::new(VisualElement::Rect { rect: cb, style: FillStrokeStyle::new().with_fill(fl).with_stroke(Color::new(150,150,150),1.0) }, 0).with_id(id_as_u64(id)));
-                    if let Some(lb) = p.and_then(|x| x.get_str("label")) {
-                        let lay = crate::text::create_text_layout(lb, 14.0, Color::BLACK, None);
-                        elements.push(LE::new(VisualElement::TextRun {
-                            text: lb.to_string(), position: kurbo::Point::new((r.x+bs+6.0)as f64,(r.y+4.0)as f64),
-                            color: Color::BLACK, font_size: 14.0, font_family: "sans-serif".to_string(),
-                            rotation: 0.0, max_width: None, layout: Some(Box::new(lay)),
-                        }, 0).with_id(id_as_u64(id)));
-                    }
-                }
-                _ => {}
-            }
+        let node_ref = layers.tree.get_node(id);
+        // Listener 作为交互边界，使用并传播自身状态；其他节点继承父状态
+        let state = if node.node_type == NodeType::Listener {
+            layers.tree.state(id)
+        } else {
+            inherited_state
+        };
+        node_ref.render(&node.computed, state, elements, z_index, id);
+
+        for child in &node.children {
+            Self::cv(child, z_index, layers, elements, state);
         }
-        for child in &node.children { Self::cv(child, layers, elements); }
     }
 }

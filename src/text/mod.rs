@@ -1,8 +1,8 @@
-﻿//! 文本引擎 — 基于 parley 0.11.0 排版
+//! 文本引擎 — 基于 parley 0.11.0 排版
 
 use std::cell::RefCell;
 
-use parley::{Alignment, AlignmentOptions, FontContext, LayoutContext, style::StyleProperty};
+use parley::{style::StyleProperty, Alignment, AlignmentOptions, FontContext, LayoutContext};
 
 use crate::geometry::Color;
 
@@ -15,14 +15,19 @@ thread_local! {
 }
 
 /// 同时访问字体和布局上下文
-pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<Color>) -> R>(f: F) -> R {
-    FONT_CONTEXT.with(|fc| {
-        LAYOUT_CONTEXT.with(|lc| f(&mut fc.borrow_mut(), &mut lc.borrow_mut()))
-    })
+pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<Color>) -> R>(
+    f: F,
+) -> R {
+    FONT_CONTEXT.with(|fc| LAYOUT_CONTEXT.with(|lc| f(&mut fc.borrow_mut(), &mut lc.borrow_mut())))
 }
 
 /// 创建文本布局
-pub fn create_text_layout(text: &str, font_size: f64, color: Color, max_width: Option<f64>) -> TextLayout {
+pub fn create_text_layout(
+    text: &str,
+    font_size: f64,
+    color: Color,
+    max_width: Option<f64>,
+) -> TextLayout {
     with_text_contexts(|fc, lc| {
         let mut builder = lc.ranged_builder(fc, text, 1.0, true);
         builder.push_default(StyleProperty::FontSize(font_size as f32));

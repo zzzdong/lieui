@@ -1,4 +1,4 @@
-﻿pub mod app;
+pub mod app;
 pub mod core;
 pub mod event;
 pub mod geometry;
@@ -16,8 +16,11 @@ pub mod prelude {
     pub use crate::render::visual::{LayeredElement, VisualElement};
     pub use crate::render::{Renderer, VelloRenderer};
     pub use crate::runtime::Runtime;
-    pub use crate::state::{State, request_redraw, request_rebuild};
-    pub use crate::view::node::PropMap;
-    pub use crate::view::primitives::{Button, Checkbox, Column, Container, Divider, Image, Row, Text};
+    pub use crate::state::{
+        hide_modal, hide_overlay, request_rebuild, request_redraw, show_modal, show_overlay, State,
+    };
+    pub use crate::view::primitives::{
+        Button, Checkbox, Column, Container, Divider, Image, Row, Text,
+    };
     pub use crate::view::{View, ViewNode};
 }

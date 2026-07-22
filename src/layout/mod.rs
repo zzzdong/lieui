@@ -6,10 +6,10 @@ pub mod flex;
 pub mod measurable;
 pub mod node;
 
+pub use box_model::IntrinsicSize;
 pub use box_model::*;
 pub use constraint::LayoutConstraint;
 pub use context::LayoutContext;
 pub use flex::*;
 pub use measurable::*;
 pub use node::LayoutNode;
-pub use box_model::IntrinsicSize;

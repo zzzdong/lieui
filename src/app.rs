@@ -9,9 +9,7 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::core::layers::LayerType;
 use crate::geometry::{Point, Size};
-use crate::layout::context::LayoutContext;
 use crate::render::renderer::Renderer as _;
 use crate::render::VelloRenderer;
 use crate::runtime::Runtime;
@@ -24,8 +22,8 @@ pub struct Application<B: Fn() -> ViewNode> {
     renderer: VelloRenderer,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    window_size: (u32, u32),
     mouse_pos: Point,
-    first_layout: Option<LayoutContext>,
     rendered_once: bool,
     prev_hover: Option<crate::core::ElementId>,
     prev_pressed: Option<crate::core::ElementId>,
@@ -37,9 +35,13 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
             builder,
             runtime: Runtime::new(viewport),
             renderer: VelloRenderer::new(viewport.width as u16, viewport.height as u16),
-            window: None, surface: None,
-            mouse_pos: Point::zero(), first_layout: None,
-            rendered_once: false, prev_hover: None, prev_pressed: None,
+            window: None,
+            surface: None,
+            window_size: (viewport.width as u32, viewport.height as u32),
+            mouse_pos: Point::zero(),
+            rendered_once: false,
+            prev_hover: None,
+            prev_pressed: None,
         }
     }
 
@@ -50,9 +52,15 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
     }
 
     fn build_and_render(&mut self) {
-        let pw = self.renderer.width() as u16;
-        let ph = self.renderer.height() as u16;
-        if pw == 0 || ph == 0 { return; }
+        let pw = self.renderer.width();
+        let ph = self.renderer.height();
+        if pw == 0 || ph == 0 {
+            return;
+        }
+
+        // 同步 viewport 到最新窗口尺寸
+        let (ww, wh) = self.window_size;
+        self.runtime.set_viewport(Size::new(ww as f32, wh as f32));
 
         // 清理旧回调用，确保重建时新 Button 注册新回调
         crate::state::clear_callbacks();
@@ -61,43 +69,67 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         let view_tree = (self.builder)();
         self.runtime.submit_view_tree(view_tree);
         let elements = self.runtime.frame();
-        self.runtime.layers.with_layout(LayerType::Base, |layout| {
-            self.first_layout = Some(layout.clone());
-        });
 
         // 2. VelloRenderer 渲染到 pixmap
         let pixmap = self.renderer.render(&elements);
         let data = pixmap.data(); // &[PremulRgba8]
 
         // 3. softbuffer 输出到窗口
-        if !self.ensure_surface() { return; }
+        if !self.ensure_surface() {
+            return;
+        }
         let surface = self.surface.as_mut().unwrap();
-        let s = self.window.as_ref().unwrap().inner_size();
-        let _ = surface.resize(NonZeroU32::new(s.width.max(1)).unwrap(), NonZeroU32::new(s.height.max(1)).unwrap());
+        let _ = surface.resize(
+            NonZeroU32::new(ww.max(1)).unwrap(),
+            NonZeroU32::new(wh.max(1)).unwrap(),
+        );
 
         let mut buf = match surface.buffer_mut() {
             Ok(b) => b,
-            Err(_) => { self.surface = None; return; }
+            Err(_) => {
+                self.surface = None;
+                return;
+            }
         };
         let bw = buf.width().get() as usize;
         let bh = buf.height().get() as usize;
-        if bw == 0 || bh == 0 { return; }
-        let copy_len = (bw * bh).min(data.len());
+        if bw == 0 || bh == 0 {
+            return;
+        }
+        let buf_len = bw * bh;
+        let copy_len = buf_len.min(data.len());
         for i in 0..copy_len {
             let p = data[i];
-            buf[i] = (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24);
+            buf[i] =
+                (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24);
+        }
+        // 确保新 resize 出来的区域不出现黑色闪烁
+        const CLEAR: u32 = 0xFFF0F0F0;
+        for i in copy_len..buf_len {
+            buf[i] = CLEAR;
         }
         let _ = buf.present();
         self.rendered_once = true;
     }
 
     fn ensure_surface(&mut self) -> bool {
-        if self.surface.is_some() { return true; }
-        let Some(window) = &self.window else { return false; };
-        let Ok(ctx) = softbuffer::Context::new(window.clone()) else { return false; };
-        let Ok(mut surf) = softbuffer::Surface::new(&ctx, window.clone()) else { return false; };
-        let s = window.inner_size();
-        let _ = surf.resize(NonZeroU32::new(s.width.max(1)).unwrap(), NonZeroU32::new(s.height.max(1)).unwrap());
+        if self.surface.is_some() {
+            return true;
+        }
+        let Some(window) = &self.window else {
+            return false;
+        };
+        let Ok(ctx) = softbuffer::Context::new(window.clone()) else {
+            return false;
+        };
+        let Ok(mut surf) = softbuffer::Surface::new(&ctx, window.clone()) else {
+            return false;
+        };
+        let (ww, wh) = self.window_size;
+        let _ = surf.resize(
+            NonZeroU32::new(ww.max(1)).unwrap(),
+            NonZeroU32::new(wh.max(1)).unwrap(),
+        );
         self.surface = Some(surf);
         true
     }
@@ -105,18 +137,40 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
     /// 仅重绘视觉层（跳过 builder/layout/reconciliation）
     fn render_visuals(&mut self) {
         let elements = self.runtime.frame_render_only();
-        if elements.is_empty() { return; }
+        if elements.is_empty() {
+            return;
+        }
         let pix = self.renderer.render(&elements);
         if let Some(surf) = &mut self.surface {
-            let s = self.window.as_ref().unwrap().inner_size();
-            let _ = surf.resize(NonZeroU32::new(s.width.max(1)).unwrap(), NonZeroU32::new(s.height.max(1)).unwrap());
-            let mut buf = match surf.buffer_mut() { Ok(b) => b, _ => { self.surface = None; return; } };
+            let (ww, wh) = self.window_size;
+            let _ = surf.resize(
+                NonZeroU32::new(ww.max(1)).unwrap(),
+                NonZeroU32::new(wh.max(1)).unwrap(),
+            );
+            let mut buf = match surf.buffer_mut() {
+                Ok(b) => b,
+                _ => {
+                    self.surface = None;
+                    return;
+                }
+            };
             let bw = buf.width().get() as usize;
             let bh = buf.height().get() as usize;
             if bw > 0 && bh > 0 {
                 let data = pix.data();
-                let cl = (bw * bh).min(data.len());
-                for i in 0..cl { let p = data[i]; buf[i] = (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24); }
+                let buf_len = bw * bh;
+                let cl = buf_len.min(data.len());
+                for i in 0..cl {
+                    let p = data[i];
+                    buf[i] = (p.b as u32)
+                        | ((p.g as u32) << 8)
+                        | ((p.r as u32) << 16)
+                        | ((p.a as u32) << 24);
+                }
+                const CLEAR: u32 = 0xFFF0F0F0;
+                for i in cl..buf_len {
+                    buf[i] = CLEAR;
+                }
                 let _ = buf.present();
             }
         }
@@ -128,27 +182,35 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
             .with_inner_size(LogicalSize::new(600.0, 400.0));
         let window = Rc::new(el.create_window(wa).unwrap());
         let s = window.inner_size();
-        self.runtime.set_viewport(Size::new(s.width as f32, s.height as f32));
+        self.window_size = (s.width, s.height);
+        self.runtime
+            .set_viewport(Size::new(s.width as f32, s.height as f32));
         self.renderer.resize(s.width as u16, s.height as u16);
         self.window = Some(window);
     }
 
     fn hit_test(&self) -> Option<crate::core::ElementId> {
-        let layout = match &self.first_layout { Some(l) => l, None => return None };
-        let root = match &layout.root { Some(r) => r, None => return None };
-        Self::deepest_at(root, self.mouse_pos.x, self.mouse_pos.y)
+        self.runtime
+            .layers
+            .hit_test_top(self.mouse_pos)
+            .map(|(_, id)| id)
     }
 
     fn handle_click(&mut self) {
-        let id = match self.hit_test() { Some(i) => i, None => return };
+        let id = match self.hit_test() {
+            Some(i) => i,
+            None => return,
+        };
         // 设置 pressed 状态
         if self.runtime.layers.tree.contains(id) {
             let mut s = self.runtime.layers.tree.state(id);
-            s.pressed = true; self.runtime.layers.tree.set_state(id, s);
+            s.pressed = true;
+            self.runtime.layers.tree.set_state(id, s);
         }
         // 触发回调
-        if let Some(cb_id) = self.runtime.layers.tree.props(id).and_then(|p| p.get_u32("on_click")) {
-            state::invoke_click(cb_id as u64);
+        let node = self.runtime.layers.tree.get_node(id);
+        if let Some(cb_id) = node.on_click() {
+            state::invoke_click(cb_id);
         }
     }
 
@@ -159,27 +221,23 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
             if let Some(old) = self.prev_hover {
                 if self.runtime.layers.tree.contains(old) {
                     let mut s = self.runtime.layers.tree.state(old);
-                    s.hovered = false; self.runtime.layers.tree.set_state(old, s);
+                    s.hovered = false;
+                    self.runtime.layers.tree.set_state(old, s);
                 }
             }
             // 新元素设置 hover
             if let Some(nid) = new {
                 if self.runtime.layers.tree.contains(nid) {
                     let mut s = self.runtime.layers.tree.state(nid);
-                    s.hovered = true; self.runtime.layers.tree.set_state(nid, s);
+                    s.hovered = true;
+                    self.runtime.layers.tree.set_state(nid, s);
                 }
             }
             self.prev_hover = new;
-            if let Some(w) = &self.window { w.request_redraw(); }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
-    }
-
-    fn deepest_at(node: &crate::layout::node::LayoutNode, px: f32, py: f32) -> Option<crate::core::ElementId> {
-        if !node.computed.contains(px, py) { return None; }
-        for child in node.children.iter().rev() {
-            if let Some(id) = Self::deepest_at(child, px, py) { return Some(id); }
-        }
-        Some(node.id)
     }
 }
 
@@ -187,7 +245,9 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_none() {
             self.init_window(el);
-            if let Some(w) = &self.window { w.request_redraw(); }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
@@ -195,45 +255,63 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) => {
-                if s.width > 0 && s.height > 0 {
-                    self.runtime.set_viewport(Size::new(s.width as f32, s.height as f32));
+                if s.width > 0 && s.height > 0 && (s.width, s.height) != self.window_size {
+                    self.window_size = (s.width, s.height);
                     self.renderer.resize(s.width as u16, s.height as u16);
-                    self.surface = None;
-                    if let Some(w) = &self.window { w.request_redraw(); }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = Point::new(position.x as f32, position.y as f32);
                 self.handle_hover();
-                if let Some(w) = &self.window { w.request_redraw(); }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } => {
                 let id = self.hit_test();
                 self.prev_pressed = id;
                 self.handle_click();
-                if let Some(w) = &self.window { w.request_redraw(); }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
-            WindowEvent::MouseInput { state: ElementState::Released, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                ..
+            } => {
                 // 清除所有元素的 pressed 状态
                 if let Some(pid) = self.prev_pressed {
                     if self.runtime.layers.tree.contains(pid) {
                         let mut s = self.runtime.layers.tree.state(pid);
-                        s.pressed = false; self.runtime.layers.tree.set_state(pid, s);
+                        s.pressed = false;
+                        self.runtime.layers.tree.set_state(pid, s);
                     }
                 }
                 self.prev_pressed = None;
-                if let Some(w) = &self.window { w.request_redraw(); }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => {
-                if !self.rendered_once || self.surface.is_none() {
+                let viewport = (
+                    self.runtime.viewport.width as u32,
+                    self.runtime.viewport.height as u32,
+                );
+                let size_mismatch = self.window_size != viewport;
+                if !self.rendered_once
+                    || self.surface.is_none()
+                    || state::take_rebuild_requested()
+                    || size_mismatch
+                {
                     self.build_and_render();
-                } else if state::take_rebuild_requested() {
-                    self.build_and_render();
-                } else if state::take_redraw_requested() {
-                    // 仅重绘（动画/外部事件触发的视觉更新）
-                    self.render_visuals();
                 } else {
-                    // hover/pressed（鼠标事件驱动的视觉更新）
+                    // hover/pressed/动画等视觉更新
                     self.render_visuals();
                 }
             }
