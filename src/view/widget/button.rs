@@ -1,8 +1,9 @@
 use crate::geometry::Color;
-use crate::layout::box_model::BoxStyle;
-use crate::layout::flex::{AlignItems, FlexDirection, JustifyContent};
+use crate::layout::box_model::{BoxStyle, EdgeInsets};
+use crate::layout::flex::{AlignItems, FlexDirection, FlexStyle, JustifyContent};
 use crate::state;
-use crate::view::node::ViewNode;
+use crate::view::design_tokens::semantic as t;
+use crate::view::node::{ClickCallbackRef, DisplayMode, ViewNode};
 use crate::view::View;
 
 pub struct Button {
@@ -12,7 +13,10 @@ pub struct Button {
 
 impl Button {
     pub fn new(l: impl Into<String>) -> Self {
-        Self { label: l.into(), callback_id: None }
+        Self {
+            label: l.into(),
+            callback_id: None,
+        }
     }
 
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
@@ -24,34 +28,46 @@ impl Button {
 impl View for Button {
     fn build(&self) -> ViewNode {
         let label_node = ViewNode::Text {
-            content: self.label.clone(), font_size: 13.0, color: Color::WHITE, key: None,
-        };
-        let content = ViewNode::Flex {
-            direction: FlexDirection::Row,
-            justify: JustifyContent::Center,
-            align: AlignItems::Center,
-            spacing: 0.0, expand: false,
-            flex_grow: 0.0, flex_shrink: 1.0,
-            wrap: crate::layout::flex::FlexWrap::NoWrap,
+            content: self.label.clone(),
+            font_size: 13.0,
+            color: Color::WHITE,
             key: None,
-            children: vec![label_node],
+            listener: None,
         };
-        let box_node = ViewNode::Box {
+        let content = ViewNode::Div {
             style: BoxStyle {
-                padding: crate::layout::box_model::EdgeInsets::new(6.0, 6.0, 4.0, 4.0),
-                background_color: Some(Color::new(66, 133, 244)),
-                hover_background: Some(Color::new(50, 110, 220)),
-                pressed_background: Some(Color::new(40, 90, 190)),
-                border_radius: 6.0,
+                expand: true,
                 ..BoxStyle::default()
             },
+            flex: FlexStyle {
+                direction: FlexDirection::Row,
+                justify: JustifyContent::Center,
+                align: AlignItems::Center,
+                spacing: 0.0,
+                expand: true,
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                wrap: crate::layout::flex::FlexWrap::NoWrap,
+            },
+            display: DisplayMode::Flex,
+            key: None,
+            children: vec![label_node],
+            listener: None,
+        };
+        ViewNode::Div {
+            style: BoxStyle {
+                padding: EdgeInsets::new(t::SPACER_MD, t::SPACER_MD, 6.0, 6.0),
+                background_color: Some(t::BACKGROUND_BRAND_DEFAULT),
+                hover_background: Some(t::BACKGROUND_BRAND_HOVER),
+                pressed_background: Some(t::BACKGROUND_BRAND_CLICKED),
+                border_radius: t::BORDER_RADIUS_SMALL,
+                ..BoxStyle::default()
+            },
+            flex: FlexStyle::default(),
+            display: DisplayMode::Block,
             key: None,
             children: vec![content],
-        };
-        ViewNode::Listener {
-            on_click: self.callback_id,
-            key: None,
-            child: Box::new(box_node),
+            listener: self.callback_id.map(ClickCallbackRef::Simple),
         }
     }
 }

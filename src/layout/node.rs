@@ -58,10 +58,7 @@ impl LayoutNode {
         if !self.computed.contains(px, py) {
             return None;
         }
-        // Listener 是事件边界，命中后应直接消费事件，不再继续向子节点穿透
-        if self.node_type == crate::view::node::NodeType::Listener {
-            return Some(self.id);
-        }
+        // 优先命中更内层的节点，以支持嵌套监听（例如行可点击，行内的 Checkbox 也可点击）。
         for child in self.children.iter().rev() {
             if let Some(id) = child.hit_test_rec(px, py) {
                 return Some(id);

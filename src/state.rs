@@ -6,13 +6,23 @@ use std::rc::Rc;
 
 use crate::view::node::ViewNode;
 
+use crate::event::EventContext;
+
 thread_local! {
     static REBUILD_REQUESTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REDRAW_REQUESTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static CALLBACKS: RefCell<HashMap<u64, Box<dyn Fn()>>> = RefCell::new(HashMap::new());
+    static CALLBACKS: RefCell<HashMap<u64, ClickCallback>> = RefCell::new(HashMap::new());
     static NEXT_CALLBACK_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
     static PENDING_MODAL: RefCell<Option<Option<ViewNode>>> = const { RefCell::new(None) };
     static PENDING_OVERLAY: RefCell<Option<Option<ViewNode>>> = const { RefCell::new(None) };
+}
+
+/// 点击回调类型
+pub enum ClickCallback {
+    /// 简单回调：执行后自动停止事件传播
+    Simple(Box<dyn Fn()>),
+    /// 带事件上下文的回调：由调用方决定是否停止传播
+    WithCtx(Box<dyn Fn(&mut EventContext)>),
 }
 
 /// 请求全量重建（builder + reconciliation + layout + render）
@@ -40,19 +50,37 @@ pub(crate) fn take_redraw_requested() -> bool {
 // ---- Callbacks ----
 
 pub fn register_click(f: Box<dyn Fn()>) -> u64 {
-    let id = NEXT_CALLBACK_ID.with(|n| {
-        let v = n.get();
-        n.set(v + 1);
-        v
-    });
-    CALLBACKS.with(|c| c.borrow_mut().insert(id, f));
+    let id = next_callback_id();
+    CALLBACKS.with(|c| c.borrow_mut().insert(id, ClickCallback::Simple(f)));
     id
 }
 
-pub fn invoke_click(id: u64) {
+pub fn register_click_with_ctx(f: Box<dyn Fn(&mut EventContext)>) -> u64 {
+    let id = next_callback_id();
+    CALLBACKS.with(|c| c.borrow_mut().insert(id, ClickCallback::WithCtx(f)));
+    id
+}
+
+fn next_callback_id() -> u64 {
+    NEXT_CALLBACK_ID.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    })
+}
+
+pub fn invoke_click(id: u64, ctx: &mut EventContext) {
     CALLBACKS.with(|c| {
-        if let Some(f) = c.borrow().get(&id) {
-            f();
+        if let Some(cb) = c.borrow().get(&id) {
+            match cb {
+                ClickCallback::Simple(f) => {
+                    f();
+                    ctx.stop_propagation();
+                }
+                ClickCallback::WithCtx(f) => {
+                    f(ctx);
+                }
+            }
         }
     });
 }

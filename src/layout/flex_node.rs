@@ -18,7 +18,7 @@ pub struct FlexNode {
     pub is_dirty: bool,
     pub has_new_layout: bool,
     pub in_initial_state: bool,
-    
+
     /// 叶子节点的预测量尺寸（无约束时的 intrinsic size）
     /// 布局时，如果 dim 未定义，使用此值作为内容尺寸
     pub intrinsic_size: Option<(f32, f32)>,
@@ -39,8 +39,12 @@ impl FlexNode {
         }
     }
 
-    pub fn new_column(id: u64) -> Self { Self::new(id, FlexStyle::column()) }
-    pub fn new_row(id: u64) -> Self { Self::new(id, FlexStyle::row()) }
+    pub fn new_column(id: u64) -> Self {
+        Self::new(id, FlexStyle::column())
+    }
+    pub fn new_row(id: u64) -> Self {
+        Self::new(id, FlexStyle::row())
+    }
 
     /// 创建叶子节点（测试用，id=0）
     pub fn new_leaf(width: f32, height: f32) -> Self {
@@ -62,7 +66,9 @@ impl FlexNode {
         self.is_dirty = true;
     }
 
-    pub fn child_count(&self) -> usize { self.children.len() }
+    pub fn child_count(&self) -> usize {
+        self.children.len()
+    }
 
     // ---- Dimension ----
 
@@ -76,13 +82,21 @@ impl FlexNode {
 
     pub fn get_layout_dimension(&self, axis: FlexDirection) -> f32 {
         let v = self.layout_result.dim[K_AXIS_DIM[axis as usize] as usize];
-        if is_defined(v) { v } else { VALUE_UNDEFINED }
+        if is_defined(v) {
+            v
+        } else {
+            VALUE_UNDEFINED
+        }
     }
 
     // ---- Border/Padding ----
 
-    pub fn get_start_border(&self, axis: FlexDirection) -> f32 { self.style.get_start_border(axis) }
-    pub fn get_end_border(&self, axis: FlexDirection) -> f32 { self.style.get_end_border(axis) }
+    pub fn get_start_border(&self, axis: FlexDirection) -> f32 {
+        self.style.get_start_border(axis)
+    }
+    pub fn get_end_border(&self, axis: FlexDirection) -> f32 {
+        self.style.get_end_border(axis)
+    }
     pub fn get_start_padding_and_border(&self, axis: FlexDirection) -> f32 {
         self.style.get_start_padding(axis) + self.style.get_start_border(axis)
     }
@@ -95,11 +109,21 @@ impl FlexNode {
 
     // ---- Margin ----
 
-    pub fn get_start_margin(&self, axis: FlexDirection) -> f32 { self.style.get_start_margin(axis) }
-    pub fn get_end_margin(&self, axis: FlexDirection) -> f32 { self.style.get_end_margin(axis) }
-    pub fn get_margin(&self, axis: FlexDirection) -> f32 { self.style.get_start_margin(axis) + self.style.get_end_margin(axis) }
-    pub fn is_auto_start_margin(&self, axis: FlexDirection) -> bool { self.style.is_auto_start_margin(axis) }
-    pub fn is_auto_end_margin(&self, axis: FlexDirection) -> bool { self.style.is_auto_end_margin(axis) }
+    pub fn get_start_margin(&self, axis: FlexDirection) -> f32 {
+        self.style.get_start_margin(axis)
+    }
+    pub fn get_end_margin(&self, axis: FlexDirection) -> f32 {
+        self.style.get_end_margin(axis)
+    }
+    pub fn get_margin(&self, axis: FlexDirection) -> f32 {
+        self.style.get_start_margin(axis) + self.style.get_end_margin(axis)
+    }
+    pub fn is_auto_start_margin(&self, axis: FlexDirection) -> bool {
+        self.style.is_auto_start_margin(axis)
+    }
+    pub fn is_auto_end_margin(&self, axis: FlexDirection) -> bool {
+        self.style.is_auto_end_margin(axis)
+    }
 
     pub fn set_layout_start_margin(&mut self, axis: FlexDirection, value: f32) {
         self.layout_result.margin[K_AXIS_START[axis as usize] as usize] = value;
@@ -109,11 +133,19 @@ impl FlexNode {
     }
     pub fn get_layout_start_margin(&self, axis: FlexDirection) -> f32 {
         let v = self.layout_result.margin[K_AXIS_START[axis as usize] as usize];
-        if is_defined(v) { v } else { 0.0 }
+        if is_defined(v) {
+            v
+        } else {
+            0.0
+        }
     }
     pub fn get_layout_end_margin(&self, axis: FlexDirection) -> f32 {
         let v = self.layout_result.margin[K_AXIS_END[axis as usize] as usize];
-        if is_defined(v) { v } else { 0.0 }
+        if is_defined(v) {
+            v
+        } else {
+            0.0
+        }
     }
 
     // ---- Position ----
@@ -141,10 +173,19 @@ impl FlexNode {
 
     pub fn resolve_cross_axis(&self) -> FlexDirection {
         let ma = self.style.flex_direction;
-        let ca = if is_row_direction(ma) {
-            if self.style.flex_wrap == FlexWrap::WrapReverse { FlexDirection::ColumnReverse } else { FlexDirection::Column }
+
+        if is_row_direction(ma) {
+            if self.style.flex_wrap == FlexWrap::WrapReverse {
+                FlexDirection::ColumnReverse
+            } else {
+                FlexDirection::Column
+            }
         } else {
-            let c = if self.style.flex_wrap == FlexWrap::WrapReverse { FlexDirection::RowReverse } else { FlexDirection::Row };
+            let c = if self.style.flex_wrap == FlexWrap::WrapReverse {
+                FlexDirection::RowReverse
+            } else {
+                FlexDirection::Row
+            };
             if self.layout_result.direction == Direction::Rtl {
                 match c {
                     FlexDirection::Row => return FlexDirection::RowReverse,
@@ -153,13 +194,15 @@ impl FlexNode {
                 }
             }
             c
-        };
-        ca
+        }
     }
 
     fn resolve_direction(&self, pd: Direction) -> Direction {
         match self.style.direction {
-            Direction::Inherit => match pd { Direction::Inherit => Direction::Ltr, d => d },
+            Direction::Inherit => match pd {
+                Direction::Inherit => Direction::Ltr,
+                d => d,
+            },
             d => d,
         }
     }
@@ -187,21 +230,31 @@ impl FlexNode {
         let min = self.style.min_dim[d];
         let max = self.style.max_dim[d];
         let mut v = value;
-        if is_defined(max) && max >= 0.0 && v > max { v = max; }
-        if is_defined(min) && min >= 0.0 && v < min { v = min; }
+        if is_defined(max) && max >= 0.0 && v > max {
+            v = max;
+        }
+        if is_defined(min) && min >= 0.0 && v < min {
+            v = min;
+        }
         v
     }
 
     fn get_node_align(&self, idx: usize) -> FlexAlign {
         let a = self.children[idx].style.align_self;
-        if a == FlexAlign::Auto { self.style.align_items } else { a }
+        if a == FlexAlign::Auto {
+            self.style.align_items
+        } else {
+            a
+        }
     }
 
     // ============ Public API ============
 
     pub fn layout(&mut self, parent_width: f32, parent_height: f32, parent_direction: Direction) {
         let ma = self.style.flex_direction;
-        if is_undefined(self.style.flex_basis) && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
+        if is_undefined(self.style.flex_basis)
+            && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize])
+        {
             self.style.flex_basis = self.style.dim[K_AXIS_DIM[ma as usize] as usize];
         }
 
@@ -218,10 +271,19 @@ impl FlexNode {
             shr = true;
         }
 
-        self.layout_impl(parent_width, parent_height, parent_direction, LayoutAction::Layout);
+        self.layout_impl(
+            parent_width,
+            parent_height,
+            parent_direction,
+            LayoutAction::Layout,
+        );
 
-        if swr { self.style.dim[0] = VALUE_UNDEFINED; }
-        if shr { self.style.dim[1] = VALUE_UNDEFINED; }
+        if swr {
+            self.style.dim[0] = VALUE_UNDEFINED;
+        }
+        if shr {
+            self.style.dim[1] = VALUE_UNDEFINED;
+        }
 
         let ma = self.resolve_main_axis();
         let ca = self.resolve_cross_axis();
@@ -234,8 +296,11 @@ impl FlexNode {
     // ============ LayoutImpl ============
 
     fn layout_impl(
-        &mut self, parent_width: f32, parent_height: f32,
-        parent_direction: Direction, layout_action: LayoutAction,
+        &mut self,
+        parent_width: f32,
+        parent_height: f32,
+        parent_direction: Direction,
+        layout_action: LayoutAction,
     ) {
         let dir = self.resolve_direction(parent_direction);
         if self.layout_result.direction != dir {
@@ -245,43 +310,93 @@ impl FlexNode {
         let ma = self.style.flex_direction;
         let perform_layout = layout_action == LayoutAction::Layout;
 
-        let pw = if is_defined(parent_width) { (parent_width - self.get_margin(FlexDirection::Row)).max(0.0) } else { parent_width };
-        let ph = if is_defined(parent_height) { (parent_height - self.get_margin(FlexDirection::Column)).max(0.0) } else { parent_height };
+        let pw = if is_defined(parent_width) {
+            (parent_width - self.get_margin(FlexDirection::Row)).max(0.0)
+        } else {
+            parent_width
+        };
+        let ph = if is_defined(parent_height) {
+            (parent_height - self.get_margin(FlexDirection::Column)).max(0.0)
+        } else {
+            parent_height
+        };
 
-        let nw = if is_defined(self.style.dim[0]) { self.bound_axis(FlexDirection::Row, self.style.dim[0]) } else { VALUE_UNDEFINED };
-        let nh = if is_defined(self.style.dim[1]) { self.bound_axis(FlexDirection::Column, self.style.dim[1]) } else { VALUE_UNDEFINED };
+        let nw = if is_defined(self.style.dim[0]) {
+            self.bound_axis(FlexDirection::Row, self.style.dim[0])
+        } else {
+            VALUE_UNDEFINED
+        };
+        let nh = if is_defined(self.style.dim[1]) {
+            self.bound_axis(FlexDirection::Column, self.style.dim[1])
+        } else {
+            VALUE_UNDEFINED
+        };
 
-        if layout_action == LayoutAction::MeasureWidth && is_defined(nw) { self.layout_result.dim[0] = nw; return; }
-        if layout_action == LayoutAction::MeasureHeight && is_defined(nh) { self.layout_result.dim[1] = nh; return; }
+        if layout_action == LayoutAction::MeasureWidth && is_defined(nw) {
+            self.layout_result.dim[0] = nw;
+            return;
+        }
+        if layout_action == LayoutAction::MeasureHeight && is_defined(nh) {
+            self.layout_result.dim[1] = nh;
+            return;
+        }
 
         // 9.2 available space
         let mut aw = VALUE_UNDEFINED;
-        if is_defined(nw) { aw = nw - self.get_padding_and_border(FlexDirection::Row); }
-        else if is_defined(pw) { aw = pw - self.get_padding_and_border(FlexDirection::Row); }
+        if is_defined(nw) {
+            aw = nw - self.get_padding_and_border(FlexDirection::Row);
+        } else if is_defined(pw) {
+            aw = pw - self.get_padding_and_border(FlexDirection::Row);
+        }
 
         let mut ah = VALUE_UNDEFINED;
-        if is_defined(nh) { ah = nh - self.get_padding_and_border(FlexDirection::Column); }
-        else if is_defined(ph) { ah = ph - self.get_padding_and_border(FlexDirection::Column); }
+        if is_defined(nh) {
+            ah = nh - self.get_padding_and_border(FlexDirection::Column);
+        } else if is_defined(ph) {
+            ah = ph - self.get_padding_and_border(FlexDirection::Column);
+        }
 
         // max_dim clamp
         if is_defined(self.style.max_dim[0]) {
-            if float_is_equal(self.style.max_dim[0], self.style.min_dim[0]) { self.style.dim[0] = self.style.min_dim[0]; }
+            if float_is_equal(self.style.max_dim[0], self.style.min_dim[0]) {
+                self.style.dim[0] = self.style.min_dim[0];
+            }
             let mdw = self.style.max_dim[0] - self.get_padding_and_border(FlexDirection::Row);
-            if mdw >= 0.0 && mdw < nan_as_inf(aw) { aw = mdw; }
+            if mdw >= 0.0 && mdw < nan_as_inf(aw) {
+                aw = mdw;
+            }
         }
         if is_defined(self.style.max_dim[1]) {
-            if float_is_equal(self.style.max_dim[1], self.style.min_dim[1]) { self.style.dim[1] = self.style.min_dim[1]; }
+            if float_is_equal(self.style.max_dim[1], self.style.min_dim[1]) {
+                self.style.dim[1] = self.style.min_dim[1];
+            }
             let mdh = self.style.max_dim[1] - self.get_padding_and_border(FlexDirection::Column);
-            if mdh >= 0.0 && mdh < nan_as_inf(ah) { ah = mdh; }
+            if mdh >= 0.0 && mdh < nan_as_inf(ah) {
+                ah = mdh;
+            }
         }
 
         aw = if aw < 0.0 { 0.0 } else { aw };
         ah = if ah < 0.0 { 0.0 } else { ah };
 
-        let wm = if is_defined(nw) { MeasureMode::Exactly } else if is_defined(aw) { MeasureMode::AtMost } else { MeasureMode::Undefined };
-        let hm = if is_defined(nh) { MeasureMode::Exactly } else if is_defined(ah) { MeasureMode::AtMost } else { MeasureMode::Undefined };
+        let wm = if is_defined(nw) {
+            MeasureMode::Exactly
+        } else if is_defined(aw) {
+            MeasureMode::AtMost
+        } else {
+            MeasureMode::Undefined
+        };
+        let hm = if is_defined(nh) {
+            MeasureMode::Exactly
+        } else if is_defined(ah) {
+            MeasureMode::AtMost
+        } else {
+            MeasureMode::Undefined
+        };
 
-        if perform_layout { self.layout_result.had_overflow = false; }
+        if perform_layout {
+            self.layout_result.had_overflow = false;
+        }
 
         // leaf
         if self.children.is_empty() {
@@ -289,7 +404,10 @@ impl FlexNode {
             return;
         }
 
-        let asz = TaitankSize { width: aw, height: ah };
+        let asz = TaitankSize {
+            width: aw,
+            height: ah,
+        };
 
         // Step 3
         self.calculate_items_flex_basis(asz);
@@ -298,16 +416,23 @@ impl FlexNode {
         let mut fl = self.collect_flex_lines(asz);
 
         // Step 4: container main size
-        let max_sum = fl.iter().map(|l| l.sum_hypothetical_main_size).fold(0.0f32, f32::max);
+        let max_sum = fl
+            .iter()
+            .map(|l| l.sum_hypothetical_main_size)
+            .fold(0.0f32, f32::max);
         let cims = if is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
             self.style.dim[K_AXIS_DIM[ma as usize] as usize] - self.get_padding_and_border(ma)
         } else {
             max_sum
         };
-        self.layout_result.dim[K_AXIS_DIM[ma as usize] as usize] = self.bound_axis(ma, cims + self.get_padding_and_border(ma));
+        self.layout_result.dim[K_AXIS_DIM[ma as usize] as usize] =
+            self.bound_axis(ma, cims + self.get_padding_and_border(ma));
 
         if (layout_action == LayoutAction::MeasureWidth && is_row_direction(ma))
-            || (layout_action == LayoutAction::MeasureHeight && is_column_direction(ma)) { return; }
+            || (layout_action == LayoutAction::MeasureHeight && is_column_direction(ma))
+        {
+            return;
+        }
 
         // Step 6
         self.determine_items_main_axis_size(&mut fl, layout_action);
@@ -319,7 +444,9 @@ impl FlexNode {
             let ca = self.resolve_cross_axis();
             let cds = if is_defined(self.style.dim[K_AXIS_DIM[ca as usize] as usize]) {
                 self.style.dim[K_AXIS_DIM[ca as usize] as usize]
-            } else { slcs + self.get_padding_and_border(ca) };
+            } else {
+                slcs + self.get_padding_and_border(ca)
+            };
             self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize] = self.bound_axis(ca, cds);
             return;
         }
@@ -338,25 +465,46 @@ impl FlexNode {
         let ma = self.style.flex_direction;
         let parent_dir = self.layout_result.direction;
         for i in 0..self.children.len() {
-            if self.children[i].style.display_type == DisplayType::None { continue; }
-            if self.children[i].style.position_type == PositionType::Absolute { continue; }
+            if self.children[i].style.display_type == DisplayType::None {
+                continue;
+            }
+            if self.children[i].style.position_type == PositionType::Absolute {
+                continue;
+            }
 
             let item = &mut self.children[i];
-            if is_defined(item.style.get_flex_basis()) && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
+            if is_defined(item.style.get_flex_basis())
+                && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize])
+            {
                 item.layout_result.flex_base_size = item.style.get_flex_basis();
             } else if is_defined(item.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
-                item.layout_result.flex_base_size = item.style.dim[K_AXIS_DIM[ma as usize] as usize];
+                item.layout_result.flex_base_size =
+                    item.style.dim[K_AXIS_DIM[ma as usize] as usize];
             } else {
                 let old = item.style.get_dimension_axis(ma);
                 item.style.set_dimension_axis(ma, item.style.flex_basis);
-                item.layout_impl(asz.width, asz.height, parent_dir,
-                    if is_row_direction(ma) { LayoutAction::MeasureWidth } else { LayoutAction::MeasureHeight });
+                item.layout_impl(
+                    asz.width,
+                    asz.height,
+                    parent_dir,
+                    if is_row_direction(ma) {
+                        LayoutAction::MeasureWidth
+                    } else {
+                        LayoutAction::MeasureHeight
+                    },
+                );
                 item.style.set_dimension_axis(ma, old);
-                item.layout_result.flex_base_size = if is_defined(item.layout_result.dim[K_AXIS_DIM[ma as usize] as usize]) {
-                    item.layout_result.dim[K_AXIS_DIM[ma as usize] as usize] } else { 0.0 };
+                item.layout_result.flex_base_size =
+                    if is_defined(item.layout_result.dim[K_AXIS_DIM[ma as usize] as usize]) {
+                        item.layout_result.dim[K_AXIS_DIM[ma as usize] as usize]
+                    } else {
+                        0.0
+                    };
             }
-            item.layout_result.hypothetical_main_axis_size = item.bound_axis(ma, item.layout_result.flex_base_size);
-            item.layout_result.hypothetical_main_axis_margin_boxsize = item.layout_result.hypothetical_main_axis_size + item.get_margin(ma);
+            item.layout_result.hypothetical_main_axis_size =
+                item.bound_axis(ma, item.layout_result.flex_base_size);
+            item.layout_result.hypothetical_main_axis_margin_boxsize =
+                item.layout_result.hypothetical_main_axis_size + item.get_margin(ma);
         }
     }
 
@@ -365,7 +513,11 @@ impl FlexNode {
     fn collect_flex_lines(&mut self, asz: TaitankSize) -> Vec<FlexLine> {
         let mut lines: Vec<FlexLine> = Vec::new();
         let n = self.children.len();
-        let aw = if K_AXIS_DIM[self.style.flex_direction as usize] == Dimension::Width { asz.width } else { asz.height };
+        let aw = if K_AXIS_DIM[self.style.flex_direction as usize] == Dimension::Width {
+            asz.width
+        } else {
+            asz.height
+        };
         let aw = if is_undefined(aw) { f32::INFINITY } else { aw };
         let mut line: Option<FlexLine> = None;
         let gap = self.style.item_space;
@@ -374,10 +526,18 @@ impl FlexNode {
             if self.children[i].style.position_type == PositionType::Absolute
                 || self.children[i].style.display_type == DisplayType::None
             {
-                if i == n - 1 { if let Some(l) = line.take() { lines.push(l); } break; }
-                i += 1; continue;
+                if i == n - 1 {
+                    if let Some(l) = line.take() {
+                        lines.push(l);
+                    }
+                    break;
+                }
+                i += 1;
+                continue;
             }
-            if line.is_none() { line = Some(FlexLine::new()); }
+            if line.is_none() {
+                line = Some(FlexLine::new());
+            }
             let lr = line.as_mut().unwrap();
 
             // 对第 2+ 个 item 添加 gap
@@ -385,19 +545,40 @@ impl FlexNode {
                 lr.sum_hypothetical_main_size += gap;
             }
 
-            let hms = self.children[i].layout_result.hypothetical_main_axis_margin_boxsize;
+            let hms = self.children[i]
+                .layout_result
+                .hypothetical_main_axis_margin_boxsize;
             let ls = aw - (lr.sum_hypothetical_main_size + hms);
 
             if self.style.flex_wrap == FlexWrap::NoWrap {
-                lr.add_item(i, hms, self.children[i].style.flex_grow, self.children[i].style.flex_shrink, self.children[i].layout_result.flex_base_size);
-                if i == n - 1 { lines.push(line.take().unwrap()); break; }
+                lr.add_item(
+                    i,
+                    hms,
+                    self.children[i].style.flex_grow,
+                    self.children[i].style.flex_shrink,
+                    self.children[i].layout_result.flex_base_size,
+                );
+                if i == n - 1 {
+                    lines.push(line.take().unwrap());
+                    break;
+                }
                 i += 1;
             } else {
                 if ls >= 0.0 || lr.is_empty() {
-                    lr.add_item(i, hms, self.children[i].style.flex_grow, self.children[i].style.flex_shrink, self.children[i].layout_result.flex_base_size);
-                    if i == n - 1 { lines.push(line.take().unwrap()); }
+                    lr.add_item(
+                        i,
+                        hms,
+                        self.children[i].style.flex_grow,
+                        self.children[i].style.flex_shrink,
+                        self.children[i].layout_result.flex_base_size,
+                    );
+                    if i == n - 1 {
+                        lines.push(line.take().unwrap());
+                    }
                     i += 1;
-                } else { lines.push(line.take().unwrap()); }
+                } else {
+                    lines.push(line.take().unwrap());
+                }
             }
         }
         lines
@@ -405,21 +586,33 @@ impl FlexNode {
 
     // ============ Step 6 ============
 
-    fn determine_items_main_axis_size(&mut self, fl: &mut Vec<FlexLine>, la: LayoutAction) {
+    fn determine_items_main_axis_size(&mut self, fl: &mut [FlexLine], la: LayoutAction) {
         let ma = self.style.flex_direction;
-        let mc = self.layout_result.dim[K_AXIS_DIM[ma as usize] as usize] - self.get_padding_and_border(ma);
-        if la == LayoutAction::Layout { for c in &mut self.children { c.is_frozen = false; } }
+        let mc = self.layout_result.dim[K_AXIS_DIM[ma as usize] as usize]
+            - self.get_padding_and_border(ma);
+        if la == LayoutAction::Layout {
+            for c in &mut self.children {
+                c.is_frozen = false;
+            }
+        }
         for line in fl.iter_mut() {
             line.container_main_inner_size = mc;
             let _ = line.freeze_inflexible_items(ma, &mut self.children);
             while !line.resolve_flexible_lengths(ma, &mut self.children) {}
-            if la == LayoutAction::Layout && line.remaining_free_space < 0.0 { self.layout_result.had_overflow = true; }
+            if la == LayoutAction::Layout && line.remaining_free_space < 0.0 {
+                self.layout_result.had_overflow = true;
+            }
         }
     }
 
     // ============ Step 7-11 ============
 
-    fn determine_cross_axis_size(&mut self, fl: &mut Vec<FlexLine>, asz: TaitankSize, la: LayoutAction) -> f32 {
+    fn determine_cross_axis_size(
+        &mut self,
+        fl: &mut [FlexLine],
+        asz: TaitankSize,
+        la: LayoutAction,
+    ) -> f32 {
         let ma = self.style.flex_direction;
         let ca = self.resolve_cross_axis();
         let parent_dir = self.layout_result.direction;
@@ -440,12 +633,18 @@ impl FlexNode {
                     && la == LayoutAction::Layout;
 
                 if stretch_mode {
-                    act = if K_AXIS_DIM[ca as usize] == Dimension::Width { LayoutAction::MeasureWidth } else { LayoutAction::MeasureHeight };
+                    act = if K_AXIS_DIM[ca as usize] == Dimension::Width {
+                        LayoutAction::MeasureWidth
+                    } else {
+                        LayoutAction::MeasureHeight
+                    };
                 }
 
                 let old_m = self.children[idx].style.get_dimension_axis(ma);
                 let cur_layout_dim = self.children[idx].get_layout_dimension(ma);
-                self.children[idx].style.set_dimension_axis(ma, cur_layout_dim);
+                self.children[idx]
+                    .style
+                    .set_dimension_axis(ma, cur_layout_dim);
                 self.children[idx].layout_impl(asz.width, asz.height, parent_dir, act);
                 self.children[idx].style.set_dimension_axis(ma, old_m);
                 let child_had_overflow = self.children[idx].layout_result.had_overflow;
@@ -454,7 +653,9 @@ impl FlexNode {
                 let cross_dim = self.children[idx].get_layout_dimension(ca);
                 let cross_margin = self.children[idx].get_margin(ca);
                 let ocs = cross_dim + cross_margin;
-                if ocs > max_cs { max_cs = ocs; }
+                if ocs > max_cs {
+                    max_cs = ocs;
+                }
             }
 
             max_cs = self.bound_axis(ca, max_cs);
@@ -462,7 +663,8 @@ impl FlexNode {
             slcs += max_cs;
             if fl_len == 1 && is_defined(parent_dim_ca) {
                 let ic = self.bound_axis(ca, parent_dim_ca) - pb_ca;
-                line.line_cross_size = ic; slcs = ic;
+                line.line_cross_size = ic;
+                slcs = ic;
             }
         }
 
@@ -471,7 +673,9 @@ impl FlexNode {
             let ic = self.bound_axis(ca, parent_dim_ca) - pb_ca;
             if slcs < ic {
                 let ex = (ic - slcs) / fl.len() as f32;
-                for line in fl.iter_mut() { line.line_cross_size += ex; }
+                for line in fl.iter_mut() {
+                    line.line_cross_size += ex;
+                }
             }
         }
 
@@ -504,7 +708,7 @@ impl FlexNode {
 
     // ============ Step 12: Main-Axis Alignment ============
 
-    fn main_axis_alignment(&mut self, fl: &mut Vec<FlexLine>) {
+    fn main_axis_alignment(&mut self, fl: &mut [FlexLine]) {
         let ma = self.resolve_main_axis();
         let mc = self.get_layout_dimension(ma) - self.get_padding_and_border(ma);
         let justify_content = self.style.justify_content;
@@ -521,7 +725,7 @@ impl FlexNode {
 
     // ============ Step 13-16: Cross-Axis Alignment ============
 
-    fn cross_axis_alignment(&mut self, fl: &mut Vec<FlexLine>) {
+    fn cross_axis_alignment(&mut self, fl: &mut [FlexLine]) {
         let ca = self.resolve_cross_axis();
         let lc = fl.len();
         let mut slcs = 0.0f32;
@@ -531,8 +735,13 @@ impl FlexNode {
         for line in fl.iter_mut() {
             slcs += line.line_cross_size;
             for &idx in &line.items {
-                let cd = if is_defined(self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]) {
-                    self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize] } else { 0.0 };
+                let cd = if is_defined(
+                    self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize],
+                ) {
+                    self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]
+                } else {
+                    0.0
+                };
                 let margin_ca = self.children[idx].get_margin(ca);
                 let is_auto_start = self.children[idx].is_auto_start_margin(ca);
                 let is_auto_end = self.children[idx].is_auto_end_margin(ca);
@@ -559,7 +768,8 @@ impl FlexNode {
                     self.children[idx].set_layout_end_margin(ca, em);
                 }
 
-                let r2 = line.line_cross_size - cd
+                let r2 = line.line_cross_size
+                    - cd
                     - self.children[idx].get_layout_start_margin(ca)
                     - self.children[idx].get_layout_end_margin(ca);
                 let mut off = self.children[idx].get_layout_start_margin(ca);
@@ -575,33 +785,52 @@ impl FlexNode {
         // Step 15: container cross size
         let cds = if is_defined(self.style.dim[K_AXIS_DIM[ca as usize] as usize]) {
             self.style.dim[K_AXIS_DIM[ca as usize] as usize]
-        } else { slcs + self.get_padding_and_border(ca) };
+        } else {
+            slcs + self.get_padding_and_border(ca)
+        };
         self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize] = self.bound_axis(ca, cds);
 
         // Step 16: align flex lines
-        let ic = self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize] - self.get_padding_and_border(ca);
+        let ic = self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize]
+            - self.get_padding_and_border(ca);
         let rem = ic - slcs;
         let mut off = self.get_start_padding_and_border(ca);
         let space = match self.style.align_content {
-            FlexAlign::Center => { off += rem / 2.0; 0.0 }
-            FlexAlign::End => { off += rem; 0.0 }
+            FlexAlign::Center => {
+                off += rem / 2.0;
+                0.0
+            }
+            FlexAlign::End => {
+                off += rem;
+                0.0
+            }
             FlexAlign::SpaceBetween if lc > 1 => rem / (lc - 1) as f32,
-            FlexAlign::SpaceAround => { let s = rem / lc as f32; off += s / 2.0; s }
+            FlexAlign::SpaceAround => {
+                let s = rem / lc as f32;
+                off += s / 2.0;
+                s
+            }
             _ => 0.0,
         };
 
         let mut cpos = off;
         for line in fl.iter_mut() {
             for &idx in &line.items {
-                let st = cpos + self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
+                let st = cpos
+                    + self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
                 self.children[idx].set_layout_start_position(ca, st);
 
                 // compute end position
                 let ld = parent_layout_dim_ca;
-                let sp = self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
-                let cd = if is_defined(self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]) {
+                let sp =
+                    self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
+                let cd = if is_defined(
+                    self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize],
+                ) {
                     self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 self.children[idx].set_layout_end_position(ca, ld - sp - cd);
             }
             cpos += line.line_cross_size + space;
@@ -613,25 +842,45 @@ impl FlexNode {
     fn layout_fixed_items(&mut self) {
         let ma = self.resolve_main_axis();
         let ca = self.resolve_cross_axis();
-        let pw = self.get_layout_dimension(FlexDirection::Row) - self.get_padding_and_border(FlexDirection::Row);
-        let ph = self.get_layout_dimension(FlexDirection::Column) - self.get_padding_and_border(FlexDirection::Column);
+        let pw = self.get_layout_dimension(FlexDirection::Row)
+            - self.get_padding_and_border(FlexDirection::Row);
+        let ph = self.get_layout_dimension(FlexDirection::Column)
+            - self.get_padding_and_border(FlexDirection::Column);
         let parent_dir = self.layout_result.direction;
 
         for i in 0..self.children.len() {
-            if self.children[i].style.display_type == DisplayType::None { continue; }
-            if self.children[i].style.position_type != PositionType::Absolute { continue; }
+            if self.children[i].style.display_type == DisplayType::None {
+                continue;
+            }
+            if self.children[i].style.position_type != PositionType::Absolute {
+                continue;
+            }
 
             let om = self.children[i].style.get_dimension_axis(ma);
             let oc = self.children[i].style.get_dimension_axis(ca);
 
-            if is_undefined(om) && is_defined(self.children[i].style.get_start_position(ma)) && is_defined(self.children[i].style.get_end_position(ma)) {
-                let sz = self.get_layout_dimension(ma) - self.style.get_start_border(ma) - self.style.get_end_border(ma)
-                    - self.children[i].style.get_start_position(ma) - self.children[i].style.get_end_position(ma) - self.children[i].get_margin(ma);
+            if is_undefined(om)
+                && is_defined(self.children[i].style.get_start_position(ma))
+                && is_defined(self.children[i].style.get_end_position(ma))
+            {
+                let sz = self.get_layout_dimension(ma)
+                    - self.style.get_start_border(ma)
+                    - self.style.get_end_border(ma)
+                    - self.children[i].style.get_start_position(ma)
+                    - self.children[i].style.get_end_position(ma)
+                    - self.children[i].get_margin(ma);
                 self.children[i].style.set_dimension_axis(ma, sz);
             }
-            if is_undefined(oc) && is_defined(self.children[i].style.get_start_position(ca)) && is_defined(self.children[i].style.get_end_position(ca)) {
-                let sz = self.get_layout_dimension(ca) - self.style.get_start_border(ca) - self.style.get_end_border(ca)
-                    - self.children[i].style.get_start_position(ca) - self.children[i].style.get_end_position(ca) - self.children[i].get_margin(ca);
+            if is_undefined(oc)
+                && is_defined(self.children[i].style.get_start_position(ca))
+                && is_defined(self.children[i].style.get_end_position(ca))
+            {
+                let sz = self.get_layout_dimension(ca)
+                    - self.style.get_start_border(ca)
+                    - self.style.get_end_border(ca)
+                    - self.children[i].style.get_start_position(ca)
+                    - self.children[i].style.get_end_position(ca)
+                    - self.children[i].get_margin(ca);
                 self.children[i].style.set_dimension_axis(ca, sz);
             }
 
@@ -642,8 +891,12 @@ impl FlexNode {
 
         // Separate pass to set positions (avoids double borrow)
         for i in 0..self.children.len() {
-            if self.children[i].style.position_type != PositionType::Absolute { continue; }
-            if self.children[i].style.display_type == DisplayType::None { continue; }
+            if self.children[i].style.position_type != PositionType::Absolute {
+                continue;
+            }
+            if self.children[i].style.display_type == DisplayType::None {
+                continue;
+            }
             self.calc_fixed_pos(i, ma);
             self.calc_fixed_pos(i, ca);
         }
@@ -658,18 +911,30 @@ impl FlexNode {
         let margin_start = self.children[idx].get_layout_start_margin(axis);
 
         if is_defined(start_pos) {
-            let sp = self.get_start_border(axis) + self.children[idx].get_layout_start_margin(axis) + start_pos;
+            let sp = self.get_start_border(axis)
+                + self.children[idx].get_layout_start_margin(axis)
+                + start_pos;
             self.children[idx].set_layout_start_position(axis, sp);
             self.children[idx].set_layout_end_position(axis, layout_dim - sp - child_dim);
         } else if is_defined(end_pos) {
-            let ep = self.get_end_border(axis) + self.children[idx].get_layout_end_margin(axis) + end_pos;
+            let ep = self.get_end_border(axis)
+                + self.children[idx].get_layout_end_margin(axis)
+                + end_pos;
             self.children[idx].set_layout_end_position(axis, ep);
             self.children[idx].set_layout_start_position(axis, layout_dim - ep - child_dim);
         } else {
             let rem = layout_dim - self.get_padding_and_border(axis) - child_dim;
             let mut off = pbs;
-            let al = if axis == self.resolve_main_axis() { self.style.justify_content } else { self.get_node_align(idx) };
-            match al { FlexAlign::Center => off += rem / 2.0, FlexAlign::End => off += rem, _ => {} }
+            let al = if axis == self.resolve_main_axis() {
+                self.style.justify_content
+            } else {
+                self.get_node_align(idx)
+            };
+            match al {
+                FlexAlign::Center => off += rem / 2.0,
+                FlexAlign::End => off += rem,
+                _ => {}
+            }
             let sp = self.get_start_padding_and_border(axis) + margin_start + off;
             self.children[idx].set_layout_start_position(axis, sp);
             self.children[idx].set_layout_end_position(axis, layout_dim - sp - child_dim);
@@ -678,9 +943,13 @@ impl FlexNode {
 
     // ============ Leaf layout ============
 
-    fn layout_single_node(&mut self, aw: f32, ah: f32,
-        width_measure_mode: MeasureMode, height_measure_mode: MeasureMode)
-    {
+    fn layout_single_node(
+        &mut self,
+        aw: f32,
+        ah: f32,
+        width_measure_mode: MeasureMode,
+        height_measure_mode: MeasureMode,
+    ) {
         let intrinsic_w = self.intrinsic_size.map_or(0.0, |(w, _)| w);
         let intrinsic_h = self.intrinsic_size.map_or(0.0, |(_, h)| h);
 
@@ -689,13 +958,27 @@ impl FlexNode {
                 self.layout_result.dim[0] = aw + self.get_padding_and_border(FlexDirection::Row);
             }
             MeasureMode::AtMost => {
-                let dw = if is_defined(self.style.dim[0]) { self.style.dim[0] } else { intrinsic_w };
+                let dw = if is_defined(self.style.dim[0]) {
+                    self.style.dim[0]
+                } else {
+                    intrinsic_w
+                };
                 let pb = self.get_padding_and_border(FlexDirection::Row);
-                self.layout_result.dim[0] = self.bound_axis(FlexDirection::Row,
-                    if is_defined(aw) && dw + pb > aw + pb { aw + pb } else { dw + pb });
+                self.layout_result.dim[0] = self.bound_axis(
+                    FlexDirection::Row,
+                    if is_defined(aw) && dw + pb > aw + pb {
+                        aw + pb
+                    } else {
+                        dw + pb
+                    },
+                );
             }
             MeasureMode::Undefined => {
-                let dw = if is_defined(self.style.dim[0]) { self.style.dim[0] } else { intrinsic_w };
+                let dw = if is_defined(self.style.dim[0]) {
+                    self.style.dim[0]
+                } else {
+                    intrinsic_w
+                };
                 self.layout_result.dim[0] = dw + self.get_padding_and_border(FlexDirection::Row);
             }
         }
@@ -705,13 +988,27 @@ impl FlexNode {
                 self.layout_result.dim[1] = ah + self.get_padding_and_border(FlexDirection::Column);
             }
             MeasureMode::AtMost => {
-                let dh = if is_defined(self.style.dim[1]) { self.style.dim[1] } else { intrinsic_h };
+                let dh = if is_defined(self.style.dim[1]) {
+                    self.style.dim[1]
+                } else {
+                    intrinsic_h
+                };
                 let pb = self.get_padding_and_border(FlexDirection::Column);
-                self.layout_result.dim[1] = self.bound_axis(FlexDirection::Column,
-                    if is_defined(ah) && dh + pb > ah + pb { ah + pb } else { dh + pb });
+                self.layout_result.dim[1] = self.bound_axis(
+                    FlexDirection::Column,
+                    if is_defined(ah) && dh + pb > ah + pb {
+                        ah + pb
+                    } else {
+                        dh + pb
+                    },
+                );
             }
             MeasureMode::Undefined => {
-                let dh = if is_defined(self.style.dim[1]) { self.style.dim[1] } else { intrinsic_h };
+                let dh = if is_defined(self.style.dim[1]) {
+                    self.style.dim[1]
+                } else {
+                    intrinsic_h
+                };
                 self.layout_result.dim[1] = dh + self.get_padding_and_border(FlexDirection::Column);
             }
         }
@@ -723,8 +1020,16 @@ impl FlexNode {
 
     // ============ Convenience getters ============
 
-    pub fn get_left(&self) -> f32 { self.layout_result.position[CSSDirection::Left as usize] }
-    pub fn get_top(&self) -> f32 { self.layout_result.position[CSSDirection::Top as usize] }
-    pub fn get_width(&self) -> f32 { self.layout_result.dim[Dimension::Width as usize] }
-    pub fn get_height(&self) -> f32 { self.layout_result.dim[Dimension::Height as usize] }
+    pub fn get_left(&self) -> f32 {
+        self.layout_result.position[CSSDirection::Left as usize]
+    }
+    pub fn get_top(&self) -> f32 {
+        self.layout_result.position[CSSDirection::Top as usize]
+    }
+    pub fn get_width(&self) -> f32 {
+        self.layout_result.dim[Dimension::Width as usize]
+    }
+    pub fn get_height(&self) -> f32 {
+        self.layout_result.dim[Dimension::Height as usize]
+    }
 }

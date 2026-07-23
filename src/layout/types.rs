@@ -191,7 +191,10 @@ pub fn is_column_direction(dir: FlexDirection) -> bool {
 
 /// 判断是否为 Reverse 方向
 pub fn is_reverse_direction(dir: FlexDirection) -> bool {
-    matches!(dir, FlexDirection::RowReverse | FlexDirection::ColumnReverse)
+    matches!(
+        dir,
+        FlexDirection::RowReverse | FlexDirection::ColumnReverse
+    )
 }
 
 /// NaN 作为"未定义"的值
@@ -210,7 +213,11 @@ pub fn is_undefined(v: f32) -> bool {
 
 /// NaN 转 INF
 pub fn nan_as_inf(n: f32) -> f32 {
-    if n.is_nan() { f32::INFINITY } else { n }
+    if n.is_nan() {
+        f32::INFINITY
+    } else {
+        n
+    }
 }
 
 /// 浮点数近似相等比较

@@ -239,17 +239,14 @@ fn main() {
             let sidebar = Container::new()
                 .width(220.0)
                 .background(sbb)
-                .child(
-                    ListView::new(600.0, &sidebar_scroll)
-                        .child(side),
-                );
+                .child(ListView::new(520.0, &sidebar_scroll).child(side));
 
             // ── 右侧 ──
 
             // 预览
             let preview: Container = if let Some(idx) = cu {
-                if let Some(ref info) = pl.get(idx) {
-                    let card = Container::new().width(300.0).child(
+                if let Some(info) = pl.get(idx) {
+                    let card = Container::new().expand(true).padding(24.0).child(
                         Column::new()
                             .spacing(12.0)
                             .child(
@@ -270,7 +267,7 @@ fn main() {
                         Column::new()
                             .expand(true)
                             .justify_content(JustifyContent::Center)
-                            .align_items(AlignItems::Center)
+                            .align_items(AlignItems::Stretch)
                             .child(card),
                     )
                 } else {
@@ -294,26 +291,29 @@ fn main() {
             let toolbar = Column::new()
                 .spacing(0.0)
                 .child(
-                    Container::new().background(Color::WHITE).child(
-                        Row::new()
-                            .expand(true)
-                            .justify_content(JustifyContent::SpaceBetween)
-                            .align_items(AlignItems::Center)
-                            .child(
-                                Row::new()
-                                    .spacing(12.0)
-                                    .align_items(AlignItems::Center)
-                                    .child(Button::new("Load Sample").on_click(load.clone()))
-                                    .child(Button::new("Delete Sel").on_click(del.clone()))
-                                    .child(Button::new("Extract Sel").on_click(ext.clone()))
-                                    .child(Button::new("Export All").on_click(exp.clone())),
-                            )
-                            .child(
-                                Text::new(format!("{} selected", sc))
-                                    .font_size(12.0)
-                                    .color(if sc > 0 { acc } else { tm }),
-                            ),
-                    ),
+                    Container::new()
+                        .padding(12.0)
+                        .background(Color::WHITE)
+                        .child(
+                            Row::new()
+                                .expand(true)
+                                .justify_content(JustifyContent::SpaceBetween)
+                                .align_items(AlignItems::Center)
+                                .child(
+                                    Row::new()
+                                        .spacing(12.0)
+                                        .align_items(AlignItems::Center)
+                                        .child(Button::new("Load Sample").on_click(load.clone()))
+                                        .child(Button::new("Delete Sel").on_click(del.clone()))
+                                        .child(Button::new("Extract Sel").on_click(ext.clone()))
+                                        .child(Button::new("Export All").on_click(exp.clone())),
+                                )
+                                .child(
+                                    Text::new(format!("{} selected", sc))
+                                        .font_size(12.0)
+                                        .color(if sc > 0 { acc } else { tm }),
+                                ),
+                        ),
                 )
                 .child(divider(bd));
 
@@ -361,9 +361,19 @@ fn main() {
                                         Row::new()
                                             .spacing(16.0)
                                             .align_items(AlignItems::Center)
-                                            .child(Text::new("PDFKit").font_size(20.0).color(Color::WHITE))
-                                            .child(Text::new("|").font_size(16.0).color(c(0x475569)))
-                                            .child(Text::new("sample.pdf").font_size(13.0).color(c(0x94a3b8))),
+                                            .child(
+                                                Text::new("PDFKit")
+                                                    .font_size(20.0)
+                                                    .color(Color::WHITE),
+                                            )
+                                            .child(
+                                                Text::new("|").font_size(16.0).color(c(0x475569)),
+                                            )
+                                            .child(
+                                                Text::new("sample.pdf")
+                                                    .font_size(13.0)
+                                                    .color(c(0x94a3b8)),
+                                            ),
                                     )
                                     .child(Button::new("Import PDF...").on_click(load.clone())),
                             ),

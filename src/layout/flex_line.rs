@@ -3,8 +3,8 @@
 //! 参考 Taitank::FlexLine
 //! 用于将 flex items 按行分组，管理 flex-grow/flex-shrink 分配
 
-use crate::layout::types::*;
 use crate::layout::flex_node::FlexNode;
+use crate::layout::types::*;
 
 /// Flex 符号
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,12 @@ pub struct FlexLine {
     pub initial_free_space: f32,
     pub remaining_free_space: f32,
     pub gap: f32,
+}
+
+impl Default for FlexLine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FlexLine {
@@ -78,7 +84,8 @@ impl FlexLine {
         children: &mut [FlexNode],
     ) -> Vec<usize> {
         let flex_sign = self.sign();
-        self.remaining_free_space = self.container_main_inner_size - self.sum_hypothetical_main_size;
+        self.remaining_free_space =
+            self.container_main_inner_size - self.sum_hypothetical_main_size;
 
         let mut inflexible_items = Vec::new();
 
@@ -101,8 +108,7 @@ impl FlexLine {
 
             if freeze {
                 let new_dim = children[idx].layout_result.hypothetical_main_axis_size;
-                children[idx].layout_result.dim
-                    [K_AXIS_DIM[main_axis as usize] as usize] = new_dim;
+                children[idx].layout_result.dim[K_AXIS_DIM[main_axis as usize] as usize] = new_dim;
                 inflexible_items.push(idx);
             }
         }
@@ -191,7 +197,8 @@ impl FlexLine {
             };
 
             let violation = if extra_space.is_finite() {
-                let item_main_size = children[idx].layout_result.hypothetical_main_axis_size + extra_space;
+                let item_main_size =
+                    children[idx].layout_result.hypothetical_main_axis_size + extra_space;
                 let adjust = children[idx].bound_axis(main_axis, item_main_size);
                 children[idx].layout_result.dim[K_AXIS_DIM[main_axis as usize] as usize] = adjust;
                 used_free_space += adjust - children[idx].layout_result.hypothetical_main_axis_size;
@@ -313,7 +320,11 @@ impl FlexLine {
                 0.0
             };
 
-            let container_dim = if is_defined(parent_layout_dim) { parent_layout_dim } else { 0.0 };
+            let container_dim = if is_defined(parent_layout_dim) {
+                parent_layout_dim
+            } else {
+                0.0
+            };
             children[idx].set_layout_end_position(main_axis, container_dim - child_dim - offset);
             offset += child_dim + children[idx].get_layout_end_margin(main_axis) + space + self.gap;
         }

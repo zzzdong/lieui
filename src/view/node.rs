@@ -1,36 +1,61 @@
 //! ViewNode — Builder 侧纯数据 UI 描述（原语枚举）
 //!
-//! 只有五种基本原语：
-//! - Text / Image：叶子节点
-//! - Box：装饰性容器（padding + background + 固定或展开尺寸）
-//! - Flex：一维布局容器（Row / Column）
-//! - Listener：事件监听包装器，透传给唯一子节点
+//! 基本原语参照 HTML：
+//! - Text：文本节点
+//! - Image：图片节点
+//! - Div：通用容器，可工作在 Block 模式（类似 `div`）或 Flex 模式（类似 `display: flex`）
+//! - Canvas：自定义绘制预留原语（当前不渲染任何内容）
 //!
+//! 每个原语都可以附带 `listener: Option<ClickCallbackRef>` 来响应点击事件。
 //! 所有高级 widget（Button、Checkbox、Container、Column、Row、Divider）
-//! 都在 `primitives.rs` 中通过这五种原语组合而成。
+//! 都在 `primitives.rs` 中通过这些原语组合而成。
 
 use crate::core::{ElementId, ElementState};
 use crate::geometry::Color;
 use crate::layout::box_model::{BoxStyle, ComputedLayout, IntrinsicSize, LayoutConstraint};
-use crate::layout::flex::{AlignItems, FlexDirection, FlexStyle, JustifyContent};
+use crate::layout::flex::FlexStyle;
 use crate::layout::measurable::{EmptyMeasure, FixedMeasure, Measurable, TextMeasure};
 use crate::render::visual::{FillStrokeStyle, KRect, LayeredElement as LE, VisualElement};
 use crate::text::create_text_layout;
+
+/// Listener 上注册的回调引用
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickCallbackRef {
+    Simple(u64),
+    WithCtx(u64),
+}
+
+impl ClickCallbackRef {
+    pub fn id(self) -> u64 {
+        match self {
+            ClickCallbackRef::Simple(id) | ClickCallbackRef::WithCtx(id) => id,
+        }
+    }
+}
 
 /// 节点类型标记
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
     Text,
     Image,
-    Box,
+    Div,
+    Canvas,
+}
+
+/// Div 的布局显示模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    /// 块级容器：仅使用 BoxStyle 的盒模型属性
+    Block,
+    /// Flex 容器：使用 FlexStyle 的一维布局属性
     Flex,
-    Listener,
 }
 
 /// 布局样式 — Runtime 从 ViewNode 提取后生成 LayoutNode
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutStyle {
     pub node_type: NodeType,
+    pub display: DisplayMode,
     pub flex: FlexStyle,
     pub box_style: BoxStyle,
 }
@@ -38,7 +63,8 @@ pub struct LayoutStyle {
 impl Default for LayoutStyle {
     fn default() -> Self {
         Self {
-            node_type: NodeType::Box,
+            node_type: NodeType::Div,
+            display: DisplayMode::Block,
             flex: FlexStyle::default(),
             box_style: BoxStyle::default(),
         }
@@ -52,34 +78,26 @@ pub enum ViewNode {
         font_size: f64,
         color: Color,
         key: Option<String>,
+        listener: Option<ClickCallbackRef>,
     },
     Image {
-        data: Vec<u8>,
+        data: std::sync::Arc<Vec<u8>>,
         w: u32,
         h: u32,
         key: Option<String>,
+        listener: Option<ClickCallbackRef>,
     },
-    Box {
+    Div {
         style: BoxStyle,
+        flex: FlexStyle,
+        display: DisplayMode,
         key: Option<String>,
         children: Vec<ViewNode>,
+        listener: Option<ClickCallbackRef>,
     },
-    Flex {
-        direction: FlexDirection,
-        justify: JustifyContent,
-        align: AlignItems,
-        spacing: f32,
-        expand: bool,
-        flex_grow: f32,
-        flex_shrink: f32,
-        wrap: crate::layout::flex::FlexWrap,
+    Canvas {
         key: Option<String>,
-        children: Vec<ViewNode>,
-    },
-    Listener {
-        on_click: Option<u64>,
-        key: Option<String>,
-        child: Box<ViewNode>,
+        listener: Option<ClickCallbackRef>,
     },
 }
 
@@ -93,9 +111,15 @@ impl ViewNode {
         match self {
             ViewNode::Text { .. } => NodeType::Text,
             ViewNode::Image { .. } => NodeType::Image,
-            ViewNode::Box { .. } => NodeType::Box,
-            ViewNode::Flex { .. } => NodeType::Flex,
-            ViewNode::Listener { .. } => NodeType::Listener,
+            ViewNode::Div { .. } => NodeType::Div,
+            ViewNode::Canvas { .. } => NodeType::Canvas,
+        }
+    }
+
+    pub fn display_mode(&self) -> Option<DisplayMode> {
+        match self {
+            ViewNode::Div { display, .. } => Some(*display),
+            _ => None,
         }
     }
 
@@ -103,9 +127,11 @@ impl ViewNode {
         match self {
             ViewNode::Text { .. } => "text",
             ViewNode::Image { .. } => "image",
-            ViewNode::Box { .. } => "box",
-            ViewNode::Flex { .. } => "flex",
-            ViewNode::Listener { .. } => "listener",
+            ViewNode::Div { display, .. } => match display {
+                DisplayMode::Block => "div",
+                DisplayMode::Flex => "flex",
+            },
+            ViewNode::Canvas { .. } => "canvas",
         }
     }
 
@@ -113,9 +139,8 @@ impl ViewNode {
         match self {
             ViewNode::Text { key, .. }
             | ViewNode::Image { key, .. }
-            | ViewNode::Box { key, .. }
-            | ViewNode::Flex { key, .. }
-            | ViewNode::Listener { key, .. } => key.as_deref(),
+            | ViewNode::Div { key, .. }
+            | ViewNode::Canvas { key, .. } => key.as_deref(),
         }
     }
 
@@ -123,16 +148,28 @@ impl ViewNode {
         match self {
             ViewNode::Text { key, .. }
             | ViewNode::Image { key, .. }
-            | ViewNode::Box { key, .. }
-            | ViewNode::Flex { key, .. }
-            | ViewNode::Listener { key, .. } => *key = Some(k),
+            | ViewNode::Div { key, .. }
+            | ViewNode::Canvas { key, .. } => *key = Some(k),
         }
+    }
+
+    pub fn set_listener(&mut self, l: Option<ClickCallbackRef>) {
+        match self {
+            ViewNode::Text { listener, .. }
+            | ViewNode::Image { listener, .. }
+            | ViewNode::Div { listener, .. }
+            | ViewNode::Canvas { listener, .. } => *listener = l,
+        }
+    }
+
+    pub fn with_listener(mut self, l: Option<ClickCallbackRef>) -> Self {
+        self.set_listener(l);
+        self
     }
 
     pub fn children(&self) -> &[ViewNode] {
         match self {
-            ViewNode::Box { children, .. } | ViewNode::Flex { children, .. } => children,
-            ViewNode::Listener { child, .. } => std::slice::from_ref(child),
+            ViewNode::Div { children, .. } => children,
             _ => &[],
         }
     }
@@ -147,41 +184,21 @@ impl ViewNode {
                 node_type: NodeType::Image,
                 ..LayoutStyle::default()
             },
-            ViewNode::Box { style, .. } => LayoutStyle {
-                node_type: NodeType::Box,
-                box_style: style.clone(),
-                ..LayoutStyle::default()
-            },
-            ViewNode::Flex {
-                direction,
-                justify,
-                align,
-                spacing,
-                expand,
-                flex_grow,
-                flex_shrink,
-                wrap,
+            ViewNode::Div {
+                style,
+                flex,
+                display,
                 ..
             } => LayoutStyle {
-                node_type: NodeType::Flex,
-                flex: FlexStyle {
-                    direction: *direction,
-                    justify: *justify,
-                    align: *align,
-                    spacing: *spacing,
-                    expand: *expand,
-                    flex_grow: *flex_grow,
-                    flex_shrink: *flex_shrink,
-                    wrap: *wrap,
-                },
+                node_type: NodeType::Div,
+                display: *display,
+                box_style: style.clone(),
+                flex: flex.clone(),
+            },
+            ViewNode::Canvas { .. } => LayoutStyle {
+                node_type: NodeType::Canvas,
                 ..LayoutStyle::default()
             },
-            ViewNode::Listener { child, .. } => {
-                // Listener 是透明包装，布局样式完全由子节点决定
-                let mut style = child.layout_style();
-                style.node_type = NodeType::Listener;
-                style
-            }
         }
     }
 
@@ -194,21 +211,16 @@ impl ViewNode {
             ViewNode::Image { w, h, .. } => {
                 FixedMeasure::new(IntrinsicSize::new(*w as f32, *h as f32)).measure(constraint)
             }
-            ViewNode::Box { style, .. } => {
-                if let (Some(fw), Some(fh)) = (style.fixed_width, style.fixed_height) {
-                    FixedMeasure::new(IntrinsicSize::new(fw, fh)).measure(constraint)
-                } else if let Some(fw) = style.fixed_width {
-                    let h = style.fixed_height.unwrap_or(0.0);
-                    FixedMeasure::new(IntrinsicSize::new(fw, h)).measure(constraint)
-                } else if let Some(fh) = style.fixed_height {
-                    let w = style.fixed_width.unwrap_or(0.0);
-                    FixedMeasure::new(IntrinsicSize::new(w, fh)).measure(constraint)
+            ViewNode::Div { style, .. } => {
+                let w = style.fixed_width.unwrap_or(0.0);
+                let h = style.fixed_height.unwrap_or(0.0);
+                if style.fixed_width.is_some() || style.fixed_height.is_some() {
+                    FixedMeasure::new(IntrinsicSize::new(w, h)).measure(constraint)
                 } else {
                     EmptyMeasure.measure(constraint)
                 }
             }
-            ViewNode::Flex { .. } => EmptyMeasure.measure(constraint),
-            ViewNode::Listener { child, .. } => child.measure(constraint),
+            ViewNode::Canvas { .. } => EmptyMeasure.measure(constraint),
         }
     }
 
@@ -221,80 +233,73 @@ impl ViewNode {
                     content: a,
                     font_size: b,
                     color: c,
+                    listener: l1,
                     ..
                 },
                 Text {
                     content: x,
                     font_size: y,
                     color: z,
+                    listener: l2,
                     ..
                 },
-            ) => a == x && (b - y).abs() < 0.001 && c == z,
+            ) => a == x && (b - y).abs() < 0.001 && c == z && l1 == l2,
             (
                 Image {
                     data: a,
                     w: b,
                     h: c,
+                    listener: l1,
                     ..
                 },
                 Image {
                     data: x,
                     w: y,
                     h: z,
+                    listener: l2,
                     ..
                 },
-            ) => a == x && b == y && c == z,
-            (Box { style: a, .. }, Box { style: b, .. }) => a == b,
+            ) => a == x && b == y && c == z && l1 == l2,
             (
-                Flex {
-                    direction: a,
-                    justify: b,
-                    align: c,
-                    spacing: d,
-                    expand: e,
-                    flex_grow: fg,
-                    flex_shrink: fs,
-                    wrap: w,
+                Div {
+                    style: s1,
+                    flex: f1,
+                    display: d1,
+                    listener: l1,
                     ..
                 },
-                Flex {
-                    direction: f,
-                    justify: g,
-                    align: h,
-                    spacing: i,
-                    expand: j,
-                    flex_grow: fg2,
-                    flex_shrink: fs2,
-                    wrap: w2,
+                Div {
+                    style: s2,
+                    flex: f2,
+                    display: d2,
+                    listener: l2,
                     ..
                 },
-            ) => {
-                a == f
-                    && b == g
-                    && c == h
-                    && (d - i).abs() < 0.001
-                    && e == j
-                    && (fg - fg2).abs() < 0.001
-                    && (fs - fs2).abs() < 0.001
-                    && w == w2
-            }
-            (Listener { on_click: a, .. }, Listener { on_click: b, .. }) => a == b,
+            ) => s1 == s2 && f1 == f2 && d1 == d2 && l1 == l2,
+            (Canvas { listener: l1, .. }, Canvas { listener: l2, .. }) => l1 == l2,
             _ => false,
         }
     }
 
     pub fn is_container(&self) -> bool {
-        matches!(
-            self,
-            ViewNode::Box { .. } | ViewNode::Flex { .. } | ViewNode::Listener { .. }
-        )
+        matches!(self, ViewNode::Div { .. })
     }
 
-    pub fn on_click(&self) -> Option<u64> {
+    pub fn listener(&self) -> Option<ClickCallbackRef> {
         match self {
-            ViewNode::Listener { on_click, .. } => *on_click,
-            _ => None,
+            ViewNode::Text { listener, .. }
+            | ViewNode::Image { listener, .. }
+            | ViewNode::Div { listener, .. }
+            | ViewNode::Canvas { listener, .. } => *listener,
         }
+    }
+
+    pub fn on_click(&self) -> Option<ClickCallbackRef> {
+        self.listener()
+    }
+
+    pub fn on_click_id(&self) -> Option<u64> {
+        self.listener().map(|c| c.id())
     }
 
     pub fn render(
@@ -341,7 +346,7 @@ impl ViewNode {
                                 (r.x + r.width) as f64,
                                 (r.y + r.height) as f64,
                             ),
-                            data: std::sync::Arc::new(data.clone()),
+                            data: std::sync::Arc::clone(data),
                             width: *w,
                             height: *h,
                             opacity: None,
@@ -351,7 +356,7 @@ impl ViewNode {
                     .with_id(element_id.as_ffi()),
                 );
             }
-            ViewNode::Box { style, .. } => {
+            ViewNode::Div { style, .. } => {
                 let bg = if state.pressed && style.pressed_background.is_some() {
                     style.pressed_background
                 } else if state.hovered && style.hover_background.is_some() {
@@ -370,8 +375,16 @@ impl ViewNode {
                         LE::new(
                             VisualElement::RoundedRect {
                                 rect: k,
-                                radius: 0.0,
-                                style: FillStrokeStyle::new().with_fill(bg),
+                                radius: style.border_radius as f64,
+                                style: {
+                                    let mut fs = FillStrokeStyle::new().with_fill(bg);
+                                    if let Some(bc) = style.border_color {
+                                        if style.border_width > 0.0 {
+                                            fs = fs.with_stroke(bc, style.border_width as f64);
+                                        }
+                                    }
+                                    fs
+                                },
                             },
                             z_index,
                         )
@@ -379,7 +392,10 @@ impl ViewNode {
                     );
                 }
             }
-            ViewNode::Flex { .. } | ViewNode::Listener { .. } => {}
+            ViewNode::Canvas { .. } => {
+                // Canvas 当前为预留原语，不渲染任何内容。
+                // 未来可在此触发自定义绘制回调或生成 VisualElement::Custom。
+            }
         }
     }
 }

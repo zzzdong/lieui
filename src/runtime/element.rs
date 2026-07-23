@@ -62,6 +62,7 @@ impl ElementTree {
                 font_size: 0.0,
                 color: crate::geometry::Color::TRANSPARENT,
                 key: None,
+                listener: None,
             })
     }
 
@@ -69,7 +70,7 @@ impl ElementTree {
         self.entries.get(id).map(|e| &e.node)
     }
     pub fn on_click(&self, id: ElementId) -> Option<u64> {
-        self.entries.get(id)?.node.on_click()
+        self.entries.get(id)?.node.on_click_id()
     }
 
     // ---- 交互状态 ----
@@ -223,10 +224,7 @@ impl ElementTree {
 
     /// 检查 dirty 标记
     pub fn is_dirty(&self, id: ElementId) -> bool {
-        self.entries
-            .get(id)
-            .map(|e| e.dirty.get())
-            .unwrap_or(false)
+        self.entries.get(id).map(|e| e.dirty.get()).unwrap_or(false)
     }
 
     /// 递归检查子树是否有 dirty 节点
@@ -264,44 +262,50 @@ impl Default for ElementTree {
 /// 从 ViewNode 克隆但清空 children（用于 ElementEntry 存储）
 fn without_children(n: &ViewNode) -> ViewNode {
     match n {
-        ViewNode::Box { style, key, .. } => ViewNode::Box {
-            style: style.clone(),
-            key: key.clone(),
-            children: vec![],
-        },
-        ViewNode::Flex {
-            direction,
-            justify,
-            align,
-            spacing,
-            expand,
-            flex_grow,
-            flex_shrink,
-            wrap,
+        ViewNode::Div {
+            style,
+            flex,
+            display,
             key,
+            listener,
             ..
-        } => ViewNode::Flex {
-            direction: *direction,
-            justify: *justify,
-            align: *align,
-            spacing: *spacing,
-            expand: *expand,
-            flex_grow: *flex_grow,
-            flex_shrink: *flex_shrink,
-            wrap: *wrap,
+        } => ViewNode::Div {
+            style: style.clone(),
+            flex: flex.clone(),
+            display: *display,
             key: key.clone(),
             children: vec![],
+            listener: *listener,
         },
-        ViewNode::Listener { on_click, key, .. } => ViewNode::Listener {
-            on_click: *on_click,
+        ViewNode::Text {
+            content,
+            font_size,
+            color,
+            key,
+            listener,
+        } => ViewNode::Text {
+            content: content.clone(),
+            font_size: *font_size,
+            color: *color,
             key: key.clone(),
-            child: Box::new(ViewNode::Text {
-                content: String::new(),
-                font_size: 0.0,
-                color: crate::geometry::Color::TRANSPARENT,
-                key: None,
-            }),
+            listener: *listener,
         },
-        _ => n.clone(),
+        ViewNode::Image {
+            data,
+            w,
+            h,
+            key,
+            listener,
+        } => ViewNode::Image {
+            data: std::sync::Arc::clone(data),
+            w: *w,
+            h: *h,
+            key: key.clone(),
+            listener: *listener,
+        },
+        ViewNode::Canvas { key, listener } => ViewNode::Canvas {
+            key: key.clone(),
+            listener: *listener,
+        },
     }
 }

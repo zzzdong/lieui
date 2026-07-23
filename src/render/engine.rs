@@ -148,6 +148,15 @@ impl VelloRenderer {
                         self.ctx.fill_blurred_rounded_rect(rect, *r as f32, 0.0);
                     }
                 }
+                if let Some(s) = &style.stroke {
+                    self.apply_stroke(s);
+                    if *r < 0.5 {
+                        self.ctx.stroke_rect(rect);
+                    } else {
+                        let rr = vello_cpu::kurbo::RoundedRect::from_rect(*rect, *r);
+                        self.ctx.stroke_path(&rr.to_path(0.1));
+                    }
+                }
             }
             VisualElement::Circle {
                 center,

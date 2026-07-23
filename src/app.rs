@@ -2,6 +2,7 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -28,8 +29,29 @@ pub struct Application<B: Fn() -> ViewNode> {
     rendered_once: bool,
 }
 
+static WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
+
+fn pack_size(w: u32, h: u32) -> u64 {
+    ((w as u64) << 32) | (h as u64)
+}
+
+fn unpack_size(v: u64) -> (u32, u32) {
+    ((v >> 32) as u32, v as u32)
+}
+
+pub fn set_window_size(w: u32, h: u32) {
+    WINDOW_SIZE.store(pack_size(w, h), Ordering::Relaxed);
+}
+
+/// 获取当前窗口大小。如果尚未初始化，返回 Size::zero()。
+pub fn window_size() -> Size {
+    let (w, h) = unpack_size(WINDOW_SIZE.load(Ordering::Relaxed));
+    Size::new(w as f32, h as f32)
+}
+
 impl<B: Fn() -> ViewNode + 'static> Application<B> {
     pub fn new(builder: B, viewport: Size) -> Self {
+        set_window_size(viewport.width as u32, viewport.height as u32);
         Self {
             builder,
             runtime: Runtime::new(viewport),
@@ -146,6 +168,7 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         let window = Rc::new(el.create_window(wa).unwrap());
         let s = window.inner_size();
         self.window_size = (s.width, s.height);
+        set_window_size(s.width, s.height);
         self.runtime
             .set_viewport(Size::new(s.width as f32, s.height as f32));
         self.renderer.resize(s.width as u16, s.height as u16);
@@ -161,15 +184,21 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
     }
 
     /// 通用事件回调：拦截 Click 并触发全局回调
+    ///
+    /// 仅在 Target / Bubble 阶段触发回调。`state::invoke_click` 会根据回调类型决定
+    /// 是否停止传播：Simple 类型自动 stop；WithCtx 类型由用户回调自行决定。
     fn handle_lie_event(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
         event: &crate::event::Event,
-        _ctx: &mut crate::event::EventContext,
+        ctx: &mut crate::event::EventContext,
     ) {
         if let crate::event::Event::Click { .. } = event {
+            if ctx.phase() == crate::event::EventPhase::Capture {
+                return;
+            }
             if let Some(cb_id) = tree.on_click(id) {
-                state::invoke_click(cb_id);
+                state::invoke_click(cb_id, ctx);
             }
         }
     }
@@ -191,6 +220,7 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
             WindowEvent::Resized(s) => {
                 if s.width > 0 && s.height > 0 && (s.width, s.height) != self.window_size {
                     self.window_size = (s.width, s.height);
+                    set_window_size(s.width, s.height);
                     self.renderer.resize(s.width as u16, s.height as u16);
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -202,12 +232,10 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                 let hit = self.build_hit_result();
                 let tree = &self.runtime.layers.tree;
                 let mut em = self.runtime.layers.event_manager.borrow_mut();
-                let _effects = em.handle_mouse_move(
-                    self.mouse_pos,
-                    hit.as_ref(),
-                    tree,
-                    |id, event, ctx| Self::handle_lie_event(tree, id, event, ctx),
-                );
+                let _effects =
+                    em.handle_mouse_move(self.mouse_pos, hit.as_ref(), tree, |id, event, ctx| {
+                        Self::handle_lie_event(tree, id, event, ctx)
+                    });
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -227,13 +255,10 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                     };
                     let tree = &self.runtime.layers.tree;
                     let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    let _effects = em.handle_mouse_down(
-                        self.mouse_pos,
-                        btn,
-                        &hit,
-                        tree,
-                        |id, event, ctx| Self::handle_lie_event(tree, id, event, ctx),
-                    );
+                    let _effects =
+                        em.handle_mouse_down(self.mouse_pos, btn, &hit, tree, |id, event, ctx| {
+                            Self::handle_lie_event(tree, id, event, ctx)
+                        });
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -252,13 +277,10 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                     };
                     let tree = &self.runtime.layers.tree;
                     let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    let _effects = em.handle_mouse_up(
-                        self.mouse_pos,
-                        btn,
-                        &hit,
-                        tree,
-                        |id, event, ctx| Self::handle_lie_event(tree, id, event, ctx),
-                    );
+                    let _effects =
+                        em.handle_mouse_up(self.mouse_pos, btn, &hit, tree, |id, event, ctx| {
+                            Self::handle_lie_event(tree, id, event, ctx)
+                        });
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();

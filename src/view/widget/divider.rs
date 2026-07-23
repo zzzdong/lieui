@@ -1,19 +1,25 @@
-use crate::geometry::Color;
 use crate::layout::box_model::BoxStyle;
-use crate::view::node::ViewNode;
+use crate::layout::flex::FlexStyle;
+use crate::view::design_tokens::semantic as t;
+use crate::view::node::{DisplayMode, ViewNode};
 use crate::view::View;
 
 pub struct Divider;
 
 impl View for Divider {
     fn build(&self) -> ViewNode {
-        ViewNode::Box {
+        ViewNode::Div {
             style: BoxStyle {
-                fixed_height: Some(1.0), expand: true,
-                background_color: Some(Color::new(200, 200, 200)),
+                fixed_height: Some(1.0),
+                expand: true,
+                background_color: Some(t::BORDER_DEFAULT),
                 ..BoxStyle::default()
             },
-            key: None, children: vec![],
+            flex: FlexStyle::default(),
+            display: DisplayMode::Block,
+            key: None,
+            children: vec![],
+            listener: None,
         }
     }
 }

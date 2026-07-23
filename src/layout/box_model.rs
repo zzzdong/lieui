@@ -1,7 +1,7 @@
 //! 布局约束与盒模型
 
-use crate::layout::flex::AlignItems;
 use crate::geometry::{Color, Rect};
+use crate::layout::flex::AlignItems;
 
 /// 布局约束
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -206,6 +206,10 @@ pub struct BoxStyle {
     pub align_self: Option<AlignItems>,
     /// 圆角半径
     pub border_radius: f32,
+    /// 边框颜色
+    pub border_color: Option<Color>,
+    /// 边框宽度
+    pub border_width: f32,
     /// 裁剪子节点内容（用于滚动容器等）
     pub clip_content: bool,
 }

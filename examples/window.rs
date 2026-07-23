@@ -40,9 +40,8 @@ fn main() {
                             }
                         }))
                         .child(if *clicked.get() {
-                            Container::new().child(
-                                Text::new("Clicked!").font_size(18.0).color(Color::RED),
-                            )
+                            Container::new()
+                                .child(Text::new("Clicked!").font_size(18.0).color(Color::RED))
                         } else {
                             Container::new()
                         })

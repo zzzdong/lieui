@@ -2,12 +2,8 @@
 //!
 //! 测试独立 FlexNode 引擎的核心布局算法。
 
-use lieui::layout::{
-    FlexNode, LayoutDirection,
-    FlexAlign,
-    Dimension,
-};
 use lieui::layout::types::{CSSDirection, FlexDirection};
+use lieui::layout::{Dimension, FlexAlign, FlexNode, LayoutDirection};
 
 // ============ 浮点数近似相等断言 ============
 
@@ -15,7 +11,9 @@ macro_rules! assert_f32_eq {
     ($a:expr, $b:expr) => {
         let a = $a as f64;
         let b = $b as f64;
-        if a.is_nan() && b.is_nan() { return; }
+        if a.is_nan() && b.is_nan() {
+            return;
+        }
         assert!((a - b).abs() < 0.0005, "left: {}, right: {}", a, b);
     };
 }
@@ -25,7 +23,14 @@ macro_rules! _assert_f32_lt {
     ($a:expr, $b:expr) => {
         let a = $a as f64;
         let b = $b as f64;
-        assert!(a < (b - 0.001), "expected {} < {}, but {} >= {}", a, b, a, b);
+        assert!(
+            a < (b - 0.001),
+            "expected {} < {}, but {} >= {}",
+            a,
+            b,
+            a,
+            b
+        );
     };
 }
 
@@ -166,7 +171,10 @@ fn flex_basis_overrides_main_size() {
 
     do_layout(&mut a, f32::NAN, f32::NAN, LayoutDirection::Ltr);
 
-    assert_f32_eq!(a.children[0].get_layout_dimension(FlexDirection::Column), 100.0);
+    assert_f32_eq!(
+        a.children[0].get_layout_dimension(FlexDirection::Column),
+        100.0
+    );
 }
 
 #[test]
@@ -470,7 +478,7 @@ fn justify_content_column_space_evenly() {
 #[test]
 fn align_items_stretch() {
     let mut a = make_col(f32::NAN, f32::NAN);
-    let mut b = make_col(f32::NAN, f32::NAN);
+    let b = make_col(f32::NAN, f32::NAN);
 
     a.style.align_items = FlexAlign::Stretch;
     a.style.dim[0] = 100.0;
@@ -630,7 +638,7 @@ fn padding_container_match_child() {
 #[test]
 fn padding_stretch_child() {
     let mut a = make_col(f32::NAN, f32::NAN);
-    let mut b = make_col(f32::NAN, f32::NAN);
+    let b = make_col(f32::NAN, f32::NAN);
 
     a.style.set_padding(CSSDirection::All, 10.0);
     a.style.dim[0] = 100.0;
@@ -711,7 +719,7 @@ fn border_container_match_child() {
 #[test]
 fn border_stretch_child() {
     let mut a = make_col(f32::NAN, f32::NAN);
-    let mut b = make_col(f32::NAN, f32::NAN);
+    let b = make_col(f32::NAN, f32::NAN);
 
     a.style.set_border(CSSDirection::All, 10.0);
     a.style.dim[0] = 100.0;
@@ -821,15 +829,23 @@ fn stretch_chain_box_column_row() {
 
     box_root.layout(960.0, 640.0, LayoutDirection::Ltr);
 
-    eprintln!("Test: box={}x{} col={}x{} row={}x{} rcol={}x{}",
-        box_root.get_width(), box_root.get_height(),
-        box_root.children[0].get_width(), box_root.children[0].get_height(),
-        box_root.children[0].children[0].get_width(), box_root.children[0].children[0].get_height(),
+    eprintln!(
+        "Test: box={}x{} col={}x{} row={}x{} rcol={}x{}",
+        box_root.get_width(),
+        box_root.get_height(),
+        box_root.children[0].get_width(),
+        box_root.children[0].get_height(),
+        box_root.children[0].children[0].get_width(),
+        box_root.children[0].children[0].get_height(),
         box_root.children[0].children[0].children[0].get_width(),
-        box_root.children[0].children[0].children[0].get_height());
+        box_root.children[0].children[0].children[0].get_height()
+    );
 
     assert_f32_eq!(box_root.get_width(), 960.0);
     assert_f32_eq!(box_root.children[0].get_width(), 960.0);
     assert_f32_eq!(box_root.children[0].children[0].get_width(), 960.0);
-    assert_f32_eq!(box_root.children[0].children[0].children[0].get_width(), 960.0);
+    assert_f32_eq!(
+        box_root.children[0].children[0].children[0].get_width(),
+        960.0
+    );
 }

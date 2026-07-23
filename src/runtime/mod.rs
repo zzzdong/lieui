@@ -101,7 +101,8 @@ impl Runtime {
             self.perform_layout();
             self.needs_layout = false;
             // 调试：LIEUI_DUMP_LAYOUT=1 时打印布局树
-            if cfg!(debug_assertions) {
+            if cfg!(debug_assertions) && std::env::var("LIEUI_DUMP_LAYOUT").is_ok_and(|v| v == "1")
+            {
                 use std::sync::OnceLock;
                 static DUMPED: OnceLock<bool> = OnceLock::new();
                 if DUMPED.set(true).is_ok() {
@@ -118,10 +119,25 @@ impl Runtime {
                     // 打印 ElementTree 父子关系
                     eprintln!("--- ElementTree parent-child ---");
                     if let Some(rid) = self.layers.layer_root(LayerType::Base) {
-                        fn dump_tree_et(tree: &element::ElementTree, id: crate::core::ElementId, depth: usize) {
+                        fn dump_tree_et(
+                            tree: &element::ElementTree,
+                            id: crate::core::ElementId,
+                            depth: usize,
+                        ) {
                             let indent = "  ".repeat(depth);
-                            let nt = tree.get_node_ref(id).map(|n| n.node_type_name()).unwrap_or("?");
-                            eprintln!("{}{:?} [{}] < {}", indent, id, nt, tree.parent_of(id).map(|p| format!("{:?}", p)).unwrap_or("root".into()));
+                            let nt = tree
+                                .get_node_ref(id)
+                                .map(|n| n.node_type_name())
+                                .unwrap_or("?");
+                            eprintln!(
+                                "{}{:?} [{}] < {}",
+                                indent,
+                                id,
+                                nt,
+                                tree.parent_of(id)
+                                    .map(|p| format!("{:?}", p))
+                                    .unwrap_or("root".into())
+                            );
                             for cid in tree.children_of(id) {
                                 dump_tree_et(tree, cid, depth + 1);
                             }
@@ -189,13 +205,14 @@ impl Runtime {
         elements: &mut Vec<LayeredElement>,
         inherited_state: crate::core::state::ElementState,
     ) {
-        use crate::view::node::NodeType;
         let id = node.id;
         let node_ref = match layers.tree.get_node_ref(id) {
             Some(n) => n,
             None => return,
         };
-        let state = if node.node_type == NodeType::Listener {
+        // 节点自身附带 listener 时使用自身交互状态，否则继承父节点状态。
+        // 这样 Button/Checkbox 等组件的背景/子节点能随 hover/pressed 更新。
+        let state = if node_ref.listener().is_some() {
             layers.tree.state(id)
         } else {
             inherited_state
@@ -213,7 +230,9 @@ impl Runtime {
             // 尝试从缓存复用 TextLayout，避免重复布局
             let lay = match layers.tree.text_layout_cache(id) {
                 Some(cached) => cached,
-                None => Box::new(crate::text::create_text_layout(content, *font_size, *color, None)),
+                None => Box::new(crate::text::create_text_layout(
+                    content, *font_size, *color, None,
+                )),
             };
             elements.push(
                 crate::render::visual::LayeredElement::new(
@@ -234,12 +253,11 @@ impl Runtime {
             // 缓存新的 TextLayout 供下次使用（update_node 时会清除缓存）
             layers.tree.set_text_layout_cache(
                 id,
-                Box::new(crate::text::create_text_layout(content, *font_size, *color, None)),
+                Box::new(crate::text::create_text_layout(
+                    content, *font_size, *color, None,
+                )),
             );
-        } else if let crate::view::node::ViewNode::Image {
-            data, w, h, ..
-        } = node_ref
-        {
+        } else if let crate::view::node::ViewNode::Image { data, w, h, .. } = node_ref {
             let r = node.computed.rect();
             elements.push(
                 crate::render::visual::LayeredElement::new(
@@ -250,7 +268,7 @@ impl Runtime {
                             (r.x + r.width) as f64,
                             (r.y + r.height) as f64,
                         ),
-                        data: std::sync::Arc::new(data.clone()),
+                        data: std::sync::Arc::clone(data),
                         width: *w,
                         height: *h,
                         opacity: None,
@@ -259,7 +277,7 @@ impl Runtime {
                 )
                 .with_id(id.as_ffi()),
             );
-        } else if let crate::view::node::ViewNode::Box { style, .. } = node_ref {
+        } else if let crate::view::node::ViewNode::Div { style, .. } = node_ref {
             let bg = if state.pressed && style.pressed_background.is_some() {
                 style.pressed_background
             } else if state.hovered && style.hover_background.is_some() {
@@ -269,6 +287,12 @@ impl Runtime {
             };
             if let Some(bg) = bg {
                 let r = node.computed.rect();
+                let mut fs = crate::render::visual::FillStrokeStyle::new().with_fill(bg);
+                if let Some(bc) = style.border_color {
+                    if style.border_width > 0.0 {
+                        fs = fs.with_stroke(bc, style.border_width as f64);
+                    }
+                }
                 elements.push(
                     crate::render::visual::LayeredElement::new(
                         crate::render::visual::VisualElement::RoundedRect {
@@ -279,7 +303,7 @@ impl Runtime {
                                 (r.y + r.height) as f64,
                             ),
                             radius: style.border_radius as f64,
-                            style: crate::render::visual::FillStrokeStyle::new().with_fill(bg),
+                            style: fs,
                         },
                         z_index,
                     )
@@ -287,7 +311,7 @@ impl Runtime {
                 );
             }
         }
-        // Flex / Listener 不产生渲染元素
+        // Canvas 当前为预留原语，不产生渲染元素。
 
         for child in &node.children {
             Self::cv(child, z_index, layers, elements, state);

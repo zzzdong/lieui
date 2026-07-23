@@ -11,6 +11,8 @@ pub mod view;
 
 pub mod prelude {
     // ── app ──
+    pub use crate::app::set_window_size;
+    pub use crate::app::window_size;
     pub use crate::app::Application;
     pub use crate::core::ElementId;
     pub use crate::render::visual::{LayeredElement, VisualElement};

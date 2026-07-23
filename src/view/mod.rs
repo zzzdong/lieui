@@ -4,12 +4,11 @@
 //!   primitives  — 直接映射 ViewNode 的基础块（Text, Container, Column, Row）
 //!   widget/     — 由原语组合的高阶组件（Button, Checkbox, Divider）
 
-pub mod callback;
+pub mod design_tokens;
 pub mod node;
 pub mod primitives;
 pub mod widget;
 
-pub use callback::*;
 pub use node::*;
 
 /// 所有 widget 均实现 `View`，通过 `build()` 把自身描述转换为原语组合。
