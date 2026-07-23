@@ -1,13 +1,14 @@
 //! EventManager — 事件管理器
 //!
-//! 管理焦点/悬停状态和事件分发。
-//! 使用 ElementId handle 而非直接引用。
+//! 管理焦点/悬停/捕获状态 + 事件分发 + ElementTree 交互状态更新。
+//! Application 只需将 winit 事件转发给此管理器，不再直接操作 tree state。
 
 use crate::core::ElementId;
 use crate::event::{
     Event, EventContext, EventEffects, EventPhase, HitTestResult, Key, Modifiers, MouseButton,
 };
 use crate::geometry::Point;
+use crate::runtime::element::ElementTree;
 
 /// 事件管理器
 pub struct EventManager {
@@ -41,40 +42,49 @@ impl EventManager {
         self.mouse_capture
     }
 
-    // ---- 清理 ----
+    // ---- 树状态辅助 ----
 
-    pub fn clear_focused(&mut self) {
-        self.focused = None;
+    fn set_hovered_state(tree: &ElementTree, id: Option<ElementId>, hovered: bool) {
+        let Some(id) = id else { return };
+        if tree.contains(id) {
+            let mut s = tree.state(id);
+            s.hovered = hovered;
+            tree.set_state(id, s);
+        }
     }
 
-    pub fn clear_hovered(&mut self) {
-        self.hovered = None;
+    fn set_pressed_state(tree: &ElementTree, id: Option<ElementId>, pressed: bool) {
+        let Some(id) = id else { return };
+        if tree.contains(id) {
+            let mut s = tree.state(id);
+            s.pressed = pressed;
+            tree.set_state(id, s);
+        }
     }
 
-    pub fn clear_mouse_capture(&mut self) {
-        self.mouse_capture = None;
-    }
-
-    // ---- 事件处理（存根：真正的分发逻辑在 Runtime 中通过 Layers 完成）----
+    // ---- 事件处理 ----
 
     /// 处理鼠标按下
-    ///
-    /// 由 Runtime 调用，传入 hit-test 结果。
     pub fn handle_mouse_down(
         &mut self,
         point: Point,
         button: MouseButton,
         hit: &HitTestResult,
+        tree: &ElementTree,
         mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         self.mouse_down = true;
         let mut effects = EventEffects::default();
 
-        // 处理焦点变化
+        // 焦点变化
         if self.focused != Some(hit.target) {
-            let focus_effects = self.handle_focus_change(Some(hit.target), &mut handler);
+            let focus_effects = self.handle_focus_change(Some(hit.target), tree, &mut handler);
             effects.merge(&focus_effects);
         }
+
+        // 设置 pressed 状态
+        Self::set_pressed_state(tree, self.hovered, false);
+        Self::set_pressed_state(tree, Some(hit.target), true);
 
         // 三阶段分发
         let mut ctx = EventContext::with_target(hit.target);
@@ -95,12 +105,15 @@ impl EventManager {
         point: Point,
         button: MouseButton,
         hit: &HitTestResult,
+        tree: &ElementTree,
         mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         let mut effects = EventEffects::default();
 
+        // 清除 pressed
+        Self::set_pressed_state(tree, self.mouse_capture.or(Some(hit.target)), false);
+
         if let Some(capture) = self.mouse_capture.take() {
-            // 直接分发给捕获的 element
             let mut ctx = EventContext::with_target(capture);
             let event = Event::MouseUp {
                 x: point.x,
@@ -110,7 +123,6 @@ impl EventManager {
             handler(capture, &event, &mut ctx);
             effects.merge(&ctx.take_effects());
 
-            // 检查点击
             if hit.target == capture {
                 let mut ctx = EventContext::with_target(capture);
                 handler(capture, &Event::Click { button }, &mut ctx);
@@ -139,11 +151,12 @@ impl EventManager {
         effects
     }
 
-    /// 处理鼠标移动
+    /// 处理鼠标移动（含 hover 状态管理）
     pub fn handle_mouse_move(
         &mut self,
         point: Point,
         hit: Option<&HitTestResult>,
+        tree: &ElementTree,
         mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         let mut effects = EventEffects::default();
@@ -166,11 +179,15 @@ impl EventManager {
         // 悬停状态变化
         let current_hover = hit.map(|h| h.target);
         if current_hover != self.hovered {
+            // 清除旧悬停
+            Self::set_hovered_state(tree, self.hovered, false);
             if let Some(prev) = self.hovered {
                 let mut ctx = EventContext::with_target(prev);
                 handler(prev, &Event::MouseLeave, &mut ctx);
                 effects.merge(&ctx.take_effects());
             }
+            // 设置新悬停
+            Self::set_hovered_state(tree, current_hover, true);
             if let Some(cur) = current_hover {
                 let mut ctx = EventContext::with_target(cur);
                 handler(cur, &Event::MouseEnter, &mut ctx);
@@ -211,6 +228,7 @@ impl EventManager {
     pub fn handle_focus_change(
         &mut self,
         new_focus: Option<ElementId>,
+        tree: &ElementTree,
         handler: &mut impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         let old_focus = self.focused;
@@ -224,12 +242,22 @@ impl EventManager {
             let mut ctx = EventContext::with_target(old_id);
             handler(old_id, &Event::FocusOut, &mut ctx);
             effects.merge(&ctx.take_effects());
+            if tree.contains(old_id) {
+                let mut s = tree.state(old_id);
+                s.focused = false;
+                tree.set_state(old_id, s);
+            }
         }
 
         if let Some(new_id) = new_focus {
             let mut ctx = EventContext::with_target(new_id);
             handler(new_id, &Event::FocusIn, &mut ctx);
             effects.merge(&ctx.take_effects());
+            if tree.contains(new_id) {
+                let mut s = tree.state(new_id);
+                s.focused = true;
+                tree.set_state(new_id, s);
+            }
         }
 
         self.focused = new_focus;
@@ -283,7 +311,6 @@ pub fn dispatch_three_phase(
     handler: &mut impl FnMut(ElementId, &Event, &mut EventContext),
     ctx: &mut EventContext,
 ) {
-    // Phase 1: Capture（从根到目标父级）
     for &id in hit.path.iter().rev().skip(1) {
         ctx.set_phase(EventPhase::Capture);
         handler(id, event, ctx);
@@ -292,14 +319,12 @@ pub fn dispatch_three_phase(
         }
     }
 
-    // Phase 2: Target
     ctx.set_phase(EventPhase::Target);
     handler(hit.target, event, ctx);
     if ctx.is_stopped() {
         return;
     }
 
-    // Phase 3: Bubble（从目标父级到根）
     for &id in hit.path.iter().rev().skip(1) {
         ctx.set_phase(EventPhase::Bubble);
         handler(id, event, ctx);

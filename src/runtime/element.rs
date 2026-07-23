@@ -3,9 +3,10 @@
 
 use crate::core::{ElementId, ElementState};
 use crate::layout::box_model::{ComputedLayout, IntrinsicSize};
-use crate::view::node::ViewNode;
+use crate::text::TextLayout;
+use crate::view::node::{LayoutStyle, NodeType, ViewNode};
 use slotmap::SlotMap;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 /// 运行时元素条目：存储 ViewNode（不含孩子）+ 布局/交互状态
 pub struct ElementEntry {
@@ -16,6 +17,8 @@ pub struct ElementEntry {
     pub parent: Option<ElementId>,
     pub children: Vec<ElementId>,
     pub interact: Cell<ElementState>,
+    /// 文本布局缓存（Text 节点专用），update_node 时清除，render 时复用
+    pub text_layout_cache: RefCell<Option<Box<TextLayout>>>,
 }
 
 pub struct ElementTree {
@@ -42,6 +45,7 @@ impl ElementTree {
             parent: None,
             children: Vec::new(),
             interact: Cell::new(ElementState::default()),
+            text_layout_cache: RefCell::new(None),
         })
     }
 
@@ -132,6 +136,7 @@ impl ElementTree {
         if let Some(e) = self.entries.get_mut(id) {
             e.node = without_children(new);
             e.dirty.set(true);
+            e.text_layout_cache = RefCell::new(None); // 清除文本布局缓存
         }
     }
 
@@ -200,6 +205,55 @@ impl ElementTree {
             .map(|e| e.node.config_eq(other))
             .unwrap_or(false)
     }
+
+    // ---- 布局辅助 ----
+
+    /// 快速获取节点的布局样式（通过 ViewNode.layout_style() 提取）
+    pub fn layout_style(&self, id: ElementId) -> LayoutStyle {
+        self.entries
+            .get(id)
+            .map(|e| e.node.layout_style())
+            .unwrap_or_default()
+    }
+
+    /// 获取节点类型
+    pub fn node_type_of(&self, id: ElementId) -> Option<NodeType> {
+        self.entries.get(id).map(|e| e.node.node_type())
+    }
+
+    /// 检查 dirty 标记
+    pub fn is_dirty(&self, id: ElementId) -> bool {
+        self.entries
+            .get(id)
+            .map(|e| e.dirty.get())
+            .unwrap_or(false)
+    }
+
+    /// 递归检查子树是否有 dirty 节点
+    pub fn subtree_has_dirty(&self, id: ElementId) -> bool {
+        if self.is_dirty(id) {
+            return true;
+        }
+        self.children_of(id)
+            .iter()
+            .any(|c| self.subtree_has_dirty(*c))
+    }
+
+    // ---- 文本布局缓存 ----
+
+    /// 获取文本布局缓存（Text 节点专用）
+    pub fn text_layout_cache(&self, id: ElementId) -> Option<Box<TextLayout>> {
+        self.entries
+            .get(id)
+            .and_then(|e| e.text_layout_cache.borrow_mut().take())
+    }
+
+    /// 设置文本布局缓存
+    pub fn set_text_layout_cache(&self, id: ElementId, layout: Box<TextLayout>) {
+        if let Some(e) = self.entries.get(id) {
+            *e.text_layout_cache.borrow_mut() = Some(layout);
+        }
+    }
 }
 impl Default for ElementTree {
     fn default() -> Self {
@@ -221,6 +275,9 @@ fn without_children(n: &ViewNode) -> ViewNode {
             align,
             spacing,
             expand,
+            flex_grow,
+            flex_shrink,
+            wrap,
             key,
             ..
         } => ViewNode::Flex {
@@ -229,6 +286,9 @@ fn without_children(n: &ViewNode) -> ViewNode {
             align: *align,
             spacing: *spacing,
             expand: *expand,
+            flex_grow: *flex_grow,
+            flex_shrink: *flex_shrink,
+            wrap: *wrap,
             key: key.clone(),
             children: vec![],
         },

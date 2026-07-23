@@ -12,4 +12,9 @@ impl ElementId {
     pub fn as_ffi(&self) -> u64 {
         self.0.as_ffi()
     }
+
+    /// 从 u64 重建 ElementId
+    pub fn from_u64(v: u64) -> Self {
+        Self(slotmap::KeyData::from_ffi(v))
+    }
 }

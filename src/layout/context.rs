@@ -1,13 +1,21 @@
-//! LayoutContext — 两遍法 Flex / Box 布局
-//! Phase 1: measure — 递归计算所有节点的固有尺寸
-//! Phase 2: layout — 递归计算位置（offset 传递累加）
+//! LayoutContext — FlexNode 驱动的布局上下文
+//!
+//! 使用新 FlexNode 引擎（移植自 Taitank）替代旧的简化布局实现。
 
 use crate::core::ElementId;
 use crate::geometry::{Point, Size};
-use crate::layout::flex::{AlignItems, FlexDirection, JustifyContent};
+use crate::layout::flex_node::FlexNode;
 use crate::layout::node::LayoutNode;
+use crate::layout::style::FlexStyle;
+use crate::layout::types::{
+    CSSDirection, Direction as LayoutDirection, Dimension, FlexAlign, FlexDirection,
+    FlexWrap as NewFlexWrap, PositionType as NewPositionType, 
+    VALUE_UNDEFINED,
+};
 use crate::layout::LayoutConstraint;
 use crate::runtime::element::ElementTree;
+use crate::view::node::{LayoutStyle, NodeType};
+use crate::layout::box_model::ComputedLayout;
 
 #[derive(Clone)]
 pub struct LayoutContext {
@@ -15,314 +23,201 @@ pub struct LayoutContext {
 }
 
 impl LayoutContext {
-    pub fn new() -> Self {
-        Self { root: None }
+    pub fn new() -> Self { Self { root: None } }
+
+    pub fn collect(&mut self, root_id: ElementId, tree: &ElementTree, prev: Option<&LayoutNode>) {
+        // 仅构建 LayoutNode 树结构（不含布局结果）
+        // 布局计算在 compute 中通过 FlexNode 引擎完成
+        self.root = Some(self.collect_layout_children(root_id, tree, prev));
     }
 
-    pub fn collect(&mut self, root_id: ElementId, tree: &ElementTree) {
-        self.root = Some(self.collect_node(root_id, tree));
-    }
+    fn collect_flex(&self, id: ElementId, tree: &ElementTree) -> FlexNode {
+        let st = Self::node_style(tree, id);
+        let nt = tree.get_node_ref(id).map(|n| n.node_type()).unwrap_or(NodeType::Box);
 
-    fn collect_node(&self, id: ElementId, tree: &ElementTree) -> LayoutNode {
-        let node = tree.get_node(id);
-        let intrinsic = node.measure(&LayoutConstraint::default());
-        tree.set_intrinsic(id, intrinsic);
+        let is_leaf = tree.children_of(id).is_empty();
+        let fs = Self::to_flex_style(&st, nt, is_leaf);
 
-        let style = node.layout_style();
-        let mut lnode = LayoutNode::new(id, style.node_type);
-        lnode.intrinsic = intrinsic;
-        lnode.style = style.box_style;
-        lnode.is_flex = style.node_type == crate::view::node::NodeType::Flex;
-        lnode.direction = style.flex.direction;
-        lnode.justify = style.flex.justify;
-        lnode.align = style.flex.align;
-        lnode.spacing = style.flex.spacing;
+        let mut fn_node = FlexNode::new(id.as_ffi(), fs);
 
-        for child_id in tree.children_of(id) {
-            lnode.children.push(self.collect_node(child_id, tree));
-        }
-        lnode
-    }
-
-    pub fn compute(&mut self, viewport: Size) {
-        if let Some(root) = &mut self.root {
-            let constraint = LayoutConstraint::tight(viewport.width, viewport.height);
-            Self::measure(root, constraint);
-            Self::layout(root, Point::zero());
-        }
-    }
-
-    fn measure(node: &mut LayoutNode, constraint: LayoutConstraint) {
-        if node.children.is_empty() {
-            node.computed.width = node
-                .intrinsic
-                .width
-                .max(constraint.min_width)
-                .min(constraint.max_width);
-            node.computed.height = node
-                .intrinsic
-                .height
-                .max(constraint.min_height)
-                .min(constraint.max_height);
-            return;
-        }
-
-        if node.is_flex {
-            Self::measure_flex(node, constraint);
-        } else {
-            Self::measure_box(node, constraint);
-        }
-    }
-
-    fn measure_box(node: &mut LayoutNode, constraint: LayoutConstraint) {
-        let pad = node.style.padding;
-        let inner_constraint = LayoutConstraint::loose((
-            (constraint.max_width - pad.horizontal()).max(0.0),
-            (constraint.max_height - pad.vertical()).max(0.0),
-        ));
-        for child in &mut node.children {
-            Self::measure(child, inner_constraint);
-        }
-
-        let max_child_w = node
-            .children
-            .iter()
-            .map(|c| c.computed.width)
-            .fold(0.0f32, f32::max);
-        let total_child_h: f32 = node.children.iter().map(|c| c.computed.height).sum();
-
-        let expand_self = node.style.expand;
-        node.computed.width = if expand_self {
-            constraint.max_width
-        } else {
-            node.style
-                .fixed_width
-                .unwrap_or(max_child_w + pad.horizontal())
-                .max(constraint.min_width)
-                .min(constraint.max_width)
-        };
-        node.computed.height = if expand_self {
-            constraint.max_height
-        } else {
-            node.style
-                .fixed_height
-                .unwrap_or(total_child_h + pad.vertical())
-                .max(constraint.min_height)
-                .min(constraint.max_height)
-        };
-    }
-
-    fn measure_flex(node: &mut LayoutNode, constraint: LayoutConstraint) {
-        let is_row = node.direction == FlexDirection::Row;
-        let spacing = node.spacing;
-        let pad = node.style.padding;
-        let pad_main = if is_row {
-            pad.horizontal()
-        } else {
-            pad.vertical()
-        };
-        let pad_cross = if is_row {
-            pad.vertical()
-        } else {
-            pad.horizontal()
-        };
-
-        // 1. 先按宽松约束测量所有子节点（留出 padding 后的可用空间）
-        let child_loose = LayoutConstraint::loose((
-            (constraint.max_width - pad.horizontal()).max(0.0),
-            (constraint.max_height - pad.vertical()).max(0.0),
-        ));
-        for child in &mut node.children {
-            Self::measure(child, child_loose);
-        }
-
-        // 2. 计算容器自身尺寸
-        let non_expand_m: f32 = node
-            .children
-            .iter()
-            .filter(|c| !c.style.expand)
-            .map(|c| Self::main(Size::new(c.computed.width, c.computed.height), is_row))
-            .sum();
-        let max_c: f32 = node
-            .children
-            .iter()
-            .map(|c| Self::cross(Size::new(c.computed.width, c.computed.height), is_row))
-            .fold(0.0f32, f32::max);
-        let gap = spacing * (node.children.len().saturating_sub(1) as f32);
-        let children_m = non_expand_m + gap + pad_main;
-        let max_c = max_c + pad_cross;
-        let expand_self = node.style.expand;
-        node.computed.width = if expand_self {
-            constraint.max_width
-        } else {
-            node.style
-                .fixed_width
-                .unwrap_or(if is_row { children_m } else { max_c })
-                .max(constraint.min_width)
-                .min(constraint.max_width)
-        };
-        node.computed.height = if expand_self {
-            constraint.max_height
-        } else {
-            node.style
-                .fixed_height
-                .unwrap_or(if is_row { max_c } else { children_m })
-                .max(constraint.min_height)
-                .min(constraint.max_height)
-        };
-
-        // 3. 重新测量 expand 子节点
-        let expand_count = node.children.iter().filter(|c| c.style.expand).count();
-        if expand_count > 0 {
-            if is_row {
-                let available_m =
-                    Self::main(Size::new(node.computed.width, node.computed.height), is_row)
-                        - non_expand_m
-                        - gap
-                        - pad_main;
-                let expand_m = available_m.max(0.0) / expand_count as f32;
-                let cross_size =
-                    Self::cross(Size::new(node.computed.width, node.computed.height), is_row)
-                        - pad_cross;
-                for child in node.children.iter_mut() {
-                    if child.style.expand {
-                        let w = child.style.fixed_width.unwrap_or(expand_m);
-                        let child_constraint = LayoutConstraint::new(w, w, 0.0, cross_size);
-                        Self::measure(child, child_constraint);
-                    }
-                }
-            } else {
-                let inner_w = node.computed.width - pad.horizontal();
-                let inner_h = node.computed.height - pad.vertical();
-                for child in node.children.iter_mut() {
-                    if child.style.expand {
-                        let h = child.style.fixed_height.unwrap_or(inner_h);
-                        let child_constraint = LayoutConstraint::new(0.0, inner_w.max(0.0), h, h);
-                        Self::measure(child, child_constraint);
-                    }
-                }
+        // 叶子节点: 测量 intrinsic size 并存储
+        if is_leaf {
+            if let Some(r) = tree.get_node_ref(id) {
+                let m = r.measure(&LayoutConstraint::default());
+                tree.set_intrinsic(id, m);
             }
+            let m = tree.intrinsic(id);
+            fn_node.intrinsic_size = Some((m.width, m.height));
         }
+
+        // 递归构建子树
+        for cid in tree.children_of(id) {
+            let child = self.collect_flex(cid, tree);
+            fn_node.children.push(child);
+        }
+
+        fn_node
     }
 
-    fn layout(node: &mut LayoutNode, offset: Point) {
-        node.computed.x = offset.x;
-        node.computed.y = offset.y;
-        if node.children.is_empty() {
-            return;
+    /// 仅构建 LayoutNode 树结构（不含布局结果），布局计算在 compute 中完成
+    fn collect_layout_children(
+        &self,
+        id: ElementId,
+        tree: &ElementTree,
+        prev: Option<&LayoutNode>,
+    ) -> LayoutNode {
+        let nt = tree.get_node_ref(id).map(|n| n.node_type()).unwrap_or(NodeType::Box);
+        let mut ln = LayoutNode::new(id, nt);
+        for cid in tree.children_of(id) {
+            ln.children.push(self.collect_layout_children(cid, tree, prev));
         }
-        if node.is_flex {
-            Self::layout_flex(node, offset);
-        } else {
-            Self::layout_box(node, offset);
-        }
+        ln
     }
 
-    fn layout_box(node: &mut LayoutNode, offset: Point) {
-        let pad = node.style.padding;
-        let inner_off = Point::new(offset.x + pad.left, offset.y + pad.top);
-        let mut cur_y = inner_off.y;
-        for child in node.children.iter_mut() {
-            Self::layout(child, Point::new(inner_off.x, cur_y));
-            cur_y += child.computed.height;
-        }
+    /// 执行布局计算
+    pub fn compute(&mut self, viewport: Size, tree: &ElementTree) {
+        if self.root.is_none() { return; }
+
+        // 第一步：构建 FlexNode 树
+        let root_id = self.root.as_ref().unwrap().id;
+        let mut flex_root = self.collect_flex(root_id, tree);
+
+        // 第二步：运行 FlexNode layout
+        flex_root.layout(
+            if viewport.width > 0.0 { viewport.width } else { VALUE_UNDEFINED },
+            if viewport.height > 0.0 { viewport.height } else { VALUE_UNDEFINED },
+            LayoutDirection::Ltr,
+        );
+
+        // 第三步：从 FlexNode 树构建 LayoutNode 树（含全局坐标转换）
+        self.root = Some(Self::flex_to_layout(&flex_root, tree, 0.0, 0.0));
     }
 
-    fn layout_flex(node: &mut LayoutNode, offset: Point) {
-        let is_row = node.direction == FlexDirection::Row;
-        let spacing = node.spacing;
-        let pad = node.style.padding;
-        let pad_main = if is_row {
-            pad.horizontal()
-        } else {
-            pad.vertical()
+    /// FlexNode 树 → LayoutNode 树（全局坐标 + 写入 ElementTree）
+    fn flex_to_layout(node: &FlexNode, tree: &ElementTree, offset_x: f32, offset_y: f32) -> LayoutNode {
+        let id = ElementId::from_u64(node.id);
+        let nt = tree.get_node_ref(id).map(|n| n.node_type()).unwrap_or(NodeType::Box);
+        let mut ln = LayoutNode::new(id, nt);
+
+        let global_x = offset_x + node.get_left();
+        let global_y = offset_y + node.get_top();
+        ln.computed = ComputedLayout {
+            x: global_x,
+            y: global_y,
+            width: node.get_width(),
+            height: node.get_height(),
         };
-        let inner_off = Point::new(offset.x + pad.left, offset.y + pad.top);
-        let n = node.children.len();
-        let total_m: f32 = node
-            .children
-            .iter()
-            .map(|c| Self::main(Size::new(c.computed.width, c.computed.height), is_row))
-            .sum();
-        let gap = spacing * (n.saturating_sub(1) as f32);
-        let pm =
-            Self::main(Size::new(node.computed.width, node.computed.height), is_row) - pad_main;
-        let free = (pm - total_m - gap).max(0.0);
-        let g = Self::gap(node.justify, free, n);
-        let start = Self::start(node.justify, 0.0, free, n);
-        let pc = if is_row {
-            node.computed.height - pad.vertical()
+        tree.set_layout(id, ln.computed);
+
+        for child in &node.children {
+            ln.children.push(Self::flex_to_layout(child, tree, global_x, global_y));
+        }
+        ln
+    }
+
+    /// LayoutStyle → FlexStyle 转换
+    fn to_flex_style(ls: &LayoutStyle, node_type: NodeType, _is_leaf: bool) -> FlexStyle {
+        let mut fs = if node_type == NodeType::Flex {
+            let mut s = FlexStyle::default();
+            s.flex_direction = match ls.flex.direction {
+                crate::layout::flex::FlexDirection::Row => FlexDirection::Row,
+                crate::layout::flex::FlexDirection::Column => FlexDirection::Column,
+            };
+            s.justify_content = Self::to_flex_justify(ls.flex.justify);
+            s.align_items = Self::to_flex_align(ls.flex.align);
+            s.item_space = ls.flex.spacing;
+            s.flex_grow = if ls.flex.expand { 1.0 } else { 0.0 };
+            s.flex_wrap = if ls.flex.wrap == crate::layout::flex::FlexWrap::Wrap {
+                NewFlexWrap::Wrap
+            } else {
+                NewFlexWrap::NoWrap
+            };
+            s
         } else {
-            node.computed.width - pad.horizontal()
+            FlexStyle::default()
         };
-        let mut cur = start;
-        for child in node.children.iter_mut() {
-            let cs = Self::main(
-                Size::new(child.computed.width, child.computed.height),
-                is_row,
-            );
-            let cc = Self::cross(
-                Size::new(child.computed.width, child.computed.height),
-                is_row,
-            );
-            let cross = match node.align {
-                AlignItems::Center => (pc - cc) / 2.0,
-                AlignItems::End => (pc - cc).max(0.0),
-                _ => 0.0,
-            };
-            let child_off = if is_row {
-                Point::new(inner_off.x + cur, inner_off.y + cross)
-            } else {
-                Point::new(inner_off.x + cross, inner_off.y + cur)
-            };
-            Self::layout(child, child_off);
-            cur += cs;
-            if let Some(gg) = g {
-                cur += gg;
-            } else {
-                cur += spacing;
-            }
+
+        // 公共属性
+        fs.dim[Dimension::Width as usize] = ls.box_style.fixed_width.unwrap_or(VALUE_UNDEFINED);
+        fs.dim[Dimension::Height as usize] = ls.box_style.fixed_height.unwrap_or(VALUE_UNDEFINED);
+        if ls.box_style.expand && fs.flex_grow == 0.0 {
+            fs.flex_grow = 1.0;
+        }
+
+        // padding
+        fs.set_padding(CSSDirection::Left, ls.box_style.padding.left);
+        fs.set_padding(CSSDirection::Top, ls.box_style.padding.top);
+        fs.set_padding(CSSDirection::Right, ls.box_style.padding.right);
+        fs.set_padding(CSSDirection::Bottom, ls.box_style.padding.bottom);
+
+        // margin
+        fs.set_margin(CSSDirection::Left, ls.box_style.margin.left);
+        fs.set_margin(CSSDirection::Top, ls.box_style.margin.top);
+        fs.set_margin(CSSDirection::Right, ls.box_style.margin.right);
+        fs.set_margin(CSSDirection::Bottom, ls.box_style.margin.bottom);
+
+        fs.node_type = if node_type == NodeType::Text {
+            crate::layout::types::NodeType::Text
+        } else {
+            crate::layout::types::NodeType::Default
+        };
+        fs.position_type = if ls.box_style.position_type == crate::layout::box_model::PositionType::Absolute {
+            NewPositionType::Absolute
+        } else {
+            NewPositionType::Relative
+        };
+
+        fs
+    }
+
+    fn to_flex_align(align: crate::layout::flex::AlignItems) -> FlexAlign {
+        match align {
+            crate::layout::flex::AlignItems::Start => FlexAlign::Start,
+            crate::layout::flex::AlignItems::Center => FlexAlign::Center,
+            crate::layout::flex::AlignItems::End => FlexAlign::End,
+            crate::layout::flex::AlignItems::Stretch => FlexAlign::Stretch,
         }
     }
 
-    fn main(s: Size, r: bool) -> f32 {
-        if r {
-            s.width
-        } else {
-            s.height
-        }
-    }
-    fn cross(s: Size, r: bool) -> f32 {
-        if r {
-            s.height
-        } else {
-            s.width
-        }
-    }
-    fn start(j: JustifyContent, s: f32, f: f32, _n: usize) -> f32 {
+    fn to_flex_justify(j: crate::layout::flex::JustifyContent) -> FlexAlign {
         match j {
-            JustifyContent::Center => s + f / 2.0,
-            JustifyContent::End => s + f,
-            _ => s,
+            crate::layout::flex::JustifyContent::Start => FlexAlign::Start,
+            crate::layout::flex::JustifyContent::Center => FlexAlign::Center,
+            crate::layout::flex::JustifyContent::End => FlexAlign::End,
+            crate::layout::flex::JustifyContent::SpaceBetween => FlexAlign::SpaceBetween,
+            crate::layout::flex::JustifyContent::SpaceAround => FlexAlign::SpaceAround,
+            crate::layout::flex::JustifyContent::SpaceEvenly => FlexAlign::SpaceEvenly,
         }
     }
-    fn gap(j: JustifyContent, f: f32, n: usize) -> Option<f32> {
-        match j {
-            JustifyContent::SpaceBetween if n > 1 => Some(f / (n - 1) as f32),
-            JustifyContent::SpaceAround => Some(f / n as f32),
-            JustifyContent::SpaceEvenly => Some(f / (n + 1) as f32),
-            _ => None,
-        }
+
+    fn node_style(tree: &ElementTree, id: ElementId) -> LayoutStyle {
+        tree.get_node_ref(id).map(|n| n.layout_style()).unwrap_or_default()
     }
 
     pub fn hit_test(&self, point: Point, _tree: &ElementTree) -> Option<ElementId> {
-        self.root
-            .as_ref()
-            .and_then(|r| r.hit_test_rec(point.x, point.y))
+        self.root.as_ref().and_then(|r| r.hit_test_rec(point.x, point.y))
+    }
+
+    pub fn dump_tree(&self) {
+        if let Some(ref root) = self.root {
+            Self::dump_node(root, 0);
+        }
+    }
+
+    fn dump_node(node: &LayoutNode, depth: usize) {
+        let indent = "  ".repeat(depth);
+        eprintln!(
+            "{}[{:?}] id={:?} pos=({:.1},{:.1}) size=({:.1},{:.1})",
+            indent, node.node_type, node.id,
+            node.computed.x, node.computed.y,
+            node.computed.width, node.computed.height,
+        );
+        for child in &node.children {
+            Self::dump_node(child, depth + 1);
+        }
     }
 }
+
 impl Default for LayoutContext {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

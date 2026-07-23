@@ -236,7 +236,14 @@ impl VelloRenderer {
                     .set_paint(AlphaColor::from_rgba8(200, 200, 200, 128));
                 self.ctx.fill_rect(bounds);
             }
-            VisualElement::Group { children, .. } => {
+            VisualElement::Group {
+                children,
+                clip_rect,
+                ..
+            } => {
+                // clip_rect: 仅在 gpu renderer (VelloRenderer) 中有效
+                // vello_cpu 暂不支持 layer clipping，直接绘制
+                let _ = clip_rect;
                 for c in children {
                     self.draw(&c.element);
                 }

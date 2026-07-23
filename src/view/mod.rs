@@ -1,8 +1,13 @@
-//! View 模块 — Builder 侧纯数据 UI 描述
+//! View 模块 — Widget / Primitive 全部实现 `View` trait
+//!
+//! 层次：
+//!   primitives  — 直接映射 ViewNode 的基础块（Text, Container, Column, Row）
+//!   widget/     — 由原语组合的高阶组件（Button, Checkbox, Divider）
 
 pub mod callback;
 pub mod node;
 pub mod primitives;
+pub mod widget;
 
 pub use callback::*;
 pub use node::*;
@@ -21,6 +26,13 @@ where
 {
     fn build(&self) -> ViewNode {
         (self)()
+    }
+}
+
+/// 已构建的 ViewNode 也可以作为 View 使用（允许 Container.child(built_node)）
+impl View for ViewNode {
+    fn build(&self) -> ViewNode {
+        self.clone()
     }
 }
 

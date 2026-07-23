@@ -22,8 +22,8 @@ name = "counter"
 path = "examples/counter.rs"
 
 [[example]]
-name = "builder_pdfkit"
-path = "examples/builder_pdfkit.rs"
+name = "pdfkit"
+path = "examples/pdfkit.rs"
 
 [[example]]
 name = "window"

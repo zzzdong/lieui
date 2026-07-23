@@ -118,7 +118,7 @@ pub enum VisualElement {
         style: FillStrokeStyle,
     },
     TextRun {
-        text: String,
+        text: Arc<str>,
         position: KPoint,
         color: Color,
         font_size: f64,
@@ -137,6 +137,7 @@ pub enum VisualElement {
     Group {
         children: Vec<LayeredElement>,
         transform: Option<Transform>,
+        clip_rect: Option<KRect>,
     },
 }
 
@@ -167,6 +168,7 @@ impl std::fmt::Debug for VisualElement {
             Self::Group {
                 children,
                 transform,
+                clip_rect: _,
             } => f
                 .debug_struct("Group")
                 .field("children", &children.len())
@@ -247,9 +249,11 @@ impl Clone for VisualElement {
             Self::Group {
                 children,
                 transform,
+                clip_rect,
             } => Self::Group {
                 children: children.clone(),
                 transform: *transform,
+                clip_rect: *clip_rect,
             },
         }
     }

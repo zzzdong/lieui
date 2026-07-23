@@ -70,6 +70,18 @@ impl LayoutNode {
         Some(self.id)
     }
 
+    pub fn find(&self, id: ElementId) -> Option<&LayoutNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &self.children {
+            if let Some(found) = child.find(id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     pub fn find_mut(&mut self, id: ElementId) -> Option<&mut LayoutNode> {
         if self.id == id {
             return Some(self);

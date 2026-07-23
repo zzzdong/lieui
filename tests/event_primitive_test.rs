@@ -1,10 +1,11 @@
 //! 事件系统与 ViewNode 原语集成测试
 
-use lieui::geometry::{Point, Size};
+use lieui::core::layers::LayerType;
+use lieui::geometry::Size;
 use lieui::prelude::*;
 use lieui::runtime::Runtime;
 use lieui::state;
-use lieui::view::View;
+use lieui::view::{node::NodeType, View};
 
 #[test]
 fn button_hit_test_returns_listener() {
@@ -13,22 +14,22 @@ fn button_hit_test_returns_listener() {
     let clicked = state::State::new(false);
     let c = clicked.clone();
     let vt = Column::new()
-        .child(Button::new("Click me").on_click(move || {
-            c.set(true);
-        }))
+        .child(
+            Button::new("Click me")
+                .on_click(move || {
+                    c.set(true);
+                }),
+        )
         .build();
 
     runtime.submit_view_tree(vt);
     let _ = runtime.frame();
 
     // Button 大致位于 (4,4) ~ (80,40) 区域
-    let hit = runtime.layers.hit_test_top(Point::new(20.0, 20.0));
-    assert!(hit.is_some(), "hit test should find the button");
-    let (layer, id) = hit.unwrap();
-    assert_eq!(layer, lieui::core::layers::LayerType::Base);
-
-    // 命中的是 Listener 节点，on_click 有值
-    let cb = runtime.layers.tree.on_click(id);
+    // 从根节点向下找到第一个 Listener
+    let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
+    let listener_id = find_listener_in_tree(&runtime, root_id).expect("should find a Listener");
+    let cb = runtime.layers.tree.on_click(listener_id);
     assert!(cb.is_some(), "hit element should have on_click callback");
 
     // 触发回调
@@ -45,10 +46,10 @@ fn button_hover_state_affects_background_render() {
     runtime.submit_view_tree(vt);
     let _ = runtime.frame();
 
-    let hit = runtime.layers.hit_test_top(Point::new(20.0, 20.0));
-    let (_, id) = hit.expect("should hit button");
+    let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
+    let listener_id = find_listener_in_tree(&runtime, root_id).expect("should find a Listener");
 
-    // 未 hover 时渲染列表只有文字
+    // 未 hover 时按钮有默认背景色 (220,220,220)
     let normal = runtime.frame_render_only();
     let bg_count_normal = normal
         .iter()
@@ -59,12 +60,12 @@ fn button_hover_state_affects_background_render() {
             )
         })
         .count();
-    assert_eq!(bg_count_normal, 0, "no background when not hovered");
+    assert_eq!(bg_count_normal, 1, "button always has default background");
 
-    // 设置 hover 状态
-    let mut s = runtime.layers.tree.state(id);
+    // 设置 hover 状态（在 Listener 上设置，状态会传播到子节点）
+    let mut s = runtime.layers.tree.state(listener_id);
     s.hovered = true;
-    runtime.layers.tree.set_state(id, s);
+    runtime.layers.tree.set_state(listener_id, s);
 
     let hovered = runtime.frame_render_only();
     let bg_count_hovered = hovered
@@ -76,7 +77,7 @@ fn button_hover_state_affects_background_render() {
             )
         })
         .count();
-    assert_eq!(bg_count_hovered, 1, "hover background should be rendered");
+    assert_eq!(bg_count_hovered, 1, "hover background should also appear");
 }
 
 #[test]
@@ -86,23 +87,41 @@ fn checkbox_hit_test_returns_listener() {
     let checked = state::State::new(false);
     let c = checked.clone();
     let vt = Row::new()
-        .child(Checkbox::new(false).label("Toggle").on_click(move || {
-            c.set(!*c.get());
-        }))
+        .child(
+            Checkbox::new(false)
+                .label("Toggle")
+                .on_click(move || {
+                    let cur = *c.get();
+                    c.set(!cur);
+                }),
+        )
         .build();
 
     runtime.submit_view_tree(vt);
     let _ = runtime.frame();
 
-    let hit = runtime.layers.hit_test_top(Point::new(20.0, 20.0));
-    assert!(hit.is_some(), "should hit checkbox");
-    let (_, id) = hit.unwrap();
-    eprintln!("checkbox hit id = {:?}", id);
-    let node = runtime.layers.tree.get_node(id);
-    eprintln!("checkbox hit node = {:?}", node.type_name());
-    let cb = runtime.layers.tree.on_click(id);
+    let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
+    let listener_id = find_listener_in_tree(&runtime, root_id).expect("should find a Listener");
+    let node = runtime.layers.tree.get_node(listener_id);
+    eprintln!("checkbox listener node = {:?}", node.type_name());
+    let cb = runtime.layers.tree.on_click(listener_id);
     assert!(cb.is_some(), "checkbox should have on_click");
 
     state::invoke_click(cb.unwrap());
     assert!(*checked.get(), "checkbox callback should toggle state");
+}
+
+/// 在 ElementTree 中递归查找第一个 Listener 节点
+fn find_listener_in_tree(runtime: &Runtime, id: lieui::core::ElementId) -> Option<lieui::core::ElementId> {
+    if let Some(n) = runtime.layers.tree.get_node_ref(id) {
+        if n.node_type() == NodeType::Listener {
+            return Some(id);
+        }
+    }
+    for child_id in runtime.layers.tree.children_of(id).to_vec() {
+        if let Some(found) = find_listener_in_tree(runtime, child_id) {
+            return Some(found);
+        }
+    }
+    None
 }

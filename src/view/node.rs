@@ -70,6 +70,9 @@ pub enum ViewNode {
         align: AlignItems,
         spacing: f32,
         expand: bool,
+        flex_grow: f32,
+        flex_shrink: f32,
+        wrap: crate::layout::flex::FlexWrap,
         key: Option<String>,
         children: Vec<ViewNode>,
     },
@@ -81,6 +84,21 @@ pub enum ViewNode {
 }
 
 impl ViewNode {
+    /// 返回可读的类型名称字符串（调试用）
+    pub fn node_type_name(&self) -> &'static str {
+        self.type_name()
+    }
+
+    pub fn node_type(&self) -> NodeType {
+        match self {
+            ViewNode::Text { .. } => NodeType::Text,
+            ViewNode::Image { .. } => NodeType::Image,
+            ViewNode::Box { .. } => NodeType::Box,
+            ViewNode::Flex { .. } => NodeType::Flex,
+            ViewNode::Listener { .. } => NodeType::Listener,
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             ViewNode::Text { .. } => "text",
@@ -140,6 +158,9 @@ impl ViewNode {
                 align,
                 spacing,
                 expand,
+                flex_grow,
+                flex_shrink,
+                wrap,
                 ..
             } => LayoutStyle {
                 node_type: NodeType::Flex,
@@ -149,6 +170,9 @@ impl ViewNode {
                     align: *align,
                     spacing: *spacing,
                     expand: *expand,
+                    flex_grow: *flex_grow,
+                    flex_shrink: *flex_shrink,
+                    wrap: *wrap,
                 },
                 ..LayoutStyle::default()
             },
@@ -228,6 +252,9 @@ impl ViewNode {
                     align: c,
                     spacing: d,
                     expand: e,
+                    flex_grow: fg,
+                    flex_shrink: fs,
+                    wrap: w,
                     ..
                 },
                 Flex {
@@ -236,9 +263,21 @@ impl ViewNode {
                     align: h,
                     spacing: i,
                     expand: j,
+                    flex_grow: fg2,
+                    flex_shrink: fs2,
+                    wrap: w2,
                     ..
                 },
-            ) => a == f && b == g && c == h && (d - i).abs() < 0.001 && e == j,
+            ) => {
+                a == f
+                    && b == g
+                    && c == h
+                    && (d - i).abs() < 0.001
+                    && e == j
+                    && (fg - fg2).abs() < 0.001
+                    && (fs - fs2).abs() < 0.001
+                    && w == w2
+            }
             (Listener { on_click: a, .. }, Listener { on_click: b, .. }) => a == b,
             _ => false,
         }
@@ -278,7 +317,7 @@ impl ViewNode {
                 elements.push(
                     LE::new(
                         VisualElement::TextRun {
-                            text: content.clone(),
+                            text: std::sync::Arc::from(content.as_str()),
                             position: kurbo::Point::new(r.x as f64, r.y as f64),
                             color: *color,
                             font_size: *font_size,

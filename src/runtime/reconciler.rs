@@ -55,7 +55,7 @@ impl Reconciler {
         let mut matched = Vec::new();
         let mut used = std::collections::HashSet::new();
         for (pos, child_node) in view_node.children().iter().enumerate() {
-            match self.find_match(child_node, &existing, &used, tree) {
+            match self.find_match(child_node, pos, &existing, &used, tree) {
                 Ok(id) => {
                     used.insert(id);
                     matched.push(id);
@@ -89,6 +89,7 @@ impl Reconciler {
     fn find_match(
         &self,
         view_node: &ViewNode,
+        position: usize,
         existing: &[ElementId],
         used: &std::collections::HashSet<ElementId>,
         tree: &ElementTree,
@@ -106,7 +107,14 @@ impl Reconciler {
                 }
             }
         }
-        // 2. key 未命中时按 type_name 回退
+        // 2. 位置优化：同位置 type_name 匹配，避免尾部追加时重排
+        if position < existing.len()
+            && !used.contains(&existing[position])
+            && tree.type_name(existing[position]) == Some(view_node.type_name())
+        {
+            return Ok(existing[position]);
+        }
+        // 3. key 未命中时按 type_name 回退（跨序查找）
         for id in existing {
             if used.contains(id) {
                 continue;
