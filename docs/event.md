@@ -1,3 +1,7 @@
+> ⚠️ **本文档已过时**（描述旧 `Widget` 事件架构与 `WWEvent`），与当前 `v2-rewrite` 实现不符。
+> 现行事件系统为 `event::manager`（`EventManager`）+ `event::propagation`（三阶段分发）+ `event::context`（`EventContext`）+ 全局线程局部 `CALLBACKS`。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # 事件系统文档
 
 ## 概述

@@ -1,5 +1,11 @@
 # LieUI v2 重构：C/S 架构 + Builder 驱动设计
 
+> ⚠️ 本文是 **v2 设计提案**。实现大体遵循本设计，但若干细节已偏离，请以 [`../guide.md`](../guide.md) 为准：
+> - 公开 API 为 `Application::new(builder: Fn() -> ViewNode, viewport).run()`，而非 `app.run(|ctx| …)` 的 `Context` builder（`ctx.column` / `col.text`）。
+> - UI 块实现 `View` trait（`fn build() -> ViewNode`），而非 `Widget` trait + `PropMap`。
+> - 回调存于全局线程局部 `CALLBACKS`，而非编码进 Props；事件分发的 `EventEffects` 当前被调用方丢弃（见 `audit.md` 1.2）。
+> - `key` 通过 `ViewExt::key(s)` 设置，reconciler 支持 `Create`/`Update`/`Remove`（无独立的 `MoveChild` 补丁）。
+
 > 本文档从零分析 lieui v1 现状，提出 v2 的 C/S 架构设计。
 > ——基于 Wayland 的 C/S 思想 + Rust 的所有权模型。
 

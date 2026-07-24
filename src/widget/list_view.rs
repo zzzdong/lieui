@@ -1,7 +1,7 @@
 use crate::layout::box_model::{BoxStyle, EdgeInsets};
 use crate::layout::flex::FlexStyle;
 use crate::state::State;
-use crate::view::design_tokens::semantic as t;
+use crate::theme;
 use crate::view::node::{DisplayMode, ViewNode};
 use crate::view::View;
 
@@ -43,6 +43,7 @@ impl ListView {
 
 impl View for ListView {
     fn build(&self) -> ViewNode {
+        let t = theme::current();
         let inner = match &self.child {
             Some(c) => c.build(),
             None => ViewNode::Div {
@@ -52,6 +53,7 @@ impl View for ListView {
                 key: None,
                 children: vec![],
                 listener: None,
+                interactive: false,
             },
         };
 
@@ -67,10 +69,11 @@ impl View for ListView {
             key: None,
             children: vec![inner],
             listener: None,
+            interactive: false,
         };
 
         let mut style = BoxStyle {
-            background_color: Some(t::BACKGROUND_SECONDARY_DEFAULT),
+            background_color: Some(t.background.secondary_default),
             ..BoxStyle::default()
         };
         if let Some(h) = self.height {
@@ -86,6 +89,7 @@ impl View for ListView {
             key: None,
             children: vec![offset_box],
             listener: None,
+            interactive: false,
         }
     }
 }

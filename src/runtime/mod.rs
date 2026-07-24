@@ -44,6 +44,16 @@ impl Runtime {
         self.needs_render = true;
     }
 
+    /// 请求在下一次 frame 时重排（由事件回调的 `EventEffects` 触发）
+    pub fn request_layout(&mut self) {
+        self.needs_layout = true;
+    }
+
+    /// 请求在下一次 frame 时重新生成渲染树（由事件回调的 `EventEffects` 触发）
+    pub fn request_render(&mut self) {
+        self.needs_render = true;
+    }
+
     pub fn frame(&mut self) -> Vec<LayeredElement> {
         if state::take_rebuild_requested() || self.pending_view_tree.is_some() {
             if let Some(vt) = self.pending_view_tree.take() {
@@ -162,11 +172,25 @@ impl Runtime {
         self.build_render_tree()
     }
 
+    /// 增量视觉更新：必要时重排，然后重新生成渲染树。
+    /// 用于事件回调通过 `EventEffects` 请求 layout/render 的增量更新场景
+    /// （如 `ctx.request_layout()` / `ctx.request_render()`）。
+    pub fn frame_visual_update(&mut self) -> Vec<LayeredElement> {
+        if self.needs_layout {
+            self.perform_layout();
+            self.needs_layout = false;
+        }
+        self.needs_render = false;
+        self.debug_stats.element_count = self.layers.tree.len();
+        self.build_render_tree()
+    }
+
     fn perform_layout(&mut self) {
         for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
             if let Some(rid) = self.layers.layer_root(lt) {
                 let mut ctx = LayoutContext::new();
-                // 通过 with_layout 获取上帧的 LayoutContext 引用，用于增量复用
+                // 注意：当前 `collect` 并不会真正增量复用上帧的 LayoutContext，
+                // 而是每帧全量重建（prev 仅作为参数占位传入），未来可作性能优化。
                 self.layers.with_layout(lt, |prev| {
                     ctx.collect(rid, &self.layers.tree, prev.root.as_ref());
                 });
@@ -210,9 +234,9 @@ impl Runtime {
             Some(n) => n,
             None => return,
         };
-        // 节点自身附带 listener 时使用自身交互状态，否则继承父节点状态。
+        // 交互组件根（interactive）使用自身交互状态，否则继承父节点状态。
         // 这样 Button/Checkbox 等组件的背景/子节点能随 hover/pressed 更新。
-        let state = if node_ref.listener().is_some() {
+        let state = if node_ref.is_interactive() {
             layers.tree.state(id)
         } else {
             inherited_state
@@ -227,12 +251,17 @@ impl Runtime {
         } = node_ref
         {
             let r = node.computed.rect();
-            // 尝试从缓存复用 TextLayout，避免重复布局
-            let lay = match layers.tree.text_layout_cache(id) {
+            // 复用 TextLayout 缓存，避免每帧重新排版：
+            // 命中时 peek 返回克隆（直接给 TextRun 使用），未命中时才创建并写入缓存一次。
+            let lay = match layers.tree.peek_text_layout_cache(id) {
                 Some(cached) => cached,
-                None => Box::new(crate::text::create_text_layout(
-                    content, *font_size, *color, None,
-                )),
+                None => {
+                    let lay = Box::new(crate::text::create_text_layout(
+                        content, *font_size, *color, None,
+                    ));
+                    layers.tree.set_text_layout_cache(id, lay.clone());
+                    lay
+                }
             };
             elements.push(
                 crate::render::visual::LayeredElement::new(
@@ -249,13 +278,6 @@ impl Runtime {
                     z_index,
                 )
                 .with_id(id.as_ffi()),
-            );
-            // 缓存新的 TextLayout 供下次使用（update_node 时会清除缓存）
-            layers.tree.set_text_layout_cache(
-                id,
-                Box::new(crate::text::create_text_layout(
-                    content, *font_size, *color, None,
-                )),
             );
         } else if let crate::view::node::ViewNode::Image { data, w, h, .. } = node_ref {
             let r = node.computed.rect();

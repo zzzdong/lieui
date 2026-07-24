@@ -49,6 +49,15 @@ impl LayoutContext {
             if let Some(r) = tree.get_node_ref(id) {
                 let m = r.measure(&LayoutConstraint::default());
                 tree.set_intrinsic(id, m);
+                // 记录文本排版内容，供布局时按约束宽度重新测量（支持换行）
+                if let crate::view::node::ViewNode::Text {
+                    content,
+                    font_size,
+                    ..
+                } = r
+                {
+                    fn_node.measure_text = Some((content.clone(), *font_size));
+                }
             }
             let m = tree.intrinsic(id);
             fn_node.intrinsic_size = Some((m.width, m.height));

@@ -1,3 +1,6 @@
+> ⚠️ **本文档已过时**（描述的是一次**已完成的**重构计划，且目标架构为旧 `Widget`/`WidgetTree`/`ViewContext` 模型）。当前 `v2-rewrite` 实际落地的架构为 `runtime` 协调器 + `view::ViewNode`（`View` trait）+ `ElementTree`，与之不同。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # LieUI 重构改造计划
 
 > 基于对全部源码和现有文档的深入评审，本文档给出分阶段的架构优化方案。

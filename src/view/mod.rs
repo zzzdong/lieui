@@ -1,13 +1,9 @@
-//! View 模块 — Widget / Primitive 全部实现 `View` trait
+//! View 模块 — `ViewNode` 数据与 `View` trait
 //!
-//! 层次：
-//!   primitives  — 直接映射 ViewNode 的基础块（Text, Container, Column, Row）
-//!   widget/     — 由原语组合的高阶组件（Button, Checkbox, Divider）
+//! `ViewNode` 是 UI 的纯数据原语枚举；所有组件（Text/Image/Container/Button...）
+//! 都实现 `View` trait，由 `build()` 产出 `ViewNode`，统一位于顶层的 `widget` 模块。
 
-pub mod design_tokens;
 pub mod node;
-pub mod primitives;
-pub mod widget;
 
 pub use node::*;
 

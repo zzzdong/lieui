@@ -63,6 +63,7 @@ impl ElementTree {
                 color: crate::geometry::Color::TRANSPARENT,
                 key: None,
                 listener: None,
+                interactive: false,
             })
     }
 
@@ -239,11 +240,13 @@ impl ElementTree {
 
     // ---- 文本布局缓存 ----
 
-    /// 获取文本布局缓存（Text 节点专用）
-    pub fn text_layout_cache(&self, id: ElementId) -> Option<Box<TextLayout>> {
+    /// 读取文本布局缓存（Text 节点专用）。
+    /// 仅克隆返回给调用方使用，**不移除**缓存，避免每帧重建渲染树时
+    /// take→clone→set 的额外开销（parley::Layout 在 debug 下 clone 极贵）。
+    pub fn peek_text_layout_cache(&self, id: ElementId) -> Option<Box<TextLayout>> {
         self.entries
             .get(id)
-            .and_then(|e| e.text_layout_cache.borrow_mut().take())
+            .and_then(|e| e.text_layout_cache.borrow().clone())
     }
 
     /// 设置文本布局缓存
@@ -268,6 +271,7 @@ fn without_children(n: &ViewNode) -> ViewNode {
             display,
             key,
             listener,
+            interactive,
             ..
         } => ViewNode::Div {
             style: style.clone(),
@@ -276,6 +280,7 @@ fn without_children(n: &ViewNode) -> ViewNode {
             key: key.clone(),
             children: vec![],
             listener: *listener,
+            interactive: *interactive,
         },
         ViewNode::Text {
             content,
@@ -283,12 +288,14 @@ fn without_children(n: &ViewNode) -> ViewNode {
             color,
             key,
             listener,
+            interactive,
         } => ViewNode::Text {
             content: content.clone(),
             font_size: *font_size,
             color: *color,
             key: key.clone(),
             listener: *listener,
+            interactive: *interactive,
         },
         ViewNode::Image {
             data,
@@ -296,16 +303,23 @@ fn without_children(n: &ViewNode) -> ViewNode {
             h,
             key,
             listener,
+            interactive,
         } => ViewNode::Image {
             data: std::sync::Arc::clone(data),
             w: *w,
             h: *h,
             key: key.clone(),
             listener: *listener,
+            interactive: *interactive,
         },
-        ViewNode::Canvas { key, listener } => ViewNode::Canvas {
+        ViewNode::Canvas {
+            key,
+            listener,
+            interactive,
+        } => ViewNode::Canvas {
             key: key.clone(),
             listener: *listener,
+            interactive: *interactive,
         },
     }
 }

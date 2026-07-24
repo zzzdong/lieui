@@ -1,3 +1,7 @@
+> ⚠️ **本文档已过时**（描述旧 `Widget`/`RenderNode` 架构），与当前 `v2-rewrite` 实现不符。
+> 现行渲染管线入口为 `runtime::cv` → `LayeredElement`/`VisualElement` → `VelloRenderer`（vello_cpu 软件光栅化）→ `Application::blit_to_window`（softbuffer）。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # 渲染系统文档
 
 ## 概述

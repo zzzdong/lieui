@@ -1,501 +1,193 @@
-# LieUI 架构指南
+# LieUI 开发指南（v2）
 
-## 项目概述
+LieUI 是一个 Rust 声明式即时模式（rebuilt-per-frame）GUI 库，基于 [winit] + [softbuffer] 窗口、`vello_cpu` 软件光栅化渲染，布局使用对 [Taitank] 的忠实移植（Flexbox）。
 
-**LieUI** 是一个极简 Rust GUI 库，采用**声明式布局** + **两阶段布局计算**架构。
-
-**核心原则**：**简化设计优先**——最少概念、最少代码、最直观 API
-
-**技术栈**：
-- **渲染后端**：vello_cpu（CPU 矢量渲染）
-- **文本布局**：parley（Linebender 官方文本引擎）
-- **窗口/事件**：winit（跨平台窗口与事件循环）
+> 历史文档（`docs/architecture.md`、`docs/widget.md`、`docs/render.md`、`docs/event.md`、`docs/layout.md`、`docs/text.md`、`docs/refactoring_plan.md`）描述的是**旧版 `Widget` 架构**，与当前实现不符，仅供考古。本文档是现行权威。
 
 ---
 
-## 一、核心架构
-
-### 1.1 三棵树设计
-
-| 树 | 职责 | 生命周期 | 位置 |
-|:---|:---|:---|:---|
-| **WidgetTree** | 用户创建的组件树，持有状态 | 持久化 | `widget::tree::WidgetTree` |
-| **LayoutTree** | 布局约束和计算结果 | 持久化（可增量更新） | `layout::context::LayoutContext` |
-| **RenderTree** | 渲染指令描述 | 每帧重建 | 由 `build_render_tree()` 生成 |
-
-### 1.2 核心类型
+## 1. 30 秒上手
 
 ```rust
-// 1. Widget - 用户定义的组件
-trait Widget {
-    fn layout(&self, id: WidgetId) -> LayoutNode;  // 返回约束
-    fn render(&self, layout: &LayoutNode, ctx: &ViewContext) -> RenderNode;
-    fn handle_event(&mut self, event: &Event) -> EventResult;
-}
-
-// 2. LayoutNode - 布局约束节点
-struct LayoutNode {
-    widget_id: WidgetId,
-    box_style: BoxStyle,        // CSS Box 模型
-    flex_style: Option<FlexStyle>, // Flex 布局配置
-    intrinsic_size: IntrinsicSize, // 固有尺寸
-    children: Vec<LayoutNode>,
-    computed: Option<ComputedLayout>, // 计算结果
-}
-
-// 3. RenderNode - 渲染节点
-enum RenderNode {
-    View { bounds: Rect },
-    Div { bounds: Rect, style: DivStyle },
-    Text { bounds: Rect, layout: TextLayout },
-}
-```
-
----
-
-## 二、布局系统
-
-### 2.1 两阶段布局
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     阶段 1: 约束收集                           │
-│                                                              │
-│   Widget::layout(id) → LayoutNode {                          │
-│       box_style: ...,     // margin/padding/border           │
-│       flex_style: ...,    // direction/align/justify         │
-│       intrinsic_size: ..., // Fixed 或 Measurable            │
-│       children: [...],    // 递归收集子节点                   │
-│       computed: None,     // 尚未计算                        │
-│   }                                                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     阶段 2: 位置计算                           │
-│                                                              │
-│   LayoutContext::compute(node, position, available)          │
-│                                                              │
-│   1. 计算 content_size（使用 intrinsic_size）                 │
-│   2. 应用 Box 模型（margin/border/padding）                   │
-│   3. 如果是 Flex 容器，计算子元素位置                          │
-│   4. 递归计算子节点                                           │
-│                                                              │
-│   → 填充 computed: ComputedLayout {                          │
-│       content_box: Rect,    // 内容区域                       │
-│       padding_box: Rect,    // padding 区域                   │
-│       border_box: Rect,     // border 区域                    │
-│       margin_box: Rect,     // margin 区域                    │
-│   }                                                          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 2.2 CSS Box 模型
-
-```rust
-// layout/box_model.rs
-pub struct BoxStyle {
-    pub margin: EdgeInsets,
-    pub padding: EdgeInsets,
-    pub border: EdgeInsets,
-    pub min_size: Size,
-    pub max_size: Size,
-}
-
-pub struct EdgeInsets {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
-}
-
-pub struct ComputedLayout {
-    pub content_box: Rect,   // 内容区域（排除 padding/border/margin）
-    pub padding_box: Rect,   // 包含 padding
-    pub border_box: Rect,    // 包含 border
-    pub margin_box: Rect,    // 包含 margin
-}
-```
-
-### 2.3 Flex 布局
-
-```rust
-// layout/flex.rs
-pub struct FlexStyle {
-    pub direction: FlexDirection,      // Row | Column
-    pub justify_content: JustifyContent, // Start | Center | End | SpaceBetween | ...
-    pub align_items: AlignItems,       // Start | Center | End | Stretch
-    pub gap: f32,
-}
-
-pub enum FlexDirection { Row, Column }
-pub enum JustifyContent { Start, Center, End, SpaceBetween, SpaceAround, SpaceEvenly }
-pub enum AlignItems { Start, Center, End, Stretch }
-```
-
-### 2.4 固有尺寸（IntrinsicSize）
-
-```rust
-// layout/node.rs
-pub enum IntrinsicSize {
-    Fixed(Size),                    // 固定尺寸
-    Measurable(Box<dyn Measurable>), // 动态测量（如 Text）
-}
-
-// layout/measurable.rs
-pub trait Measurable: Send + Sync {
-    fn measure(&self, max_width: Option<f32>) -> Size;
-}
-
-// Text 测量实现
-pub struct TextMeasure {
-    pub content: String,
-    pub style: TextStyle,
-}
-
-impl Measurable for TextMeasure {
-    fn measure(&self, max_width: Option<f32>) -> Size {
-        // 使用 parley 测量文本尺寸
-    }
-}
-```
-
----
-
-## 三、Widget 开发指南
-
-### 3.1 创建新 Widget
-
-```rust
+use lieui::geometry::{Color, Size};
+use lieui::layout::flex::{AlignItems, JustifyContent};
 use lieui::prelude::*;
+use lieui::state::State;
+use lieui::view::View;
 
-pub struct MyWidget {
-    bounds: Rect,
-    // 状态字段
+fn main() {
+    let count = State::new(0);
+
+    let app = Application::new(
+        move || {
+            Row::new()
+                .expand(true)
+                .justify_content(JustifyContent::Center)
+                .align_items(AlignItems::Center)
+                .child(
+                    Column::new()
+                        .spacing(16.0)
+                        .expand(true)
+                        .justify_content(JustifyContent::Center)
+                        .align_items(AlignItems::Center)
+                        .child(Text::new("Counter").font_size(48.0))
+                        .child(Text::new(format!("{}", count.get())).font_size(72.0).color(Color::RED))
+                        .child(
+                            Row::new()
+                                .spacing(12.0)
+                                .child(Button::new("-1").on_click({
+                                    let c = count.clone();
+                                    move || c.update(|v| *v -= 1)
+                                }))
+                                .child(Button::new("+1").on_click({
+                                    let c = count.clone();
+                                    move || c.update(|v| *v += 1)
+                                })),
+                        ),
+                )
+                .build()
+        },
+        Size::new(400.0, 300.0),
+    );
+
+    app.run();
 }
+```
 
-impl MyWidget {
-    pub fn new() -> Self {
-        Self {
-            bounds: Rect::zero(),
-        }
-    }
+核心三步：
+1. 用 `State::new` 持有可变状态。
+2. `Application::new(builder, viewport)` 传入一个返回 `ViewNode` 的闭包；闭包里用 `Column`/`Row`/`Button`/`Text` 等组合 UI。
+3. `app.run()` 启动事件循环。状态变化时调用 `request_rebuild()`（或 `State::update` 内部自动触发）即可重绘。
+
+---
+
+## 2. 核心概念
+
+### 2.1 `View` trait 与 `ViewNode`
+所有 UI 块都实现 `View`：
+
+```rust
+pub trait View {
+    fn build(&self) -> ViewNode;
 }
+```
 
-impl Widget for MyWidget {
-    crate::impl_widget_any!(MyWidget);
+`ViewNode` 是一个枚举（`Text` / `Div` / `Image` / `Canvas`），是 UI 的**唯一**中间表示。`Column`/`Row`/`Button`/`Container`/`Text`/`Image` 这些原语只是 `ViewNode` 的便捷构造器；用户也能为自定义组件实现 `View`：
 
-    fn type_name(&self) -> &'static str {
-        "MyWidget"
-    }
-
-    // ========== 布局 ==========
-    fn layout(&self, id: WidgetId) -> LayoutNode {
-        LayoutNode::new(id)
-            .with_box_style(BoxStyle {
-                padding: EdgeInsets::all(10.0),
-                ..Default::default()
-            })
-            .with_intrinsic_size(IntrinsicSize::Fixed(Size::new(100.0, 50.0)))
-    }
-
-    // ========== 渲染 ==========
-    fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
-        if let Some(computed) = &layout.computed {
-            RenderNode::div(computed.content_box)
-                .background("#3366CC")
-        } else {
-            RenderNode::view(Rect::zero())
-        }
-    }
-
-    // ========== 事件 ==========
-    fn handle_event(&mut self, _event: &Event) -> EventResult {
-        EventResult::Continue
-    }
-
-    fn bounds(&self) -> Option<Rect> {
-        Some(self.bounds)
+```rust
+struct Label { text: String }
+impl View for Label {
+    fn build(&self) -> ViewNode {
+        Text::new(self.text.clone()).color(Color::WHITE).build()
     }
 }
 ```
 
-### 3.2 容器 Widget（带 children）
+闭包 `Fn() -> ViewNode` 本身也实现了 `View`，因此 `Container::child(|| Text::new("hi"))` 也合法。
+
+### 2.2 `Application` 与渲染管线
+`Application::new(builder, viewport).run()`：
+- 每帧（重建触发时）调用 `builder()` 得到一棵 `ViewNode` 树；
+- `Runtime::submit_view_tree` + `reconciler` 与上一次树做 diff，更新 `ElementTree`；
+- `perform_layout` 把 `ViewNode` 树（经 `to_flex_style` 转换）喂给 Flex 布局引擎，得到每个节点的 `ComputedLayout`；
+- `cv` 把布局 + 状态（hover/pressed）+ 样式展开成 `LayeredElement` 列表（z 序由图层决定）；
+- `VelloRenderer` 软件渲染成 pixmap，`blit_to_window` 拷到 softbuffer 表面。
+
+> 仅**鼠标移动**（hover 变化）时走轻量的 `frame_render_only`，不再重建整树；其他变更走完整重建。
+
+### 2.3 状态 `State<T>`
+`State<T>` 是一个 `Rc<RefCell<T>>` 包装：
+
+| 操作 | 说明 |
+|------|------|
+| `State::new(v)` | 创建 |
+| `s.get()` | 读（`&T`） |
+| `s.set(v)` | 写并触发 `request_rebuild()` |
+| `s.update(|v| …)` | 闭包内修改并触发重建 |
+| `s.clone()` | 复制句柄，在闭包里捕获 |
+| `state::clear_state(id)` | 按 id 清除（当前公开 API 未暴露 id 访问） |
+
+闭包在每次重建时重新执行，因此 `count.get()` 总是读到最新值。
+
+### 2.4 事件与回调
+- 命中测试 `hit_test_top` 在三层（Modal → Overlay → Base）中找最顶层、最内层节点。
+- `EventManager` 做三阶段分发（捕获 → 目标 → 冒泡，沿 `path` 遍历）。
+- 给节点加 `.on_click(closure)` 或 `.on_click_with_ctx(|ctx| …)`：
+  - `Simple`：点击即执行，`Simple` 类型会自动 `stop_propagation`。
+  - `WithCtx`：回调收到 `&mut EventContext`，可调用 `ctx.stop_propagation()`、读 `ctx.phase()`。
+  - ✅ **已修复**：`ctx.request_rebuild()/request_layout()/request_render()` 现在会在事件循环中被应用（触发重建 / 重排 / 重绘）。
+- 点击只会在 **Target / Bubble** 阶段触发（捕获阶段不触发 `Click`）。
+
+> ✅ **已修复**：hover/pressed 状态现作用在最深层命中节点向上找到的「最近带 listener 的祖先」（交互节点）上，`Button` 的 hover/pressed 背景反馈正常显示（见 `docs/audit.md` 1.1）。
+
+### 2.5 布局（Flexbox）
+`Column`/`Row` 映射为 `ViewNode::Div` + `DisplayMode::Flex`：
+
+| 方法 | 作用 |
+|------|------|
+| `.expand(true)` | 在主轴方向填满父容器（等价于 `flex_grow=1`） |
+| `.spacing(f32)` | 子项间距 |
+| `.justify_content(JustifyContent::*)` | 主轴对齐 |
+| `.align_items(AlignItems::*)` | 交叉轴对齐（默认 `Stretch`） |
+| `.center()` | 主轴+交叉轴居中并 `expand(true)` |
+
+`Container` 映射为 `ViewNode::Div` + `DisplayMode::Block`，支持 `.width()/.height()/.background()/.padding()/.border_radius()`。
+布局引擎是 Taitank 风格移植，支持 `flex_grow`/`flex_shrink`、换行、padding/border/margin。
+
+> ✅ **已修复**：文本在约束宽度下会重新排版以支持换行（见 `docs/audit.md` 2.2）。注意：处于 `Row`（主轴水平）且宽度不受限时文本仍按单行处理；内部 `FlexStyle` 的 `flex_shrink` 默认 0 保持不变，因此在 `NoWrap` 行内挤占过满时仍可能溢出——需给容器设定宽度或改用 `Column`。
+
+### 2.6 图层（Base / Overlay / Modal）
+通过顶层函数弹出覆盖层：
 
 ```rust
-pub struct MyContainer {
-    children: Vec<WidgetId>,
-    bounds: Rect,
-}
-
-impl Widget for MyContainer {
-    crate::impl_widget_any!(MyContainer);
-
-    fn layout(&self, id: WidgetId) -> LayoutNode {
-        let mut node = LayoutNode::new(id)
-            .with_flex(FlexStyle::column()
-                .align(AlignItems::Center)
-                .justify(JustifyContent::Center)
-                .gap(10.0));
-
-        // 添加子节点
-        for &child_id in &self.children {
-            // 子节点由 LayoutContext::collect_node 递归收集
-        }
-
-        node
-    }
-
-    fn children(&self) -> &[WidgetId] {
-        &self.children
-    }
-
-    fn children_mut(&mut self) -> &mut Vec<WidgetId> {
-        &mut self.children
-    }
-}
+show_overlay(some_view_node);   // 在 Base 之上显示
+show_modal(some_view_node);     // 在最顶层显示，且优先命中
+hide_overlay();
+hide_modal();
 ```
 
-### 3.3 文本 Widget
+命中测试按 `Modal → Overlay → Base` 优先级返回最顶层节点，因此 modal 会拦截其范围内的点击。
+
+### 2.7 Reconciler 与 key
+每次重建产生新 `ViewNode` 树，reconciler 与旧树 diff：
+- 优先按 `key` 匹配（`ViewExt::key`，见下）；
+- 无 key 时按「节点类型 + 位置」匹配，并复用原 `ElementId` 以保留布局/状态/回调。
+- 动态列表**务必**使用 key，否则重排可能产生错误视觉顺序（见 `docs/audit.md` 4）。
 
 ```rust
-pub struct Text {
-    content: String,
-    style: TextStyle,
-}
-
-impl Widget for Text {
-    fn layout(&self, id: WidgetId) -> LayoutNode {
-        // 使用 TextMeasure 动态测量文本尺寸
-        let measure = TextMeasure::new(self.content.clone(), self.style.clone());
-
-        LayoutNode::new(id)
-            .with_intrinsic_size(IntrinsicSize::Measurable(Box::new(measure)))
-    }
-
-    fn render(&self, layout: &LayoutNode, _ctx: &ViewContext) -> RenderNode {
-        if let Some(computed) = &layout.computed {
-            let text_layout = self.do_layout(Some(computed.content_box.width));
-            RenderNode::text(computed.content_box, text_layout)
-        } else {
-            RenderNode::view(Rect::zero())
-        }
-    }
-}
+use lieui::view::ViewExt;
+// 给列表项加稳定 key：
+Column::new().child(item_view.key(format!("row-{i}")))
 ```
 
 ---
 
-## 四、事件系统
+## 3. 公开 API 速查
 
-### 4.1 事件类型
+预导入：`use lieui::prelude::*;` 包含 `Application`、`State`、`Column`、`Row`、`Text`、`Button`、`Container`、`Image`、`Color`、`Size`、`Point`、`Rect`、`JustifyContent`、`AlignItems`、`FlexDirection`、`FlexWrap`、`LayeredElement`、`VisualElement`、`View`。
 
-```rust
-pub enum Event {
-    MouseMove { x: f32, y: f32 },
-    MouseDown { button: MouseButton, x: f32, y: f32 },
-    MouseUp { button: MouseButton, x: f32, y: f32 },
-    MouseWheel { delta: f32, x: f32, y: f32 },
-    KeyDown { key: Key },
-    KeyUp { key: Key },
-    TextInput { text: String },
-    FocusIn,
-    FocusOut,
-}
-```
-
-### 4.2 事件处理
-
-```rust
-impl Widget for Button {
-    fn handle_event(&mut self, event: &Event) -> EventResult {
-        match event {
-            Event::MouseDown { button: MouseButton::Left, .. } => {
-                self.pressed = true;
-                EventResult::Stop  // 停止传播
-            }
-            Event::MouseUp { button: MouseButton::Left, .. } => {
-                if self.pressed {
-                    self.pressed = false;
-                    // 触发点击回调
-                }
-                EventResult::Stop
-            }
-            _ => EventResult::Continue,  // 继续传播
-        }
-    }
-}
-```
-
-### 4.3 事件传播
-
-```
-Capture Phase（捕获）:  Root → Parent → Target
-                           ↓
-                    Widget::handle_event
-                           ↓
-Bubble Phase（冒泡）:   Target → Parent → Root
-```
+| 类别 | 符号 |
+|------|------|
+| 入口 | `Application::new(builder, viewport).run()` |
+| 状态 | `State::new/get/set/update/clone`、`request_rebuild()`、`request_redraw()` |
+| 图层 | `show_overlay(ViewNode)`、`show_modal(ViewNode)`、`hide_overlay()`、`hide_modal()` |
+| 原语 | `Text::new(s)`、`Image::from_rgba(data,w,h)`、`Container::new()`、`Column::new()`、`Row::new()` |
+| 组件 | `Button::new(s)`、`Checkbox::new(...)`、`Divider`、`ListView` |
+| 通用方法 | `.child(v)`、`.expand(bool)`、`.spacing(f32)`、`.justify_content(...)`、`.align_items(...)`、`.center()`、`.background(Color)`、`.padding(f32)`、`.border_radius(f32)`、`.width(f32)`、`.height(f32)`、`.on_click(fn)`、`.on_click_with_ctx(fn)`、`.font_size(f32)`、`.color(Color)` |
+| key | `ViewExt::key(s)`（需 `use lieui::view::ViewExt;`） |
+| 颜色 | `Color::new(r,g,b)`、`Color::WHITE`、`Color::RED`、…（带 alpha 见 `geometry::Color`） |
 
 ---
 
-## 五、项目结构
+## 4. 已知问题速览（详见 `docs/audit.md`）
+1. ✅ 已修复：Button hover/pressed 状态绑错节点（现作用在最深命中节点的可点击祖先上）。
+2. ✅ 已修复：`EventContext::request_rebuild/request_layout/request_render` 现被事件循环应用。
+3. ✅ 已修复：事件捕获（root→target）与冒泡（parent→root）遍历顺序已区分。
+4. 🟡 部分修复：文本在约束宽度下已换行；但 `flex_shrink` 默认 0，`Row` 内挤占过满仍可能溢出。
+5. ⏳ softbuffer 像素字节序待实测验证。
+6. ⏳ 裁剪（Clip）未实现。
 
-```
-src/
-├── lib.rs              # 库入口
-├── app.rs              # App 运行时（winit 集成）
-├── core/               # 核心类型
-│   ├── id.rs           # WidgetId
-│   ├── view_context.rs # ViewContext（协调 WidgetTree/LayoutTree/事件）
-│   └── mod.rs
-├── widget/             # Widget trait 和 WidgetTree
-│   ├── mod.rs
-│   └── tree.rs         # WidgetTree（Widget 树管理）
-├── widgets/            # 内置控件
-│   ├── mod.rs
-│   ├── text.rs         # Text
-│   ├── button.rs       # Button
-│   ├── container.rs    # Container
-│   ├── column.rs       # Column（垂直布局）
-│   └── row.rs          # Row（水平布局）
-├── layout/             # 布局系统
-│   ├── mod.rs
-│   ├── node.rs         # LayoutNode, IntrinsicSize
-│   ├── box_model.rs    # BoxStyle, EdgeInsets, ComputedLayout
-│   ├── flex.rs         # FlexStyle, FlexDirection, JustifyContent, AlignItems
-│   ├── measurable.rs   # Measurable trait, TextMeasure
-│   ├── constraint.rs   # LayoutConstraint
-│   └── context.rs      # LayoutContext（两阶段布局计算）
-├── render/             # 渲染系统
-│   ├── mod.rs
-│   ├── node.rs         # RenderNode
-│   └── engine.rs       # VelloRenderer
-├── event/              # 事件系统
-│   ├── mod.rs
-│   ├── types.rs        # Event, MouseButton, Key
-│   ├── handler.rs      # EventHandler
-│   ├── context.rs      # EventContext
-│   └── propagation.rs  # 事件传播
-├── text/               # 文本系统
-│   └── mod.rs          # TextStyle, TextEngine
-└── geometry/           # 几何类型
-    ├── mod.rs
-    └── types.rs        # Point, Size, Rect, Color
-```
-
-### 关键组件关系
-
-```
-ViewContext
-├── widget_tree: WidgetTree     # 管理所有 Widget
-├── layout_ctx: LayoutContext   # 管理布局计算
-└── event_handler: EventHandler # 管理事件处理
-
-WidgetTree
-└── widgets: HashMap<WidgetId, Box<dyn Widget>>
-
-LayoutContext
-└── root: Option<LayoutNode>    # 布局树根节点
-```
-
----
-
-## 六、调试技巧
-
-### 6.1 输出渲染树
-
-```rust
-view.debug_render_tree = true;  // 在 App 中设置
-```
-
-输出示例：
-```xml
-<Div x="0" y="0" w="800" h="600" bg="#F0F0F0">
-  <View x="0" y="0" w="800" h="600">
-    <Text x="254.17" y="206.40" w="291.66" h="36.80"/>
-    <Text x="306.20" y="263.20" w="187.59" h="18.40"/>
-    <Div x="367.11" y="309.60" w="97.78" h="36" bg="#1976D2">
-      <Text x="383.11" y="318.40" w="65.78" h="18.40"/>
-    </Div>
-  </View>
-</Div>
-```
-
-### 6.2 添加 type_name
-
-```rust
-impl Widget for MyWidget {
-    fn type_name(&self) -> &'static str {
-        "MyWidget"  // 用于调试输出
-    }
-}
-```
-
-### 6.3 日志记录
-
-```rust
-use log::info;
-
-info!("Widget {} layout: {:?}", self.type_name(), layout);
-```
-
----
-
-## 七、最佳实践
-
-### 7.1 布局原则
-
-1. **Widget 只声明约束，不计算位置**
-   - 使用 `BoxStyle` 声明边距
-   - 使用 `FlexStyle` 声明布局方式
-   - 使用 `IntrinsicSize` 声明尺寸策略
-
-2. **让 LayoutContext 统一计算**
-   - 不要手动计算子元素位置
-   - 依赖 Flex 布局系统自动排列
-
-3. **合理使用 expand**
-   - `expand(true)` 会让组件填满可用空间
-   - 配合 `JustifyContent::Center` 实现居中
-
-### 7.2 性能优化
-
-1. **LayoutTree 缓存**
-   - 布局结果会自动缓存
-   - 只有脏标记的节点会重新计算
-
-2. **RenderTree 轻量**
-   - 每帧重建，但只包含渲染指令
-   - 不包含业务状态
-
-3. **避免频繁创建 Widget**
-   - Widget 是长期存在的
-   - 通过修改状态来更新 UI
-
-### 7.3 代码规范
-
-1. **文档注释**
-   - 公共 API 使用 `///`
-   - 模块使用 `//!`
-
-2. **单元测试**
-   ```rust
-   #[cfg(test)]
-   mod tests {
-       use super::*;
-
-       #[test]
-       fn test_widget() {
-           // 测试代码
-       }
-   }
-   ```
-
-3. **提交前检查**
-   ```bash
-   cargo check
-   cargo clippy
-   cargo fmt
-   cargo test
-   ```
+[winit]: https://crates.io/crates/winit
+[softbuffer]: https://crates.io/crates/softbuffer
+[Taitank]: https://github.com/Tencent/Taitank
+[vello_cpu]: https://crates.io/crates/vello_cpu

@@ -42,7 +42,6 @@ pub fn request_redraw() {
 }
 
 /// 检查并清除重绘标记
-#[allow(dead_code)]
 pub(crate) fn take_redraw_requested() -> bool {
     REDRAW_REQUESTED.with(|r| r.replace(false))
 }

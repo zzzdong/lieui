@@ -10,13 +10,13 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::event::{HitTestResult, MouseButton};
+use crate::event::{EventEffects, HitTestResult, MouseButton};
 use crate::geometry::{Point, Size};
 use crate::render::renderer::Renderer as _;
 use crate::render::VelloRenderer;
 use crate::runtime::Runtime;
 use crate::state;
-use crate::view::node::ViewNode;
+use crate::view::node::{ClickCallbackRef, ViewNode};
 
 pub struct Application<B: Fn() -> ViewNode> {
     builder: B,
@@ -93,8 +93,23 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         self.rendered_once = true;
     }
 
+    /// 应用事件回调产生的副作用：重建 / 重排 / 重绘。
+    /// 修复此前 `EventEffects` 被调用方直接丢弃、导致
+    /// `EventContext::request_rebuild/request_layout/request_render` 成为空操作的问题。
+    fn apply_event_effects(&mut self, effects: EventEffects) {
+        if effects.needs_rebuild() {
+            state::request_rebuild();
+        }
+        if effects.needs_layout() {
+            self.runtime.request_layout();
+        }
+        if effects.needs_render() {
+            self.runtime.request_render();
+        }
+    }
+
     fn render_visuals(&mut self) {
-        let elements = self.runtime.frame_render_only();
+        let elements = self.runtime.frame_visual_update();
         if elements.is_empty() {
             return;
         }
@@ -185,8 +200,14 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
 
     /// 通用事件回调：拦截 Click 并触发全局回调
     ///
-    /// 仅在 Target / Bubble 阶段触发回调。`state::invoke_click` 会根据回调类型决定
-    /// 是否停止传播：Simple 类型自动 stop；WithCtx 类型由用户回调自行决定。
+    /// 仅对“交互组件根”（`interactive`）触发点击回调，普通布局容器/叶子即使带有
+    /// listener 也不参与点击分发（每节点都可有 listener）。
+    ///
+    /// 阶段语义：
+    /// - 捕获 Capture：仅运行 `WithCtx` 回调，使父节点可在到达 target 前拦截/停止传播；
+    ///   `Simple` 只在 Target/Bubble 触发，避免被祖先误吞或嵌套组件重复触发。
+    /// - 目标 Target：触发回调（Simple 自动 stop；WithCtx 由用户决定）。
+    /// - 冒泡 Bubble：WithCtx 已在捕获阶段触发过，避免重复；仅 `Simple` 触发。
     fn handle_lie_event(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
@@ -194,11 +215,37 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         ctx: &mut crate::event::EventContext,
     ) {
         if let crate::event::Event::Click { .. } = event {
-            if ctx.phase() == crate::event::EventPhase::Capture {
+            // 仅交互组件根参与点击分发
+            let interactive = tree
+                .get_node_ref(id)
+                .map(|n| n.is_interactive())
+                .unwrap_or(false);
+            if !interactive {
                 return;
             }
-            if let Some(cb_id) = tree.on_click(id) {
-                state::invoke_click(cb_id, ctx);
+            match ctx.phase() {
+                // 捕获阶段：仅运行 WithCtx 回调以允许拦截；Simple 在 Target/Bubble 触发
+                crate::event::EventPhase::Capture => {
+                    if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
+                        if let ClickCallbackRef::WithCtx(_) = cb {
+                            state::invoke_click(cb.id(), ctx);
+                        }
+                    }
+                }
+                // 目标阶段：触发回调（类型决定 stop 行为）
+                crate::event::EventPhase::Target => {
+                    if let Some(cb_id) = tree.on_click(id) {
+                        state::invoke_click(cb_id, ctx);
+                    }
+                }
+                // 冒泡阶段：WithCtx 已在捕获阶段触发过，避免重复；仅 Simple 触发
+                crate::event::EventPhase::Bubble => {
+                    if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
+                        if let ClickCallbackRef::Simple(_) = cb {
+                            state::invoke_click(cb.id(), ctx);
+                        }
+                    }
+                }
             }
         }
     }
@@ -230,14 +277,21 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = Point::new(position.x as f32, position.y as f32);
                 let hit = self.build_hit_result();
-                let tree = &self.runtime.layers.tree;
-                let mut em = self.runtime.layers.event_manager.borrow_mut();
-                let _effects =
+                let effects = {
+                    let tree = &self.runtime.layers.tree;
+                    let mut em = self.runtime.layers.event_manager.borrow_mut();
                     em.handle_mouse_move(self.mouse_pos, hit.as_ref(), tree, |id, event, ctx| {
                         Self::handle_lie_event(tree, id, event, ctx)
-                    });
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                    })
+                };
+                // 仅当 hover/capture 真正变化时才重绘，避免鼠标在静态 UI 上
+                // 移动也每帧全量重建渲染树（debug 下严重卡顿主因）。
+                let needs_redraw = effects.needs_render();
+                self.apply_event_effects(effects);
+                if needs_redraw {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -253,12 +307,14 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                     } else {
                         MouseButton::Middle
                     };
-                    let tree = &self.runtime.layers.tree;
-                    let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    let _effects =
+                    let effects = {
+                        let tree = &self.runtime.layers.tree;
+                        let mut em = self.runtime.layers.event_manager.borrow_mut();
                         em.handle_mouse_down(self.mouse_pos, btn, &hit, tree, |id, event, ctx| {
                             Self::handle_lie_event(tree, id, event, ctx)
-                        });
+                        })
+                    };
+                    self.apply_event_effects(effects);
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -275,12 +331,14 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                     } else {
                         MouseButton::Right
                     };
-                    let tree = &self.runtime.layers.tree;
-                    let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    let _effects =
+                    let effects = {
+                        let tree = &self.runtime.layers.tree;
+                        let mut em = self.runtime.layers.event_manager.borrow_mut();
                         em.handle_mouse_up(self.mouse_pos, btn, &hit, tree, |id, event, ctx| {
                             Self::handle_lie_event(tree, id, event, ctx)
-                        });
+                        })
+                    };
+                    self.apply_event_effects(effects);
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -303,6 +361,16 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
+        // 允许应用代码在事件循环空闲时通过 `state::request_redraw()` 触发重绘
+        // （动画、计时器、外部线程修改等场景）
+        if state::take_redraw_requested() {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 }

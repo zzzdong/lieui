@@ -1,3 +1,7 @@
+> ⚠️ **本文档已过时**（描述旧 `Widget` 布局架构）。布局引擎本身（Flexbox / Taitank 移植）仍可参考，但其上层的 `ViewContext`/`Widget` 集成已不存在。
+> 现行集成入口为 `layout::context::LayoutContext` + `view::node::to_flex_style` + `layout::flex_node`。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # 布局系统文档
 
 ## 概述

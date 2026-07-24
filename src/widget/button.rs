@@ -1,8 +1,7 @@
-use crate::geometry::Color;
 use crate::layout::box_model::{BoxStyle, EdgeInsets};
 use crate::layout::flex::{AlignItems, FlexDirection, FlexStyle, JustifyContent};
 use crate::state;
-use crate::view::design_tokens::semantic as t;
+use crate::theme;
 use crate::view::node::{ClickCallbackRef, DisplayMode, ViewNode};
 use crate::view::View;
 
@@ -27,12 +26,14 @@ impl Button {
 
 impl View for Button {
     fn build(&self) -> ViewNode {
+        let t = theme::current();
         let label_node = ViewNode::Text {
             content: self.label.clone(),
             font_size: 13.0,
-            color: Color::WHITE,
+            color: t.text.on_brand_default,
             key: None,
             listener: None,
+            interactive: false,
         };
         let content = ViewNode::Div {
             style: BoxStyle {
@@ -53,14 +54,15 @@ impl View for Button {
             key: None,
             children: vec![label_node],
             listener: None,
+            interactive: false,
         };
         ViewNode::Div {
             style: BoxStyle {
-                padding: EdgeInsets::new(t::SPACER_MD, t::SPACER_MD, 6.0, 6.0),
-                background_color: Some(t::BACKGROUND_BRAND_DEFAULT),
-                hover_background: Some(t::BACKGROUND_BRAND_HOVER),
-                pressed_background: Some(t::BACKGROUND_BRAND_CLICKED),
-                border_radius: t::BORDER_RADIUS_SMALL,
+                padding: EdgeInsets::new(t.spacer.md, t.spacer.md, 6.0, 6.0),
+                background_color: Some(t.background.brand_default),
+                hover_background: Some(t.background.brand_hover),
+                pressed_background: Some(t.background.brand_clicked),
+                border_radius: t.radius.small,
                 ..BoxStyle::default()
             },
             flex: FlexStyle::default(),
@@ -68,6 +70,7 @@ impl View for Button {
             key: None,
             children: vec![content],
             listener: self.callback_id.map(ClickCallbackRef::Simple),
+            interactive: true,
         }
     }
 }

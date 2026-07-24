@@ -5,6 +5,7 @@
 use crate::layout::flex_line::FlexLine;
 use crate::layout::style::FlexStyle;
 use crate::layout::types::*;
+use crate::text::TextEngine;
 
 /// Flex 布局节点
 #[derive(Debug, Clone)]
@@ -22,6 +23,11 @@ pub struct FlexNode {
     /// 叶子节点的预测量尺寸（无约束时的 intrinsic size）
     /// 布局时，如果 dim 未定义，使用此值作为内容尺寸
     pub intrinsic_size: Option<(f32, f32)>,
+
+    /// 文本叶子节点的排版内容（content, font_size）。
+    /// 若存在，布局时按约束宽度重新测量以支持换行，
+    /// 而非使用单行 intrinsic size（避免长文本溢出/不换行）。
+    pub measure_text: Option<(String, f64)>,
 }
 
 impl FlexNode {
@@ -36,6 +42,7 @@ impl FlexNode {
             has_new_layout: false,
             in_initial_state: true,
             intrinsic_size: None,
+            measure_text: None,
         }
     }
 
@@ -953,6 +960,25 @@ impl FlexNode {
         let intrinsic_w = self.intrinsic_size.map_or(0.0, |(w, _)| w);
         let intrinsic_h = self.intrinsic_size.map_or(0.0, |(_, h)| h);
 
+        // 文本叶子：根据可用宽度重新测量，以支持换行（而非使用单行 intrinsic size）
+        let (content_w, content_h) = if let Some((content, fs)) = &self.measure_text {
+            let avail_w = match width_measure_mode {
+                MeasureMode::Exactly | MeasureMode::AtMost => {
+                    if is_defined(aw) { aw } else { f32::MAX }
+                }
+                MeasureMode::Undefined => f32::MAX,
+            };
+            let max_w = if is_defined(avail_w) && avail_w < f32::MAX {
+                Some(avail_w as f64)
+            } else {
+                None
+            };
+            let (mw, mh) = TextEngine::measure_text(content, *fs, max_w);
+            (mw as f32, mh as f32)
+        } else {
+            (intrinsic_w, intrinsic_h)
+        };
+
         match width_measure_mode {
             MeasureMode::Exactly => {
                 self.layout_result.dim[0] = aw + self.get_padding_and_border(FlexDirection::Row);
@@ -961,7 +987,7 @@ impl FlexNode {
                 let dw = if is_defined(self.style.dim[0]) {
                     self.style.dim[0]
                 } else {
-                    intrinsic_w
+                    content_w
                 };
                 let pb = self.get_padding_and_border(FlexDirection::Row);
                 self.layout_result.dim[0] = self.bound_axis(
@@ -977,7 +1003,7 @@ impl FlexNode {
                 let dw = if is_defined(self.style.dim[0]) {
                     self.style.dim[0]
                 } else {
-                    intrinsic_w
+                    content_w
                 };
                 self.layout_result.dim[0] = dw + self.get_padding_and_border(FlexDirection::Row);
             }
@@ -991,7 +1017,7 @@ impl FlexNode {
                 let dh = if is_defined(self.style.dim[1]) {
                     self.style.dim[1]
                 } else {
-                    intrinsic_h
+                    content_h
                 };
                 let pb = self.get_padding_and_border(FlexDirection::Column);
                 self.layout_result.dim[1] = self.bound_axis(
@@ -1007,7 +1033,7 @@ impl FlexNode {
                 let dh = if is_defined(self.style.dim[1]) {
                     self.style.dim[1]
                 } else {
-                    intrinsic_h
+                    content_h
                 };
                 self.layout_result.dim[1] = dh + self.get_padding_and_border(FlexDirection::Column);
             }

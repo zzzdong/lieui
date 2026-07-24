@@ -8,6 +8,8 @@ pub mod runtime;
 pub mod state;
 pub mod text;
 pub mod view;
+pub mod widget;
+pub mod theme;
 
 pub mod prelude {
     // ── app ──
@@ -30,12 +32,12 @@ pub mod prelude {
     // ── flex / layout ──
     pub use crate::layout::flex::{AlignItems, FlexDirection, FlexWrap, JustifyContent};
 
-    // ── view primitives ──
-    pub use crate::view::primitives::{Column, Container, Image, Row, Text};
+    // ── theme ──
+    pub use crate::theme::{current, set_theme, Theme};
 
-    // ── view widgets ──
-    pub use crate::view::widget::{Button, Checkbox, Divider, ListView};
-
-    // ── view trait ──
+    // ── view ──
     pub use crate::view::View;
+
+    // ── widgets ──
+    pub use crate::widget::{Button, Checkbox, Column, Container, Divider, Image, ListView, Row, Text};
 }

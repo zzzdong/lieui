@@ -1,7 +1,7 @@
 use crate::layout::box_model::BoxStyle;
 use crate::layout::flex::{AlignItems, FlexDirection, FlexStyle, JustifyContent};
 use crate::state;
-use crate::view::design_tokens::semantic as t;
+use crate::theme;
 use crate::view::node::{ClickCallbackRef, DisplayMode, ViewNode};
 use crate::view::View;
 
@@ -33,22 +33,22 @@ impl Checkbox {
 
 impl View for Checkbox {
     fn build(&self) -> ViewNode {
+        let t = theme::current();
         let check_style = BoxStyle {
             fixed_width: Some(16.0),
             fixed_height: Some(16.0),
-            border_radius: t::BORDER_RADIUS_SMALL,
+            border_radius: t.radius.small,
             background_color: Some(if self.checked {
-                t::BACKGROUND_BRAND_DEFAULT
+                t.background.brand_default
             } else {
-                t::BACKGROUND_PRIMARY_DEFAULT
+                t.background.primary_default
             }),
             hover_background: Some(if self.checked {
-                t::BACKGROUND_BRAND_HOVER
+                t.background.brand_hover
             } else {
-                t::BACKGROUND_SECONDARY_DEFAULT
+                t.background.secondary_default
             }),
-            // PatternFly checkbox 默认有 1px 边框
-            border_color: Some(t::BORDER_STRONG),
+            border_color: Some(t.border.strong),
             border_width: 1.0,
             ..BoxStyle::default()
         };
@@ -59,6 +59,7 @@ impl View for Checkbox {
             key: None,
             children: vec![],
             listener: None,
+            interactive: false,
         };
 
         let mut children = vec![check_box];
@@ -66,9 +67,10 @@ impl View for Checkbox {
             children.push(ViewNode::Text {
                 content: self.label.clone(),
                 font_size: 13.0,
-                color: t::TEXT_REGULAR_DEFAULT,
+                color: t.text.regular_default,
                 key: None,
                 listener: None,
+                interactive: false,
             });
         }
         ViewNode::Div {
@@ -77,7 +79,7 @@ impl View for Checkbox {
                 direction: FlexDirection::Row,
                 justify: JustifyContent::Start,
                 align: AlignItems::Center,
-                spacing: t::SPACER_SM,
+                spacing: t.spacer.sm,
                 expand: false,
                 flex_grow: 0.0,
                 flex_shrink: 1.0,
@@ -87,6 +89,7 @@ impl View for Checkbox {
             key: None,
             children,
             listener: self.callback_id.map(ClickCallbackRef::Simple),
+            interactive: true,
         }
     }
 }

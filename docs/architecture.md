@@ -1,3 +1,7 @@
+> ⚠️ **本文档已过时**（描述 v1 旧 `Widget`/`ViewContext` 架构），与当前 `v2-rewrite` 实现不符。
+> 现行架构为 `runtime` 协调器 + `view::ViewNode`（实现 `View` trait）+ `ElementTree`（slotmap）+ 全局 `state` + `core::layers`（Base/Overlay/Modal）。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # LieUI 架构设计文档
 
 ## 1. 概述

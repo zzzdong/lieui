@@ -1,3 +1,7 @@
+> ⚠️ **本文档已过时**（描述旧 `Widget` 文本架构），与当前 `v2-rewrite` 实现不符。
+> 现行文本路径为 `view::node::ViewNode::Text` → `text::TextEngine` 测量/排版 → `runtime::cv` 生成 `VisualElement::TextRun`。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # 文本系统文档
 
 ## 概述

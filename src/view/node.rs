@@ -7,16 +7,13 @@
 //! - Canvas：自定义绘制预留原语（当前不渲染任何内容）
 //!
 //! 每个原语都可以附带 `listener: Option<ClickCallbackRef>` 来响应点击事件。
-//! 所有高级 widget（Button、Checkbox、Container、Column、Row、Divider）
-//! 都在 `primitives.rs` 中通过这些原语组合而成。
+//! 所有组件（Button、Checkbox、Container、Column、Row、Divider、Text、Image 等）
+//! 都基于 `ViewNode` 原语组合而成，统一位于顶层的 `widget` 模块。
 
-use crate::core::{ElementId, ElementState};
 use crate::geometry::Color;
-use crate::layout::box_model::{BoxStyle, ComputedLayout, IntrinsicSize, LayoutConstraint};
+use crate::layout::box_model::{BoxStyle, IntrinsicSize, LayoutConstraint};
 use crate::layout::flex::FlexStyle;
 use crate::layout::measurable::{EmptyMeasure, FixedMeasure, Measurable, TextMeasure};
-use crate::render::visual::{FillStrokeStyle, KRect, LayeredElement as LE, VisualElement};
-use crate::text::create_text_layout;
 
 /// Listener 上注册的回调引用
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +76,9 @@ pub enum ViewNode {
         color: Color,
         key: Option<String>,
         listener: Option<ClickCallbackRef>,
+        /// 是否为“交互组件根”。事件系统据此定位 hover/pressed/focus 的作用节点以及
+        /// 点击回调的分发目标，与是否挂有 listener 解耦（每节点都可有 listener）。
+        interactive: bool,
     },
     Image {
         data: std::sync::Arc<Vec<u8>>,
@@ -86,6 +86,7 @@ pub enum ViewNode {
         h: u32,
         key: Option<String>,
         listener: Option<ClickCallbackRef>,
+        interactive: bool,
     },
     Div {
         style: BoxStyle,
@@ -94,10 +95,12 @@ pub enum ViewNode {
         key: Option<String>,
         children: Vec<ViewNode>,
         listener: Option<ClickCallbackRef>,
+        interactive: bool,
     },
     Canvas {
         key: Option<String>,
         listener: Option<ClickCallbackRef>,
+        interactive: bool,
     },
 }
 
@@ -234,6 +237,7 @@ impl ViewNode {
                     font_size: b,
                     color: c,
                     listener: l1,
+                    interactive: i1,
                     ..
                 },
                 Text {
@@ -241,15 +245,17 @@ impl ViewNode {
                     font_size: y,
                     color: z,
                     listener: l2,
+                    interactive: i2,
                     ..
                 },
-            ) => a == x && (b - y).abs() < 0.001 && c == z && l1 == l2,
+            ) => a == x && (b - y).abs() < 0.001 && c == z && l1 == l2 && i1 == i2,
             (
                 Image {
                     data: a,
                     w: b,
                     h: c,
                     listener: l1,
+                    interactive: i1,
                     ..
                 },
                 Image {
@@ -257,15 +263,17 @@ impl ViewNode {
                     w: y,
                     h: z,
                     listener: l2,
+                    interactive: i2,
                     ..
                 },
-            ) => a == x && b == y && c == z && l1 == l2,
+            ) => a == x && b == y && c == z && l1 == l2 && i1 == i2,
             (
                 Div {
                     style: s1,
                     flex: f1,
                     display: d1,
                     listener: l1,
+                    interactive: i1,
                     ..
                 },
                 Div {
@@ -273,10 +281,13 @@ impl ViewNode {
                     flex: f2,
                     display: d2,
                     listener: l2,
+                    interactive: i2,
                     ..
                 },
-            ) => s1 == s2 && f1 == f2 && d1 == d2 && l1 == l2,
-            (Canvas { listener: l1, .. }, Canvas { listener: l2, .. }) => l1 == l2,
+            ) => s1 == s2 && f1 == f2 && d1 == d2 && l1 == l2 && i1 == i2,
+            (Canvas { listener: l1, interactive: i1, .. }, Canvas { listener: l2, interactive: i2, .. }) => {
+                l1 == l2 && i1 == i2
+            }
             _ => false,
         }
     }
@@ -294,6 +305,16 @@ impl ViewNode {
         }
     }
 
+    /// 是否为交互组件根（见 `interactive` 字段）。
+    pub fn is_interactive(&self) -> bool {
+        match self {
+            ViewNode::Text { interactive, .. }
+            | ViewNode::Image { interactive, .. }
+            | ViewNode::Div { interactive, .. }
+            | ViewNode::Canvas { interactive, .. } => *interactive,
+        }
+    }
+
     pub fn on_click(&self) -> Option<ClickCallbackRef> {
         self.listener()
     }
@@ -302,100 +323,4 @@ impl ViewNode {
         self.listener().map(|c| c.id())
     }
 
-    pub fn render(
-        &self,
-        layout: &ComputedLayout,
-        state: ElementState,
-        elements: &mut Vec<LE>,
-        z_index: i32,
-        element_id: ElementId,
-    ) {
-        let r = layout.rect();
-        match self {
-            ViewNode::Text {
-                content,
-                font_size,
-                color,
-                ..
-            } => {
-                let lay = create_text_layout(content, *font_size, *color, None);
-                elements.push(
-                    LE::new(
-                        VisualElement::TextRun {
-                            text: std::sync::Arc::from(content.as_str()),
-                            position: kurbo::Point::new(r.x as f64, r.y as f64),
-                            color: *color,
-                            font_size: *font_size,
-                            font_family: "sans-serif".to_string(),
-                            rotation: 0.0,
-                            max_width: None,
-                            layout: Some(Box::new(lay)),
-                        },
-                        z_index,
-                    )
-                    .with_id(element_id.as_ffi()),
-                );
-            }
-            ViewNode::Image { data, w, h, .. } => {
-                elements.push(
-                    LE::new(
-                        VisualElement::Image {
-                            bounds: KRect::new(
-                                r.x as f64,
-                                r.y as f64,
-                                (r.x + r.width) as f64,
-                                (r.y + r.height) as f64,
-                            ),
-                            data: std::sync::Arc::clone(data),
-                            width: *w,
-                            height: *h,
-                            opacity: None,
-                        },
-                        z_index,
-                    )
-                    .with_id(element_id.as_ffi()),
-                );
-            }
-            ViewNode::Div { style, .. } => {
-                let bg = if state.pressed && style.pressed_background.is_some() {
-                    style.pressed_background
-                } else if state.hovered && style.hover_background.is_some() {
-                    style.hover_background
-                } else {
-                    style.background_color
-                };
-                if let Some(bg) = bg {
-                    let k = KRect::new(
-                        r.x as f64,
-                        r.y as f64,
-                        (r.x + r.width) as f64,
-                        (r.y + r.height) as f64,
-                    );
-                    elements.push(
-                        LE::new(
-                            VisualElement::RoundedRect {
-                                rect: k,
-                                radius: style.border_radius as f64,
-                                style: {
-                                    let mut fs = FillStrokeStyle::new().with_fill(bg);
-                                    if let Some(bc) = style.border_color {
-                                        if style.border_width > 0.0 {
-                                            fs = fs.with_stroke(bc, style.border_width as f64);
-                                        }
-                                    }
-                                    fs
-                                },
-                            },
-                            z_index,
-                        )
-                        .with_id(element_id.as_ffi()),
-                    );
-                }
-            }
-            ViewNode::Canvas { .. } => {
-                // Canvas 当前为预留原语，不渲染任何内容。
-                // 未来可在此触发自定义绘制回调或生成 VisualElement::Custom。
-            }
-        }
-    }
 }

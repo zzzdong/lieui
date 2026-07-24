@@ -1,3 +1,7 @@
+> ⚠️ **本文档已过时**（描述旧 `Widget` 系统），与当前 `v2-rewrite` 实现不符。
+> 现行 UI 块统一实现 `View` trait（`fn build(&self) -> ViewNode`）；`ViewNode` 本身是框架唯一的原语，所有组件（含 Text/Image）统一位于顶层 `widget` 模块。
+> **请以 [`../guide.md`](../guide.md) 为最新权威文档**；本文档仅留作历史参考。
+
 # Widget 系统文档
 
 ## 概述
