@@ -48,7 +48,6 @@ impl View for Text {
             color: self.color,
             key: None,
             listener: self.on_click,
-            interactive: self.on_click.is_some(),
         }
     }
 }

@@ -9,16 +9,22 @@ use crate::event::{
 };
 use crate::geometry::Point;
 use crate::runtime::element::ElementTree;
+use std::collections::HashSet;
 
 /// 事件管理器
 pub struct EventManager {
     focused: Option<ElementId>,
     mouse_capture: Option<ElementId>,
     mouse_down: bool,
+    /// 命中最内层目标（可能无 listener）
     hovered: Option<ElementId>,
+    /// 当前 hover 路径上所有带 listener 的节点（HTML 式 mouseenter 语义）
+    hovered_listeners: Vec<ElementId>,
     /// 真正被按下（pressed）的节点。用于在鼠标释放时清对位置，
     /// 避免「按下 A → 移到 B → 在 B 释放」时 A 残留 pressed 状态。
     pressed_node: Option<ElementId>,
+    /// 按下时 hit.path 上所有带 listener 的节点，释放时需清除它们的 pressed 状态
+    pressed_listeners: Vec<ElementId>,
 }
 
 impl EventManager {
@@ -28,7 +34,9 @@ impl EventManager {
             mouse_capture: None,
             mouse_down: false,
             hovered: None,
+            hovered_listeners: Vec::new(),
             pressed_node: None,
+            pressed_listeners: Vec::new(),
         }
     }
 
@@ -66,23 +74,6 @@ impl EventManager {
         }
     }
 
-    /// 解析「交互节点」：从命中目标 `hit.target` 沿祖先链向上，
-    /// 找到最近的“交互组件根”（`interactive`）节点。
-    ///
-    /// 命中测试返回的是最内侧的叶子（如 Button 内的文字/装饰 Div），
-    /// 但视觉交互状态（hover/pressed/focus）应作用在最近的 `interactive` 外层节点上，
-    /// 否则该类节点的 `tree.state(id)` 永远不会被设置，导致高亮/按下反馈失效。
-    /// `interactive` 与是否挂有 listener 解耦：每节点都可有 listener，但只有交互组件
-    /// 根才参与视觉状态与点击分发。
-    fn resolve_interactive(&self, tree: &ElementTree, hit: &HitTestResult) -> Option<ElementId> {
-        // hit.path: root -> ... -> target；从最内侧 target 向上找第一个 interactive 的
-        hit.path
-            .iter()
-            .rev()
-            .find(|&&id| tree.get_node_ref(id).map(|n| n.is_interactive()).unwrap_or(false))
-            .copied()
-    }
-
     // ---- 事件处理 ----
 
     /// 处理鼠标按下
@@ -97,19 +88,34 @@ impl EventManager {
         self.mouse_down = true;
         let mut effects = EventEffects::default();
 
-        // 交互节点（最近的可点击祖先）：视觉状态 + 焦点都应作用于它
-        let interactive = self.resolve_interactive(tree, hit);
+        // 视觉状态与焦点直接作用在命中目标上（HTML 式行为）
+        let target = hit.target;
 
         // 焦点变化
-        if self.focused != interactive {
-            let focus_effects = self.handle_focus_change(interactive, tree, &mut handler);
+        if self.focused != Some(target) {
+            let focus_effects = self.handle_focus_change(Some(target), tree, &mut handler);
             effects.merge(&focus_effects);
         }
 
-        // 清除此前可能残留的 pressed，并在当前交互节点上设置 pressed
+        // 清除此前可能残留的 pressed
         Self::set_pressed_state(tree, self.pressed_node, false);
-        Self::set_pressed_state(tree, interactive, true);
-        self.pressed_node = interactive;
+        for &id in &self.pressed_listeners {
+            Self::set_pressed_state(tree, Some(id), false);
+        }
+
+        // 在当前命中目标以及 hit.path 上所有带 listener 的节点上设置 pressed。
+        // 这样 Button 等组件根在内部子节点被按下时也能正确显示 pressed 反馈。
+        Self::set_pressed_state(tree, Some(target), true);
+        self.pressed_node = Some(target);
+        self.pressed_listeners = hit
+            .path
+            .iter()
+            .copied()
+            .filter(|&id| tree.get_node_ref(id).and_then(|n| n.listener()).is_some())
+            .collect();
+        for &id in &self.pressed_listeners {
+            Self::set_pressed_state(tree, Some(id), true);
+        }
 
         // 三阶段分发
         let mut ctx = EventContext::with_target(hit.target);
@@ -135,11 +141,15 @@ impl EventManager {
     ) -> EventEffects {
         let mut effects = EventEffects::default();
 
-        // 清除 pressed：优先清捕获节点，否则清真正按下的节点
-        // （修复「按下 A → 移到 B → 在 B 释放」时 A 残留 pressed 的问题）
-        let pressed = self.mouse_capture.or(self.pressed_node);
-        Self::set_pressed_state(tree, pressed, false);
+        // 清除 pressed：同时清捕获节点、真正按下的节点以及按下时带 listener 的祖先节点，
+        // 避免任一节点残留 pressed。（修复「按下 A → 移到 B → 在 B 释放」时 A 残留 pressed 的问题）
+        Self::set_pressed_state(tree, self.mouse_capture, false);
+        Self::set_pressed_state(tree, self.pressed_node, false);
+        for &id in &self.pressed_listeners {
+            Self::set_pressed_state(tree, Some(id), false);
+        }
         self.pressed_node = None;
+        self.pressed_listeners.clear();
 
         if let Some(capture) = self.mouse_capture.take() {
             let mut ctx = EventContext::with_target(capture);
@@ -206,27 +216,50 @@ impl EventManager {
             effects.merge(&ctx.take_effects());
         }
 
-        // 悬停状态变化：作用在交互节点（最近的可点击祖先）上
-        let current_hover = hit.and_then(|h| self.resolve_interactive(tree, h));
-        if current_hover != self.hovered {
-            // 清除旧悬停
+        // HTML 式悬停状态管理：
+        // - 命中最内层目标记录为 self.hovered；
+        // - hit.path 上所有带 listener 的节点都会获得 hovered 状态并触发 MouseEnter/MouseLeave。
+        // 这样 Button 等组件根在鼠标悬停其内部子节点时也能正确显示 hover 反馈。
+        let new_target = hit.map(|h| h.target);
+        let new_listeners: Vec<ElementId> = hit
+            .map(|h| {
+                h.path
+                    .iter()
+                    .copied()
+                    .filter(|&id| tree.get_node_ref(id).and_then(|n| n.listener()).is_some())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if new_target != self.hovered {
             Self::set_hovered_state(tree, self.hovered, false);
-            if let Some(prev) = self.hovered {
-                let mut ctx = EventContext::with_target(prev);
-                handler(prev, &Event::MouseLeave, &mut ctx);
-                effects.merge(&ctx.take_effects());
-            }
-            // 设置新悬停
-            Self::set_hovered_state(tree, current_hover, true);
-            if let Some(cur) = current_hover {
-                let mut ctx = EventContext::with_target(cur);
-                handler(cur, &Event::MouseEnter, &mut ctx);
-                effects.merge(&ctx.take_effects());
-            }
-            self.hovered = current_hover;
-            // 悬停目标变化会改变交互节点的视觉状态，需触发重绘
+            Self::set_hovered_state(tree, new_target, true);
+            self.hovered = new_target;
             effects.request_render();
         }
+
+        let old_set: HashSet<ElementId> = self.hovered_listeners.iter().copied().collect();
+        let new_set: HashSet<ElementId> = new_listeners.iter().copied().collect();
+
+        for &id in &self.hovered_listeners {
+            if !new_set.contains(&id) {
+                Self::set_hovered_state(tree, Some(id), false);
+                let mut ctx = EventContext::with_target(id);
+                handler(id, &Event::MouseLeave, &mut ctx);
+                effects.merge(&ctx.take_effects());
+                effects.request_render();
+            }
+        }
+        for &id in &new_listeners {
+            if !old_set.contains(&id) {
+                Self::set_hovered_state(tree, Some(id), true);
+                let mut ctx = EventContext::with_target(id);
+                handler(id, &Event::MouseEnter, &mut ctx);
+                effects.merge(&ctx.take_effects());
+                effects.request_render();
+            }
+        }
+        self.hovered_listeners = new_listeners;
 
         effects
     }
@@ -359,11 +392,7 @@ pub fn dispatch_three_phase(
     }
 
     // 冒泡阶段：从 target 的父节点向 root 传播，内层 → 外层
-    for &id in hit.path
-        .iter()
-        .take(hit.path.len().saturating_sub(1))
-        .rev()
-    {
+    for &id in hit.path.iter().take(hit.path.len().saturating_sub(1)).rev() {
         ctx.set_phase(EventPhase::Bubble);
         handler(id, event, ctx);
         if ctx.is_stopped() {

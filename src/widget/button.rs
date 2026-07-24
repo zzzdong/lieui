@@ -33,7 +33,6 @@ impl View for Button {
             color: t.text.on_brand_default,
             key: None,
             listener: None,
-            interactive: false,
         };
         let content = ViewNode::Div {
             style: BoxStyle {
@@ -54,7 +53,6 @@ impl View for Button {
             key: None,
             children: vec![label_node],
             listener: None,
-            interactive: false,
         };
         ViewNode::Div {
             style: BoxStyle {
@@ -70,7 +68,6 @@ impl View for Button {
             key: None,
             children: vec![content],
             listener: self.callback_id.map(ClickCallbackRef::Simple),
-            interactive: true,
         }
     }
 }

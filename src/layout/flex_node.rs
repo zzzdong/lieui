@@ -964,7 +964,11 @@ impl FlexNode {
         let (content_w, content_h) = if let Some((content, fs)) = &self.measure_text {
             let avail_w = match width_measure_mode {
                 MeasureMode::Exactly | MeasureMode::AtMost => {
-                    if is_defined(aw) { aw } else { f32::MAX }
+                    if is_defined(aw) {
+                        aw
+                    } else {
+                        f32::MAX
+                    }
                 }
                 MeasureMode::Undefined => f32::MAX,
             };

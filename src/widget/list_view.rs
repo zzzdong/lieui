@@ -53,7 +53,6 @@ impl View for ListView {
                 key: None,
                 children: vec![],
                 listener: None,
-                interactive: false,
             },
         };
 
@@ -69,7 +68,6 @@ impl View for ListView {
             key: None,
             children: vec![inner],
             listener: None,
-            interactive: false,
         };
 
         let mut style = BoxStyle {
@@ -89,7 +87,6 @@ impl View for ListView {
             key: None,
             children: vec![offset_box],
             listener: None,
-            interactive: false,
         }
     }
 }

@@ -8,8 +8,8 @@ use lieui::prelude::*;
 use lieui::runtime::Runtime;
 use lieui::state;
 use lieui::view::node::{ClickCallbackRef, ViewNode};
-use lieui::widget::Checkbox;
 use lieui::view::View;
+use lieui::widget::Checkbox;
 
 struct Clickable<V: View> {
     child: V,

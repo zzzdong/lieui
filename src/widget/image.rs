@@ -47,7 +47,6 @@ impl View for Image {
             h: self.h,
             key: None,
             listener: self.on_click,
-            interactive: self.on_click.is_some(),
         }
     }
 }

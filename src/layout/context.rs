@@ -51,9 +51,7 @@ impl LayoutContext {
                 tree.set_intrinsic(id, m);
                 // 记录文本排版内容，供布局时按约束宽度重新测量（支持换行）
                 if let crate::view::node::ViewNode::Text {
-                    content,
-                    font_size,
-                    ..
+                    content, font_size, ..
                 } = r
                 {
                     fn_node.measure_text = Some((content.clone(), *font_size));

@@ -63,7 +63,6 @@ impl ElementTree {
                 color: crate::geometry::Color::TRANSPARENT,
                 key: None,
                 listener: None,
-                interactive: false,
             })
     }
 
@@ -271,7 +270,6 @@ fn without_children(n: &ViewNode) -> ViewNode {
             display,
             key,
             listener,
-            interactive,
             ..
         } => ViewNode::Div {
             style: style.clone(),
@@ -280,7 +278,6 @@ fn without_children(n: &ViewNode) -> ViewNode {
             key: key.clone(),
             children: vec![],
             listener: *listener,
-            interactive: *interactive,
         },
         ViewNode::Text {
             content,
@@ -288,14 +285,12 @@ fn without_children(n: &ViewNode) -> ViewNode {
             color,
             key,
             listener,
-            interactive,
         } => ViewNode::Text {
             content: content.clone(),
             font_size: *font_size,
             color: *color,
             key: key.clone(),
             listener: *listener,
-            interactive: *interactive,
         },
         ViewNode::Image {
             data,
@@ -303,23 +298,16 @@ fn without_children(n: &ViewNode) -> ViewNode {
             h,
             key,
             listener,
-            interactive,
         } => ViewNode::Image {
             data: std::sync::Arc::clone(data),
             w: *w,
             h: *h,
             key: key.clone(),
             listener: *listener,
-            interactive: *interactive,
         },
-        ViewNode::Canvas {
-            key,
-            listener,
-            interactive,
-        } => ViewNode::Canvas {
+        ViewNode::Canvas { key, listener } => ViewNode::Canvas {
             key: key.clone(),
             listener: *listener,
-            interactive: *interactive,
         },
     }
 }

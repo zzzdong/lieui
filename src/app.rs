@@ -198,10 +198,10 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         Some(HitTestResult { target, path })
     }
 
-    /// 通用事件回调：拦截 Click 并触发全局回调
+    /// 通用事件回调：拦截 Click / MouseDown / MouseUp 并触发全局回调
     ///
-    /// 仅对“交互组件根”（`interactive`）触发点击回调，普通布局容器/叶子即使带有
-    /// listener 也不参与点击分发（每节点都可有 listener）。
+    /// HTML 式事件模型：任何挂有 listener 的节点都参与分发，事件按捕获 → 目标 → 冒泡
+    /// 顺序传播，每层 listener 自行决定是否调用 `ctx.stop_propagation()`。
     ///
     /// 阶段语义：
     /// - 捕获 Capture：仅运行 `WithCtx` 回调，使父节点可在到达 target 前拦截/停止传播；
@@ -214,39 +214,41 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         event: &crate::event::Event,
         ctx: &mut crate::event::EventContext,
     ) {
-        if let crate::event::Event::Click { .. } = event {
-            // 仅交互组件根参与点击分发
-            let interactive = tree
-                .get_node_ref(id)
-                .map(|n| n.is_interactive())
-                .unwrap_or(false);
-            if !interactive {
-                return;
-            }
-            match ctx.phase() {
-                // 捕获阶段：仅运行 WithCtx 回调以允许拦截；Simple 在 Target/Bubble 触发
-                crate::event::EventPhase::Capture => {
-                    if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
-                        if let ClickCallbackRef::WithCtx(_) = cb {
-                            state::invoke_click(cb.id(), ctx);
+        // Click / MouseDown / MouseUp 均按 HTML 事件模型分发：
+        // - Capture：仅 WithCtx，允许祖先拦截；
+        // - Target：触发所有回调；
+        // - Bubble：仅 Simple（WithCtx 已在 Capture 触发，避免重复）。
+        match event {
+            crate::event::Event::Click { .. }
+            | crate::event::Event::MouseDown { .. }
+            | crate::event::Event::MouseUp { .. } => {
+                let has_listener = tree.get_node_ref(id).and_then(|n| n.listener()).is_some();
+                if !has_listener {
+                    return;
+                }
+                match ctx.phase() {
+                    crate::event::EventPhase::Capture => {
+                        if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
+                            if let ClickCallbackRef::WithCtx(_) = cb {
+                                state::invoke_click(cb.id(), ctx);
+                            }
+                        }
+                    }
+                    crate::event::EventPhase::Target => {
+                        if let Some(cb_id) = tree.on_click(id) {
+                            state::invoke_click(cb_id, ctx);
+                        }
+                    }
+                    crate::event::EventPhase::Bubble => {
+                        if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
+                            if let ClickCallbackRef::Simple(_) = cb {
+                                state::invoke_click(cb.id(), ctx);
+                            }
                         }
                     }
                 }
-                // 目标阶段：触发回调（类型决定 stop 行为）
-                crate::event::EventPhase::Target => {
-                    if let Some(cb_id) = tree.on_click(id) {
-                        state::invoke_click(cb_id, ctx);
-                    }
-                }
-                // 冒泡阶段：WithCtx 已在捕获阶段触发过，避免重复；仅 Simple 触发
-                crate::event::EventPhase::Bubble => {
-                    if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
-                        if let ClickCallbackRef::Simple(_) = cb {
-                            state::invoke_click(cb.id(), ctx);
-                        }
-                    }
-                }
             }
+            _ => {}
         }
     }
 }

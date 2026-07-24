@@ -7,9 +7,9 @@ pub mod render;
 pub mod runtime;
 pub mod state;
 pub mod text;
+pub mod theme;
 pub mod view;
 pub mod widget;
-pub mod theme;
 
 pub mod prelude {
     // ── app ──
@@ -39,5 +39,7 @@ pub mod prelude {
     pub use crate::view::View;
 
     // ── widgets ──
-    pub use crate::widget::{Button, Checkbox, Column, Container, Divider, Image, ListView, Row, Text};
+    pub use crate::widget::{
+        Button, Checkbox, Column, Container, Divider, Image, ListView, Row, Text,
+    };
 }

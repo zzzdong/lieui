@@ -9,7 +9,7 @@
 
 | 编号 | 问题 | 状态 |
 |------|------|------|
-| 1.1 | Button hover/pressed 状态绑错节点 | ✅ 已修复（`event/manager.rs` 增加 `resolve_interactive`，视觉状态作用在最深命中节点的可点击祖先上） |
+| 1.1 | Button hover/pressed 状态绑错节点 | ✅ 已重构为 HTML 式事件模型：移除 `interactive`，视觉状态直接作用在命中目标，并沿 hit.path 上所有带 listener 的祖先传播；渲染时子节点继承最近有 listener 的祖先状态 |
 | 1.2 | `EventEffects` 被丢弃 | ✅ 已修复（`app.rs` 应用 effects + `Runtime::request_layout/request_render`/`frame_visual_update`） |
 | 1.3 | 事件捕获/冒泡遍历顺序相同 | ✅ 已修复（`event/manager.rs::dispatch_three_phase`） |
 | 1.4 | mouse_up 清错 pressed 节点 | ✅ 已修复（`EventManager::pressed_node` 跟踪真正按下的节点） |
@@ -47,7 +47,7 @@
 - 文件：`src/event/manager.rs`（`handle_mouse_down` / `handle_mouse_up` / `handle_mouse_move`）、`src/runtime/mod.rs`（`cv`）
 - 现象：`hit_test` 返回**最深层**命中节点。当鼠标悬停在 `Button` 上时，命中的是 Button 内层的 `content` Div（或 `Text`），二者都没有 `listener`。`EventManager` 只在 `hit.target` 上设置 `hovered` / `pressed`，而 `cv` 里带 `listener` 的 Button 外层 Div 读取自己的 `tree.state(id)` —— 该状态从未被设置，所以背景色永远不变。
 - 影响：点击回调**能正常工作**（dispatch 会遍历整条 path，Button 祖先在路径上），但 hover / 按下**背景反馈完全失效**，交互体验破损。
-- 修复：在事件管理器或命中测试里，把交互状态解析到「最近的带 `listener` 的祖先」节点，再在其上设置状态。
+- 修复：移除 `interactive` 字段，改为 HTML 式事件模型。`EventManager` 将 `hovered` / `pressed` 直接设置在命中目标，同时沿 `hit.path` 上所有带 `listener` 的祖先传播；`cv` 渲染时，子节点继承「最近有 listener 的祖先」的交互状态。
 
 ### 1.2 `EventEffects` 被丢弃 —— `EventContext::request_rebuild/request_layout/request_render` 是空操作
 - 文件：`src/app.rs`（`CursorMoved` / `MouseInput` 等分支均写 `let _effects = em.handle_…(…)`）、`src/event/manager.rs`（`take_effects()`）

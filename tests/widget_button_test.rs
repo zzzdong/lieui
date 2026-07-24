@@ -6,8 +6,8 @@ use lieui::geometry::Size;
 use lieui::render::visual::{LayeredElement, VisualElement};
 use lieui::runtime::Runtime;
 use lieui::text::TextEngine;
-use lieui::widget::Button;
 use lieui::view::View;
+use lieui::widget::Button;
 
 fn find_button_parts(
     elements: &[LayeredElement],

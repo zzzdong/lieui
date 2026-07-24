@@ -176,13 +176,20 @@ impl Runtime {
     /// 用于事件回调通过 `EventEffects` 请求 layout/render 的增量更新场景
     /// （如 `ctx.request_layout()` / `ctx.request_render()`）。
     pub fn frame_visual_update(&mut self) -> Vec<LayeredElement> {
+        if !self.needs_layout && !self.needs_render {
+            return Vec::new();
+        }
         if self.needs_layout {
             self.perform_layout();
             self.needs_layout = false;
         }
-        self.needs_render = false;
-        self.debug_stats.element_count = self.layers.tree.len();
-        self.build_render_tree()
+        if self.needs_render {
+            self.needs_render = false;
+            self.debug_stats.element_count = self.layers.tree.len();
+            self.build_render_tree()
+        } else {
+            Vec::new()
+        }
     }
 
     fn perform_layout(&mut self) {
@@ -208,13 +215,7 @@ impl Runtime {
             let z = lt.z_index();
             self.layers.with_layout(lt, |l| {
                 if let Some(ref r) = l.root {
-                    Self::cv(
-                        r,
-                        z,
-                        &self.layers,
-                        &mut e,
-                        crate::core::state::ElementState::default(),
-                    );
+                    Self::cv(r, z, &self.layers, &mut e, None);
                 }
             });
         }
@@ -227,19 +228,26 @@ impl Runtime {
         z_index: i32,
         layers: &Layers,
         elements: &mut Vec<LayeredElement>,
-        inherited_state: crate::core::state::ElementState,
+        listener_state: Option<crate::core::state::ElementState>,
     ) {
         let id = node.id;
         let node_ref = match layers.tree.get_node_ref(id) {
             Some(n) => n,
             None => return,
         };
-        // 交互组件根（interactive）使用自身交互状态，否则继承父节点状态。
-        // 这样 Button/Checkbox 等组件的背景/子节点能随 hover/pressed 更新。
-        let state = if node_ref.is_interactive() {
-            layers.tree.state(id)
+        // HTML 式状态继承：当前节点自身有 listener 时使用自身状态；
+        // 否则继承最近有 listener 的祖先状态。
+        // 这样 Button/Checkbox 等组件根设置 hover/pressed 后，内部子节点会跟随变化。
+        let own_state = layers.tree.state(id);
+        let state = if node_ref.listener().is_some() {
+            own_state
         } else {
-            inherited_state
+            listener_state.unwrap_or_default()
+        };
+        let next_listener_state = if node_ref.listener().is_some() {
+            Some(own_state)
+        } else {
+            listener_state
         };
 
         // 在 cv 中内联渲染（替代 ViewNode::render() 间接调用）
@@ -336,7 +344,7 @@ impl Runtime {
         // Canvas 当前为预留原语，不产生渲染元素。
 
         for child in &node.children {
-            Self::cv(child, z_index, layers, elements, state);
+            Self::cv(child, z_index, layers, elements, next_listener_state);
         }
     }
 }

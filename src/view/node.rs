@@ -76,9 +76,6 @@ pub enum ViewNode {
         color: Color,
         key: Option<String>,
         listener: Option<ClickCallbackRef>,
-        /// 是否为“交互组件根”。事件系统据此定位 hover/pressed/focus 的作用节点以及
-        /// 点击回调的分发目标，与是否挂有 listener 解耦（每节点都可有 listener）。
-        interactive: bool,
     },
     Image {
         data: std::sync::Arc<Vec<u8>>,
@@ -86,7 +83,6 @@ pub enum ViewNode {
         h: u32,
         key: Option<String>,
         listener: Option<ClickCallbackRef>,
-        interactive: bool,
     },
     Div {
         style: BoxStyle,
@@ -95,12 +91,10 @@ pub enum ViewNode {
         key: Option<String>,
         children: Vec<ViewNode>,
         listener: Option<ClickCallbackRef>,
-        interactive: bool,
     },
     Canvas {
         key: Option<String>,
         listener: Option<ClickCallbackRef>,
-        interactive: bool,
     },
 }
 
@@ -237,7 +231,6 @@ impl ViewNode {
                     font_size: b,
                     color: c,
                     listener: l1,
-                    interactive: i1,
                     ..
                 },
                 Text {
@@ -245,17 +238,15 @@ impl ViewNode {
                     font_size: y,
                     color: z,
                     listener: l2,
-                    interactive: i2,
                     ..
                 },
-            ) => a == x && (b - y).abs() < 0.001 && c == z && l1 == l2 && i1 == i2,
+            ) => a == x && (b - y).abs() < 0.001 && c == z && l1 == l2,
             (
                 Image {
                     data: a,
                     w: b,
                     h: c,
                     listener: l1,
-                    interactive: i1,
                     ..
                 },
                 Image {
@@ -263,17 +254,15 @@ impl ViewNode {
                     w: y,
                     h: z,
                     listener: l2,
-                    interactive: i2,
                     ..
                 },
-            ) => a == x && b == y && c == z && l1 == l2 && i1 == i2,
+            ) => a == x && b == y && c == z && l1 == l2,
             (
                 Div {
                     style: s1,
                     flex: f1,
                     display: d1,
                     listener: l1,
-                    interactive: i1,
                     ..
                 },
                 Div {
@@ -281,13 +270,10 @@ impl ViewNode {
                     flex: f2,
                     display: d2,
                     listener: l2,
-                    interactive: i2,
                     ..
                 },
-            ) => s1 == s2 && f1 == f2 && d1 == d2 && l1 == l2 && i1 == i2,
-            (Canvas { listener: l1, interactive: i1, .. }, Canvas { listener: l2, interactive: i2, .. }) => {
-                l1 == l2 && i1 == i2
-            }
+            ) => s1 == s2 && f1 == f2 && d1 == d2 && l1 == l2,
+            (Canvas { listener: l1, .. }, Canvas { listener: l2, .. }) => l1 == l2,
             _ => false,
         }
     }
@@ -305,16 +291,6 @@ impl ViewNode {
         }
     }
 
-    /// 是否为交互组件根（见 `interactive` 字段）。
-    pub fn is_interactive(&self) -> bool {
-        match self {
-            ViewNode::Text { interactive, .. }
-            | ViewNode::Image { interactive, .. }
-            | ViewNode::Div { interactive, .. }
-            | ViewNode::Canvas { interactive, .. } => *interactive,
-        }
-    }
-
     pub fn on_click(&self) -> Option<ClickCallbackRef> {
         self.listener()
     }
@@ -322,5 +298,4 @@ impl ViewNode {
     pub fn on_click_id(&self) -> Option<u64> {
         self.listener().map(|c| c.id())
     }
-
 }

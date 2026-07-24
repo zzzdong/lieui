@@ -21,7 +21,6 @@ impl View for Divider {
             key: None,
             children: vec![],
             listener: None,
-            interactive: false,
         }
     }
 }

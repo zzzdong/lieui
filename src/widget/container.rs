@@ -92,7 +92,6 @@ impl View for Container {
             key: None,
             children: self.children.iter().map(|c| c.build()).collect(),
             listener: self.on_click,
-            interactive: self.on_click.is_some(),
         }
     }
 }

@@ -90,7 +90,6 @@ impl View for Column {
             key: None,
             children: self.children.iter().map(|c| c.build()).collect(),
             listener: self.on_click,
-            interactive: self.on_click.is_some(),
         }
     }
 }
@@ -178,7 +177,6 @@ impl View for Row {
             key: None,
             children: self.children.iter().map(|c| c.build()).collect(),
             listener: self.on_click,
-            interactive: self.on_click.is_some(),
         }
     }
 }

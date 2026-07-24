@@ -59,7 +59,6 @@ impl View for Checkbox {
             key: None,
             children: vec![],
             listener: None,
-            interactive: false,
         };
 
         let mut children = vec![check_box];
@@ -70,7 +69,6 @@ impl View for Checkbox {
                 color: t.text.regular_default,
                 key: None,
                 listener: None,
-                interactive: false,
             });
         }
         ViewNode::Div {
@@ -89,7 +87,6 @@ impl View for Checkbox {
             key: None,
             children,
             listener: self.callback_id.map(ClickCallbackRef::Simple),
-            interactive: true,
         }
     }
 }
