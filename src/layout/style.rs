@@ -44,6 +44,68 @@ pub struct FlexStyle {
     pub line_space: f32,
 }
 
+impl PartialEq for FlexStyle {
+    fn eq(&self, other: &Self) -> bool {
+        use crate::layout::types::float_is_equal;
+        self.node_type == other.node_type
+            && self.direction == other.direction
+            && self.flex_direction == other.flex_direction
+            && self.justify_content == other.justify_content
+            && self.align_content == other.align_content
+            && self.align_items == other.align_items
+            && self.align_self == other.align_self
+            && self.flex_wrap == other.flex_wrap
+            && self.position_type == other.position_type
+            && self.display_type == other.display_type
+            && self.overflow_scroll == other.overflow_scroll
+            && float_is_equal(self.flex_basis, other.flex_basis)
+            && float_is_equal(self.flex_grow, other.flex_grow)
+            && float_is_equal(self.flex_shrink, other.flex_shrink)
+            && self
+                .margin
+                .iter()
+                .zip(other.margin.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && self.margin_from == other.margin_from
+            && self
+                .padding
+                .iter()
+                .zip(other.padding.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && self.padding_from == other.padding_from
+            && self
+                .border
+                .iter()
+                .zip(other.border.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && self.border_from == other.border_from
+            && self
+                .position
+                .iter()
+                .zip(other.position.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && self
+                .dim
+                .iter()
+                .zip(other.dim.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && self
+                .min_dim
+                .iter()
+                .zip(other.min_dim.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && self
+                .max_dim
+                .iter()
+                .zip(other.max_dim.iter())
+                .all(|(a, b)| float_is_equal(*a, *b))
+            && float_is_equal(self.item_space, other.item_space)
+            && float_is_equal(self.line_space, other.line_space)
+    }
+}
+
+impl Eq for FlexStyle {}
+
 impl Default for FlexStyle {
     fn default() -> Self {
         Self {
@@ -73,7 +135,7 @@ impl Default for FlexStyle {
 
             flex_wrap: FlexWrap::NoWrap,
             flex_grow: 0.0,
-            flex_shrink: 0.0, // Taitank 默认 0（Web 默认 1）
+            flex_shrink: 1.0, // CSS 标准默认 1；Taitank 原默认 0 会导致 Row 溢出
             flex_basis: VALUE_AUTO,
             item_space: 0.0,
             line_space: 0.0,
@@ -360,5 +422,160 @@ impl FlexStyle {
             flex_direction: FlexDirection::Row,
             ..Default::default()
         }
+    }
+
+    /// 块级容器（单列自上而下排列，不扩展）
+    pub fn block() -> Self {
+        Self::column()
+    }
+
+    pub fn width(mut self, w: f32) -> Self {
+        self.dim[Dimension::Width as usize] = w;
+        self
+    }
+
+    pub fn height(mut self, h: f32) -> Self {
+        self.dim[Dimension::Height as usize] = h;
+        self
+    }
+
+    pub fn min_width(mut self, w: f32) -> Self {
+        self.min_dim[Dimension::Width as usize] = w;
+        self
+    }
+
+    pub fn min_height(mut self, h: f32) -> Self {
+        self.min_dim[Dimension::Height as usize] = h;
+        self
+    }
+
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.max_dim[Dimension::Width as usize] = w;
+        self
+    }
+
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.max_dim[Dimension::Height as usize] = h;
+        self
+    }
+
+    pub fn padding_all(mut self, v: f32) -> Self {
+        self.set_padding(CSSDirection::All, v);
+        self
+    }
+
+    pub fn padding_left(mut self, v: f32) -> Self {
+        self.set_padding(CSSDirection::Left, v);
+        self
+    }
+
+    pub fn padding_top(mut self, v: f32) -> Self {
+        self.set_padding(CSSDirection::Top, v);
+        self
+    }
+
+    pub fn padding_right(mut self, v: f32) -> Self {
+        self.set_padding(CSSDirection::Right, v);
+        self
+    }
+
+    pub fn padding_bottom(mut self, v: f32) -> Self {
+        self.set_padding(CSSDirection::Bottom, v);
+        self
+    }
+
+    /// 水平方向 padding 之和（Left + Right）。
+    pub fn horizontal_padding(&self) -> f32 {
+        self.padding[CSSDirection::Left as usize] + self.padding[CSSDirection::Right as usize]
+    }
+
+    /// 水平方向 border 之和（Left + Right）。
+    pub fn horizontal_border(&self) -> f32 {
+        self.border[CSSDirection::Left as usize] + self.border[CSSDirection::Right as usize]
+    }
+
+    pub fn margin_all(mut self, v: f32) -> Self {
+        self.set_margin(CSSDirection::All, v);
+        self
+    }
+
+    pub fn margin_left(mut self, v: f32) -> Self {
+        self.set_margin(CSSDirection::Left, v);
+        self
+    }
+
+    pub fn margin_top(mut self, v: f32) -> Self {
+        self.set_margin(CSSDirection::Top, v);
+        self
+    }
+
+    pub fn margin_right(mut self, v: f32) -> Self {
+        self.set_margin(CSSDirection::Right, v);
+        self
+    }
+
+    pub fn margin_bottom(mut self, v: f32) -> Self {
+        self.set_margin(CSSDirection::Bottom, v);
+        self
+    }
+
+    pub fn justify_content(mut self, j: FlexAlign) -> Self {
+        self.justify_content = j;
+        self
+    }
+
+    pub fn align_items(mut self, a: FlexAlign) -> Self {
+        self.align_items = a;
+        self
+    }
+
+    pub fn align_self(mut self, a: FlexAlign) -> Self {
+        self.align_self = a;
+        self
+    }
+
+    pub fn flex_grow(mut self, v: f32) -> Self {
+        self.flex_grow = v;
+        self
+    }
+
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
+        self
+    }
+
+    pub fn gap(mut self, v: f32) -> Self {
+        self.item_space = v;
+        self
+    }
+
+    pub fn wrap(mut self, w: FlexWrap) -> Self {
+        self.flex_wrap = w;
+        self
+    }
+
+    pub fn absolute(mut self) -> Self {
+        self.position_type = PositionType::Absolute;
+        self
+    }
+
+    pub fn position_left(mut self, v: f32) -> Self {
+        self.set_position(CSSDirection::Left, v);
+        self
+    }
+
+    pub fn position_top(mut self, v: f32) -> Self {
+        self.set_position(CSSDirection::Top, v);
+        self
+    }
+
+    pub fn position_right(mut self, v: f32) -> Self {
+        self.set_position(CSSDirection::Right, v);
+        self
+    }
+
+    pub fn position_bottom(mut self, v: f32) -> Self {
+        self.set_position(CSSDirection::Bottom, v);
+        self
     }
 }

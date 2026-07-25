@@ -59,18 +59,24 @@ impl EventManager {
     fn set_hovered_state(tree: &ElementTree, id: Option<ElementId>, hovered: bool) {
         let Some(id) = id else { return };
         if tree.contains(id) {
-            let mut s = tree.state(id);
-            s.hovered = hovered;
-            tree.set_state(id, s);
+            let s = tree.state(id);
+            if s.hovered != hovered {
+                let mut s = s;
+                s.hovered = hovered;
+                tree.set_state(id, s);
+            }
         }
     }
 
     fn set_pressed_state(tree: &ElementTree, id: Option<ElementId>, pressed: bool) {
         let Some(id) = id else { return };
         if tree.contains(id) {
-            let mut s = tree.state(id);
-            s.pressed = pressed;
-            tree.set_state(id, s);
+            let s = tree.state(id);
+            if s.pressed != pressed {
+                let mut s = s;
+                s.pressed = pressed;
+                tree.set_state(id, s);
+            }
         }
     }
 
@@ -111,7 +117,7 @@ impl EventManager {
             .path
             .iter()
             .copied()
-            .filter(|&id| tree.get_node_ref(id).and_then(|n| n.listener()).is_some())
+            .filter(|&id| tree.has_any_listener(id))
             .collect();
         for &id in &self.pressed_listeners {
             Self::set_pressed_state(tree, Some(id), true);
@@ -226,7 +232,7 @@ impl EventManager {
                 h.path
                     .iter()
                     .copied()
-                    .filter(|&id| tree.get_node_ref(id).and_then(|n| n.listener()).is_some())
+                    .filter(|&id| tree.has_any_listener(id))
                     .collect()
             })
             .unwrap_or_default();

@@ -16,6 +16,9 @@ pub struct Runtime {
     needs_layout: bool,
     needs_render: bool,
     pending_view_tree: Option<ViewNode>,
+    /// 上一次提交的 ViewNode 树，用于缓存 diff 短路。
+    /// 当 builder 产出与上次完全相同的树时，跳过 Reconciler 和 callback 清空。
+    last_view_tree: Option<ViewNode>,
     pub debug_stats: DebugStats,
 }
 #[derive(Debug, Default)]
@@ -31,17 +34,36 @@ impl Runtime {
             needs_layout: true,
             needs_render: true,
             pending_view_tree: None,
+            last_view_tree: None,
             debug_stats: DebugStats::default(),
         }
     }
     pub fn set_viewport(&mut self, vp: Size) {
         self.viewport = vp;
+        self.layers.tree.mark_dirty_all();
         self.needs_layout = true;
         self.needs_render = true;
     }
-    pub fn submit_view_tree(&mut self, vt: ViewNode) {
+    /// 提交新的 ViewNode 树。若与上次提交的树完全相同，返回 `false`，
+    /// 调用方可据此跳过 Reconciler、布局与渲染管线的重复执行。
+    ///
+    /// `rebuild_requested`：当为 `true` 时跳过 `tree_eq()` 比较，直接进入 Reconciler。
+    /// 因为 `state::request_rebuild()` 已被消费，此处通过参数传递。
+    pub fn submit_view_tree(&mut self, vt: ViewNode, rebuild_requested: bool) -> bool {
+        if !rebuild_requested
+            && self
+                .last_view_tree
+                .as_ref()
+                .is_some_and(|last| last.tree_eq(&vt))
+        {
+            // 树无变化，保留上一次的缓存，不触发 Reconciler。
+            self.pending_view_tree = None;
+            return false;
+        }
+        self.last_view_tree = Some(vt.clone());
         self.pending_view_tree = Some(vt);
         self.needs_render = true;
+        true
     }
 
     /// 请求在下一次 frame 时重排（由事件回调的 `EventEffects` 触发）
@@ -118,41 +140,27 @@ impl Runtime {
                 if DUMPED.set(true).is_ok() {
                     eprintln!("=== LIEUI Layout Tree ===");
                     for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
-                        let label = format!("{:?}", lt);
-                        self.layers.with_layout(lt, |ctx| {
-                            if ctx.root.is_some() {
-                                eprintln!("--- Layer: {} ---", label);
-                                ctx.dump_tree();
+                        if let Some(rid) = self.layers.layer_root(lt) {
+                            eprintln!("--- Layer: {:?} ---", lt);
+                            fn dump_layout(
+                                tree: &element::ElementTree,
+                                id: crate::core::ElementId,
+                                depth: usize,
+                            ) {
+                                let indent = "  ".repeat(depth);
+                                let nt =
+                                    tree.get_node_ref(id).map(|n| n.type_name()).unwrap_or("?");
+                                let l = tree.layout(id);
+                                eprintln!(
+                                    "{}{:?} [{}] pos=({:.1},{:.1}) size=({:.1},{:.1})",
+                                    indent, id, nt, l.x, l.y, l.width, l.height
+                                );
+                                for cid in tree.children_of(id) {
+                                    dump_layout(tree, cid, depth + 1);
+                                }
                             }
-                        });
-                    }
-                    // 打印 ElementTree 父子关系
-                    eprintln!("--- ElementTree parent-child ---");
-                    if let Some(rid) = self.layers.layer_root(LayerType::Base) {
-                        fn dump_tree_et(
-                            tree: &element::ElementTree,
-                            id: crate::core::ElementId,
-                            depth: usize,
-                        ) {
-                            let indent = "  ".repeat(depth);
-                            let nt = tree
-                                .get_node_ref(id)
-                                .map(|n| n.node_type_name())
-                                .unwrap_or("?");
-                            eprintln!(
-                                "{}{:?} [{}] < {}",
-                                indent,
-                                id,
-                                nt,
-                                tree.parent_of(id)
-                                    .map(|p| format!("{:?}", p))
-                                    .unwrap_or("root".into())
-                            );
-                            for cid in tree.children_of(id) {
-                                dump_tree_et(tree, cid, depth + 1);
-                            }
+                            dump_layout(&self.layers.tree, rid, 0);
                         }
-                        dump_tree_et(&self.layers.tree, rid, 0);
                     }
                 }
             }
@@ -193,81 +201,90 @@ impl Runtime {
     }
 
     fn perform_layout(&mut self) {
+        // 若整棵树没有 dirty 节点，说明无需重排（viewport 变化时会全量标记 dirty）。
+        if !self.layers.tree.has_dirty_node() {
+            return;
+        }
         for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
             if let Some(rid) = self.layers.layer_root(lt) {
-                let mut ctx = LayoutContext::new();
-                // 注意：当前 `collect` 并不会真正增量复用上帧的 LayoutContext，
-                // 而是每帧全量重建（prev 仅作为参数占位传入），未来可作性能优化。
-                self.layers.with_layout(lt, |prev| {
-                    ctx.collect(rid, &self.layers.tree, prev.root.as_ref());
-                });
-                ctx.compute(self.viewport, &self.layers.tree);
-                self.layers.set_layer_layout(lt, ctx);
-            } else {
-                self.layers.set_layer_layout(lt, LayoutContext::new());
+                LayoutContext::compute(rid, &self.layers.tree, self.viewport);
             }
         }
+        self.layers.tree.clear_dirty();
     }
 
     fn build_render_tree(&self) -> Vec<LayeredElement> {
         let mut e = Vec::new();
         for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
             let z = lt.z_index();
-            self.layers.with_layout(lt, |l| {
-                if let Some(ref r) = l.root {
-                    Self::cv(r, z, &self.layers, &mut e, None);
-                }
-            });
+            if let Some(rid) = self.layers.layer_root(lt) {
+                Self::cv(rid, z, &self.layers, &mut e, None);
+            }
         }
         e.sort_by_key(|x| x.z_index);
         e
     }
 
     fn cv(
-        node: &crate::layout::node::LayoutNode,
+        id: crate::core::ElementId,
         z_index: i32,
         layers: &Layers,
         elements: &mut Vec<LayeredElement>,
         listener_state: Option<crate::core::state::ElementState>,
     ) {
-        let id = node.id;
         let node_ref = match layers.tree.get_node_ref(id) {
             Some(n) => n,
             None => return,
         };
+        let computed = layers.tree.layout(id);
         // HTML 式状态继承：当前节点自身有 listener 时使用自身状态；
         // 否则继承最近有 listener 的祖先状态。
         // 这样 Button/Checkbox 等组件根设置 hover/pressed 后，内部子节点会跟随变化。
         let own_state = layers.tree.state(id);
-        let state = if node_ref.listener().is_some() {
+        let has_callback = layers.tree.has_any_listener(id);
+        let state = if has_callback {
             own_state
         } else {
             listener_state.unwrap_or_default()
         };
-        let next_listener_state = if node_ref.listener().is_some() {
+        let next_listener_state = if has_callback {
             Some(own_state)
         } else {
             listener_state
         };
 
         // 在 cv 中内联渲染（替代 ViewNode::render() 间接调用）
-        if let crate::view::node::ViewNode::Text {
-            content,
-            font_size,
-            color,
-            ..
-        } = node_ref
-        {
-            let r = node.computed.rect();
+        if let crate::view::node::ViewNode::Text { content, style, .. } = node_ref {
+            let r = computed.rect();
+            // 计算内容区宽度：实际布局宽度减去水平 padding/border。
+            // 文本排版缓存应以此宽度作为 max_width，否则长文本可能不按要求换行。
+            let layout = node_ref.layout();
+            let content_w =
+                (computed.width - layout.horizontal_padding() - layout.horizontal_border())
+                    .max(0.0);
+            let mut layout_style = style.clone();
+            // wrap=false 时跳过 max_width 二次限制，避免渲染阶段又把单行文本压缩换行。
+            if style.wrap {
+                layout_style.max_width = Some(
+                    layout_style
+                        .max_width
+                        .unwrap_or(f64::MAX)
+                        .min(content_w as f64),
+                );
+            }
+
             // 复用 TextLayout 缓存，避免每帧重新排版：
-            // 命中时 peek 返回克隆（直接给 TextRun 使用），未命中时才创建并写入缓存一次。
+            // 命中时直接返回 Arc 克隆，未命中时才创建并写入缓存一次。
             let lay = match layers.tree.peek_text_layout_cache(id) {
                 Some(cached) => cached,
                 None => {
-                    let lay = Box::new(crate::text::create_text_layout(
-                        content, *font_size, *color, None,
+                    let lay = std::sync::Arc::new(crate::text::create_text_layout(
+                        content,
+                        &layout_style,
                     ));
-                    layers.tree.set_text_layout_cache(id, lay.clone());
+                    layers
+                        .tree
+                        .set_text_layout_cache(id, std::sync::Arc::clone(&lay));
                     lay
                 }
             };
@@ -276,19 +293,19 @@ impl Runtime {
                     crate::render::visual::VisualElement::TextRun {
                         text: std::sync::Arc::from(content.as_str()),
                         position: kurbo::Point::new(r.x as f64, r.y as f64),
-                        color: *color,
-                        font_size: *font_size,
-                        font_family: "sans-serif".to_string(),
+                        color: layout_style.color,
+                        font_size: layout_style.font_size,
+                        font_family: layout_style.font_family.clone(),
                         rotation: 0.0,
-                        max_width: None,
+                        max_width: layout_style.max_width,
                         layout: Some(lay),
                     },
                     z_index,
                 )
                 .with_id(id.as_ffi()),
             );
-        } else if let crate::view::node::ViewNode::Image { data, w, h, .. } = node_ref {
-            let r = node.computed.rect();
+        } else if let crate::view::node::ViewNode::Image { data, style, .. } = node_ref {
+            let r = computed.rect();
             elements.push(
                 crate::render::visual::LayeredElement::new(
                     crate::render::visual::VisualElement::Image {
@@ -299,28 +316,28 @@ impl Runtime {
                             (r.y + r.height) as f64,
                         ),
                         data: std::sync::Arc::clone(data),
-                        width: *w,
-                        height: *h,
-                        opacity: None,
+                        width: style.width,
+                        height: style.height,
+                        opacity: Some(style.opacity),
                     },
                     z_index,
                 )
                 .with_id(id.as_ffi()),
             );
-        } else if let crate::view::node::ViewNode::Div { style, .. } = node_ref {
-            let bg = if state.pressed && style.pressed_background.is_some() {
-                style.pressed_background
-            } else if state.hovered && style.hover_background.is_some() {
-                style.hover_background
+        } else if let crate::view::node::ViewNode::Div { paint, .. } = node_ref {
+            let bg = if state.pressed && paint.pressed_background.is_some() {
+                paint.pressed_background
+            } else if state.hovered && paint.hover_background.is_some() {
+                paint.hover_background
             } else {
-                style.background_color
+                paint.background_color
             };
             if let Some(bg) = bg {
-                let r = node.computed.rect();
+                let r = computed.rect();
                 let mut fs = crate::render::visual::FillStrokeStyle::new().with_fill(bg);
-                if let Some(bc) = style.border_color {
-                    if style.border_width > 0.0 {
-                        fs = fs.with_stroke(bc, style.border_width as f64);
+                if let Some(bc) = paint.border_color {
+                    if paint.border_width > 0.0 {
+                        fs = fs.with_stroke(bc, paint.border_width as f64);
                     }
                 }
                 elements.push(
@@ -332,7 +349,7 @@ impl Runtime {
                                 (r.x + r.width) as f64,
                                 (r.y + r.height) as f64,
                             ),
-                            radius: style.border_radius as f64,
+                            radius: paint.border_radius as f64,
                             style: fs,
                         },
                         z_index,
@@ -340,11 +357,131 @@ impl Runtime {
                     .with_id(id.as_ffi()),
                 );
             }
-        }
-        // Canvas 当前为预留原语，不产生渲染元素。
 
-        for child in &node.children {
-            Self::cv(child, z_index, layers, elements, next_listener_state);
+            // 子节点渲染：clip_content 时收集到 Group 并设置 clip_rect，
+            // 否则保持平铺以最大化渲染性能。
+            if paint.clip_content {
+                let mut child_elements = Vec::new();
+                for cid in layers.tree.children_of(id) {
+                    Self::cv(
+                        cid,
+                        z_index,
+                        layers,
+                        &mut child_elements,
+                        next_listener_state,
+                    );
+                }
+                if !child_elements.is_empty() {
+                    let r = computed.rect();
+                    elements.push(
+                        crate::render::visual::LayeredElement::new(
+                            crate::render::visual::VisualElement::Group {
+                                children: child_elements,
+                                transform: None,
+                                clip_rect: Some(crate::render::visual::KRect::new(
+                                    r.x as f64,
+                                    r.y as f64,
+                                    (r.x + r.width) as f64,
+                                    (r.y + r.height) as f64,
+                                )),
+                            },
+                            z_index,
+                        )
+                        .with_id(id.as_ffi()),
+                    );
+                }
+            } else {
+                for cid in layers.tree.children_of(id) {
+                    Self::cv(cid, z_index, layers, elements, next_listener_state);
+                }
+            }
+            return;
         }
+
+        // Text / Image 为叶子节点，无 children；Div 分支已在上方处理。
+        for cid in layers.tree.children_of(id) {
+            Self::cv(cid, z_index, layers, elements, next_listener_state);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Color, Size};
+    use crate::layout::style::FlexStyle;
+    use crate::render::visual::VisualElement;
+    use crate::view::paint::PaintStyle;
+
+    fn div(layout: FlexStyle, paint: PaintStyle, children: Vec<ViewNode>) -> ViewNode {
+        ViewNode::Div {
+            layout,
+            paint,
+            key: None,
+            children,
+            listeners: Vec::new(),
+        }
+    }
+
+    fn colored_box(w: f32, h: f32, color: Color) -> ViewNode {
+        ViewNode::Div {
+            layout: FlexStyle::default().width(w).height(h),
+            paint: PaintStyle::default().background(color),
+            key: None,
+            children: vec![],
+            listeners: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn clip_content_generates_group_with_clip_rect() {
+        let root = div(
+            FlexStyle::block().width(100.0).height(100.0),
+            PaintStyle::default().background(Color::WHITE).clip(true),
+            vec![colored_box(200.0, 200.0, Color::RED)],
+        );
+
+        let mut rt = Runtime::new(Size::new(100.0, 100.0));
+        rt.submit_view_tree(root, false);
+        let rendered = rt.frame();
+
+        // 应该有容器背景 + 一个 Group
+        assert_eq!(rendered.len(), 2, "expected background + one Group");
+        let group = rendered
+            .iter()
+            .find(|e| matches!(e.element, VisualElement::Group { .. }))
+            .expect("clip_content should produce a Group");
+        if let VisualElement::Group {
+            clip_rect: Some(rect),
+            children,
+            ..
+        } = &group.element
+        {
+            assert!((rect.x1 - rect.x0 - 100.0).abs() < 0.01);
+            assert!((rect.y1 - rect.y0 - 100.0).abs() < 0.01);
+            assert_eq!(children.len(), 1);
+        } else {
+            panic!("Group should have a clip_rect");
+        }
+    }
+
+    #[test]
+    fn no_clip_content_keeps_children_flat() {
+        let root = div(
+            FlexStyle::block().width(100.0).height(100.0),
+            PaintStyle::default(),
+            vec![colored_box(200.0, 200.0, Color::RED)],
+        );
+
+        let mut rt = Runtime::new(Size::new(100.0, 100.0));
+        rt.submit_view_tree(root, false);
+        let rendered = rt.frame();
+
+        assert!(
+            rendered
+                .iter()
+                .all(|e| !matches!(e.element, VisualElement::Group { .. })),
+            "non-clip container should not produce Group elements"
+        );
     }
 }

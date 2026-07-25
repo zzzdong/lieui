@@ -18,10 +18,10 @@
 //!   └───────────────────────────────────────────────┘
 
 use lieui::geometry::{Color, Size};
-use lieui::layout::flex::{AlignItems, JustifyContent};
+use lieui::layout::types::FlexAlign;
 use lieui::prelude::*;
 use lieui::state::State;
-use lieui::view::View;
+use lieui::widget::Widget;
 
 fn hex(c: u32) -> Color {
     Color::new(
@@ -50,7 +50,7 @@ fn sample_pages() -> Vec<PageInfo> {
         .collect()
 }
 
-fn divider(border: Color) -> impl View {
+fn divider(border: Color) -> impl Widget {
     Container::new().height(1.0).background(border)
 }
 
@@ -155,7 +155,7 @@ fn main() {
     // ── Builder ──
 
     let app = Application::new(
-        move || {
+        move |_ctx| {
             let c = |h| hex(h);
             let hbg = c(0x1e293b);
             let sbb = c(0xf1f5f9);
@@ -197,7 +197,7 @@ fn main() {
                             .child(
                                 Row::new()
                                     .spacing(10.0)
-                                    .align_items(AlignItems::Center)
+                                    .align_items(FlexAlign::Center)
                                     .child(
                                         Container::new()
                                             .width(48.0)
@@ -206,8 +206,8 @@ fn main() {
                                             .child(
                                                 Column::new()
                                                     .expand(true)
-                                                    .justify_content(JustifyContent::Center)
-                                                    .align_items(AlignItems::Center)
+                                                    .justify_content(FlexAlign::Center)
+                                                    .align_items(FlexAlign::Center)
                                                     .child(
                                                         Text::new(format!("{}", info.index + 1))
                                                             .font_size(28.0)
@@ -266,8 +266,8 @@ fn main() {
                     Container::new().expand(true).background(cbgb).child(
                         Column::new()
                             .expand(true)
-                            .justify_content(JustifyContent::Center)
-                            .align_items(AlignItems::Stretch)
+                            .justify_content(FlexAlign::Center)
+                            .align_items(FlexAlign::Stretch)
                             .child(card),
                     )
                 } else {
@@ -277,8 +277,8 @@ fn main() {
                 Container::new().expand(true).background(cbgb).child(
                     Column::new()
                         .expand(true)
-                        .justify_content(JustifyContent::Center)
-                        .align_items(AlignItems::Center)
+                        .justify_content(FlexAlign::Center)
+                        .align_items(FlexAlign::Center)
                         .child(
                             Text::new("Select a page to preview")
                                 .font_size(14.0)
@@ -297,12 +297,12 @@ fn main() {
                         .child(
                             Row::new()
                                 .expand(true)
-                                .justify_content(JustifyContent::SpaceBetween)
-                                .align_items(AlignItems::Center)
+                                .justify_content(FlexAlign::SpaceBetween)
+                                .align_items(FlexAlign::Center)
                                 .child(
                                     Row::new()
                                         .spacing(12.0)
-                                        .align_items(AlignItems::Center)
+                                        .align_items(FlexAlign::Center)
                                         .child(Button::new("Load Sample").on_click(load.clone()))
                                         .child(Button::new("Delete Sel").on_click(del.clone()))
                                         .child(Button::new("Extract Sel").on_click(ext.clone()))
@@ -328,7 +328,7 @@ fn main() {
             let status_bar = Container::new().background(sbg).child(
                 Row::new()
                     .spacing(24.0)
-                    .align_items(AlignItems::Center)
+                    .align_items(FlexAlign::Center)
                     .child(
                         Text::new(format!("Pages: {}", pl.len()))
                             .font_size(11.0)
@@ -346,21 +346,20 @@ fn main() {
             // Container.expand(true) 填满视口宽高，
             // 内层 Column 填充高度且从 Container 的 loose 约束获得全宽
 
-            Container::new()
-                .expand(true)
-                .child(
+            Box::new(
+                Container::new().expand(true).child(
                     Column::new()
                         .spacing(0.0)
                         .expand(true)
                         .child(
                             Container::new().background(hbg).child(
                                 Row::new()
-                                    .justify_content(JustifyContent::SpaceBetween)
-                                    .align_items(AlignItems::Center)
+                                    .justify_content(FlexAlign::SpaceBetween)
+                                    .align_items(FlexAlign::Center)
                                     .child(
                                         Row::new()
                                             .spacing(16.0)
-                                            .align_items(AlignItems::Center)
+                                            .align_items(FlexAlign::Center)
                                             .child(
                                                 Text::new("PDFKit")
                                                     .font_size(20.0)
@@ -382,14 +381,14 @@ fn main() {
                             Row::new()
                                 .spacing(0.0)
                                 .expand(true)
-                                .align_items(AlignItems::Stretch)
+                                .align_items(FlexAlign::Stretch)
                                 .child(sidebar)
                                 .child(right),
                         )
                         .child(divider(bd))
                         .child(status_bar),
-                )
-                .build()
+                ),
+            )
         },
         Size::new(960.0, 640.0),
     );

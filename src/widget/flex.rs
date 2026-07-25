@@ -1,33 +1,38 @@
 //! Column / Row — 映射到 `ViewNode::Div`（Flex 模式）的布局型组件
 
 use crate::event::EventContext;
-use crate::layout::box_model::BoxStyle;
-use crate::layout::flex::{AlignItems, FlexDirection, FlexStyle, FlexWrap, JustifyContent};
-use crate::state;
-use crate::view::node::{ClickCallbackRef, DisplayMode, ViewNode};
-use crate::view::View;
+use crate::geometry::Color;
+use crate::layout::style::FlexStyle;
+use crate::layout::types::{FlexAlign, FlexWrap};
+use crate::view::node::{Listener, ViewNode};
+use crate::view::paint::PaintStyle;
+use crate::widget::{BuildContext, Widget};
+use std::rc::Rc;
 
 // ===== Column (map → ViewNode::Flex, direction = Column) =====
 pub struct Column {
     spacing: f32,
-    justify: JustifyContent,
-    align: AlignItems,
+    justify: FlexAlign,
+    align: FlexAlign,
     expand: bool,
-    children: Vec<Box<dyn View>>,
-    on_click: Option<ClickCallbackRef>,
+    children: Vec<Box<dyn Widget>>,
+    listeners: Vec<Listener>,
+    /// 视觉样式自定义。
+    paint: Option<PaintStyle>,
 }
 impl Column {
     pub fn new() -> Self {
         Self {
             spacing: 4.0,
-            justify: JustifyContent::Start,
-            align: AlignItems::Stretch,
+            justify: FlexAlign::Start,
+            align: FlexAlign::Stretch,
             expand: false,
             children: Vec::new(),
-            on_click: None,
+            listeners: Vec::new(),
+            paint: None,
         }
     }
-    pub fn child(mut self, c: impl View + 'static) -> Self {
+    pub fn child(mut self, c: impl Widget + 'static) -> Self {
         self.children.push(Box::new(c));
         self
     }
@@ -35,11 +40,11 @@ impl Column {
         self.spacing = s;
         self
     }
-    pub fn justify_content(mut self, j: JustifyContent) -> Self {
+    pub fn justify_content(mut self, j: FlexAlign) -> Self {
         self.justify = j;
         self
     }
-    pub fn align_items(mut self, a: AlignItems) -> Self {
+    pub fn align_items(mut self, a: FlexAlign) -> Self {
         self.align = a;
         self
     }
@@ -48,19 +53,56 @@ impl Column {
         self
     }
     pub fn center(mut self) -> Self {
-        self.justify = JustifyContent::Center;
-        self.align = AlignItems::Center;
+        self.justify = FlexAlign::Center;
+        self.align = FlexAlign::Center;
         self.expand = true;
         self
     }
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
-        self.on_click = Some(ClickCallbackRef::Simple(state::register_click(Box::new(f))));
+        self.listeners.push(Listener::on_click(Rc::new(f)));
         self
     }
     pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
-        self.on_click = Some(ClickCallbackRef::WithCtx(state::register_click_with_ctx(
-            Box::new(f),
-        )));
+        self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
+        self
+    }
+
+    // ── 视觉样式 ──
+
+    pub fn paint_style(mut self, p: PaintStyle) -> Self {
+        self.paint = Some(p);
+        self
+    }
+    pub fn background(mut self, c: Color) -> Self {
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .background_color = Some(c);
+        self
+    }
+    pub fn hover_background(mut self, c: Color) -> Self {
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .hover_background = Some(c);
+        self
+    }
+    pub fn pressed_background(mut self, c: Color) -> Self {
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .pressed_background = Some(c);
+        self
+    }
+    pub fn border_radius(mut self, r: f32) -> Self {
+        self.paint.get_or_insert_with(PaintStyle::new).border_radius = r;
+        self
+    }
+    pub fn border(mut self, width: f32, color: Color) -> Self {
+        let p = self.paint.get_or_insert_with(PaintStyle::new);
+        p.border_width = width;
+        p.border_color = Some(color);
+        self
+    }
+    pub fn opacity(mut self, o: f32) -> Self {
+        self.paint.get_or_insert_with(PaintStyle::new).opacity = o.clamp(0.0, 1.0);
         self
     }
 }
@@ -69,27 +111,27 @@ impl Default for Column {
         Self::new()
     }
 }
-impl View for Column {
-    fn build(&self) -> ViewNode {
+impl Widget for Column {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        let mut layout = FlexStyle::column()
+            .justify_content(self.justify)
+            .align_items(self.align)
+            .gap(self.spacing)
+            .wrap(FlexWrap::NoWrap);
+        if self.expand {
+            layout = layout.flex_grow(1.0);
+        }
         ViewNode::Div {
-            style: BoxStyle {
-                expand: self.expand,
-                ..BoxStyle::default()
-            },
-            flex: FlexStyle {
-                direction: FlexDirection::Column,
-                justify: self.justify,
-                align: self.align,
-                spacing: self.spacing,
-                expand: self.expand,
-                flex_grow: 0.0,
-                flex_shrink: 1.0,
-                wrap: FlexWrap::NoWrap,
-            },
-            display: DisplayMode::Flex,
+            layout,
+            paint: self.paint.clone().unwrap_or_default(),
             key: None,
-            children: self.children.iter().map(|c| c.build()).collect(),
-            listener: self.on_click,
+            children: self
+                .children
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ctx.child(i, c.as_ref()))
+                .collect(),
+            listeners: self.listeners.clone(),
         }
     }
 }
@@ -97,24 +139,27 @@ impl View for Column {
 // ===== Row (map → ViewNode::Flex, direction = Row) =====
 pub struct Row {
     spacing: f32,
-    justify: JustifyContent,
-    align: AlignItems,
+    justify: FlexAlign,
+    align: FlexAlign,
     expand: bool,
-    children: Vec<Box<dyn View>>,
-    on_click: Option<ClickCallbackRef>,
+    children: Vec<Box<dyn Widget>>,
+    listeners: Vec<Listener>,
+    /// 视觉样式自定义。
+    paint: Option<PaintStyle>,
 }
 impl Row {
     pub fn new() -> Self {
         Self {
             spacing: 4.0,
-            justify: JustifyContent::Start,
-            align: AlignItems::Center,
+            justify: FlexAlign::Start,
+            align: FlexAlign::Center,
             expand: false,
             children: Vec::new(),
-            on_click: None,
+            listeners: Vec::new(),
+            paint: None,
         }
     }
-    pub fn child(mut self, c: impl View + 'static) -> Self {
+    pub fn child(mut self, c: impl Widget + 'static) -> Self {
         self.children.push(Box::new(c));
         self
     }
@@ -122,11 +167,11 @@ impl Row {
         self.spacing = s;
         self
     }
-    pub fn justify_content(mut self, j: JustifyContent) -> Self {
+    pub fn justify_content(mut self, j: FlexAlign) -> Self {
         self.justify = j;
         self
     }
-    pub fn align_items(mut self, a: AlignItems) -> Self {
+    pub fn align_items(mut self, a: FlexAlign) -> Self {
         self.align = a;
         self
     }
@@ -135,19 +180,56 @@ impl Row {
         self
     }
     pub fn center(mut self) -> Self {
-        self.justify = JustifyContent::Center;
-        self.align = AlignItems::Center;
+        self.justify = FlexAlign::Center;
+        self.align = FlexAlign::Center;
         self.expand = true;
         self
     }
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
-        self.on_click = Some(ClickCallbackRef::Simple(state::register_click(Box::new(f))));
+        self.listeners.push(Listener::on_click(Rc::new(f)));
         self
     }
     pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
-        self.on_click = Some(ClickCallbackRef::WithCtx(state::register_click_with_ctx(
-            Box::new(f),
-        )));
+        self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
+        self
+    }
+
+    // ── 视觉样式 ──
+
+    pub fn paint_style(mut self, p: PaintStyle) -> Self {
+        self.paint = Some(p);
+        self
+    }
+    pub fn background(mut self, c: Color) -> Self {
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .background_color = Some(c);
+        self
+    }
+    pub fn hover_background(mut self, c: Color) -> Self {
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .hover_background = Some(c);
+        self
+    }
+    pub fn pressed_background(mut self, c: Color) -> Self {
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .pressed_background = Some(c);
+        self
+    }
+    pub fn border_radius(mut self, r: f32) -> Self {
+        self.paint.get_or_insert_with(PaintStyle::new).border_radius = r;
+        self
+    }
+    pub fn border(mut self, width: f32, color: Color) -> Self {
+        let p = self.paint.get_or_insert_with(PaintStyle::new);
+        p.border_width = width;
+        p.border_color = Some(color);
+        self
+    }
+    pub fn opacity(mut self, o: f32) -> Self {
+        self.paint.get_or_insert_with(PaintStyle::new).opacity = o.clamp(0.0, 1.0);
         self
     }
 }
@@ -156,27 +238,27 @@ impl Default for Row {
         Self::new()
     }
 }
-impl View for Row {
-    fn build(&self) -> ViewNode {
+impl Widget for Row {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        let mut layout = FlexStyle::row()
+            .justify_content(self.justify)
+            .align_items(self.align)
+            .gap(self.spacing)
+            .wrap(FlexWrap::NoWrap);
+        if self.expand {
+            layout = layout.flex_grow(1.0);
+        }
         ViewNode::Div {
-            style: BoxStyle {
-                expand: self.expand,
-                ..BoxStyle::default()
-            },
-            flex: FlexStyle {
-                direction: FlexDirection::Row,
-                justify: self.justify,
-                align: self.align,
-                spacing: self.spacing,
-                expand: self.expand,
-                flex_grow: 0.0,
-                flex_shrink: 1.0,
-                wrap: FlexWrap::NoWrap,
-            },
-            display: DisplayMode::Flex,
+            layout,
+            paint: self.paint.clone().unwrap_or_default(),
             key: None,
-            children: self.children.iter().map(|c| c.build()).collect(),
-            listener: self.on_click,
+            children: self
+                .children
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ctx.child(i, c.as_ref()))
+                .collect(),
+            listeners: self.listeners.clone(),
         }
     }
 }

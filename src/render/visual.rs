@@ -4,6 +4,8 @@ use crate::text::TextLayout;
 pub use kurbo::{Affine, BezPath, Point as KPoint, Rect as KRect, Vec2};
 use std::sync::Arc;
 
+pub type TextLayoutRef = Arc<TextLayout>;
+
 /// 2D 变换
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Transform {
@@ -125,7 +127,7 @@ pub enum VisualElement {
         font_family: String,
         rotation: f64,
         max_width: Option<f64>,
-        layout: Option<Box<TextLayout>>,
+        layout: Option<TextLayoutRef>,
     },
     Image {
         bounds: KRect,

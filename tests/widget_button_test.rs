@@ -6,8 +6,7 @@ use lieui::geometry::Size;
 use lieui::render::visual::{LayeredElement, VisualElement};
 use lieui::runtime::Runtime;
 use lieui::text::TextEngine;
-use lieui::view::View;
-use lieui::widget::Button;
+use lieui::widget::{Button, Widget};
 
 fn find_button_parts(
     elements: &[LayeredElement],
@@ -26,7 +25,13 @@ fn find_button_parts(
                 font_size,
                 ..
             } if t.as_ref() == label => {
-                let (tw, th) = TextEngine::measure_text(t.as_ref(), *font_size, None);
+                let (tw, th) = TextEngine::measure_text(
+                    t.as_ref(),
+                    &lieui::view::paint::TextStyle {
+                        font_size: *font_size,
+                        ..Default::default()
+                    },
+                );
                 text = Some((position.x, position.y, tw, th));
             }
             _ => {}
@@ -38,10 +43,10 @@ fn find_button_parts(
 #[test]
 fn button_text_is_centered() {
     let label = "Load Sample";
-    let vt = Button::new(label).build();
+    let vt = Button::new(label).build_node();
 
     let mut rt = Runtime::new(Size::new(400.0, 200.0));
-    rt.submit_view_tree(vt);
+    rt.submit_view_tree(vt, false);
     let elements = rt.frame();
 
     let (rect, (tx, ty, tw, th)) =

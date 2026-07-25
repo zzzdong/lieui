@@ -30,13 +30,10 @@ pub mod prelude {
     pub use crate::geometry::{Color, Point, Rect, Size};
 
     // ── flex / layout ──
-    pub use crate::layout::flex::{AlignItems, FlexDirection, FlexWrap, JustifyContent};
+    pub use crate::layout::{FlexAlign, FlexDirection, FlexWrap};
 
     // ── theme ──
     pub use crate::theme::{current, set_theme, Theme};
-
-    // ── view ──
-    pub use crate::view::View;
 
     // ── widgets ──
     pub use crate::widget::{

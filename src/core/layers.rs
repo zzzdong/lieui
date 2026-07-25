@@ -1,12 +1,11 @@
 //! Layers — 三层架构 (Base / Overlay / Modal)
 //!
-//! 所有 Element 存在共享的 ElementTree 中，每层只维护自己的 root 和 LayoutContext。
+//! 所有 Element 存在共享的 ElementTree 中，每层只维护自己的 root。
+//! 布局结果直接保存在 ElementEntry::layout 中，命中测试也直接遍历 ElementTree。
 //! 所有层均用 RefCell 包裹，使 EventContext（持有 &Layers）可直接修改各层。
 use crate::core::ElementId;
 use crate::event::EventManager;
 use crate::geometry::Point;
-use crate::layout::context::LayoutContext;
-use crate::layout::node::LayoutNode;
 use crate::runtime::element::ElementTree;
 use std::cell::RefCell;
 
@@ -34,14 +33,10 @@ impl LayerType {
 
 struct LayerInfo {
     root: Option<ElementId>,
-    layout: LayoutContext,
 }
 impl LayerInfo {
     fn new() -> Self {
-        Self {
-            root: None,
-            layout: LayoutContext::new(),
-        }
+        Self { root: None }
     }
 }
 
@@ -74,9 +69,7 @@ impl Layers {
     }
 
     pub fn hide_overlay(&self) {
-        let mut overlay = self.overlay.borrow_mut();
-        overlay.root = None;
-        overlay.layout = LayoutContext::new();
+        self.overlay.borrow_mut().root = None;
     }
 
     pub fn show_modal(&self, root_id: ElementId) {
@@ -84,9 +77,7 @@ impl Layers {
     }
 
     pub fn hide_modal(&self) {
-        let mut modal = self.modal.borrow_mut();
-        modal.root = None;
-        modal.layout = LayoutContext::new();
+        self.modal.borrow_mut().root = None;
     }
 
     // ========== 查询 ==========
@@ -103,38 +94,25 @@ impl Layers {
         self.layer_root(lt).is_some()
     }
 
-    pub fn with_layout<R>(&self, lt: LayerType, f: impl FnOnce(&LayoutContext) -> R) -> R {
-        match lt {
-            LayerType::Base => f(&self.base.borrow().layout),
-            LayerType::Overlay => f(&self.overlay.borrow().layout),
-            LayerType::Modal => f(&self.modal.borrow().layout),
-        }
-    }
-
-    pub fn with_layout_mut<R>(&self, lt: LayerType, f: impl FnOnce(&mut LayoutContext) -> R) -> R {
-        match lt {
-            LayerType::Base => f(&mut self.base.borrow_mut().layout),
-            LayerType::Overlay => f(&mut self.overlay.borrow_mut().layout),
-            LayerType::Modal => f(&mut self.modal.borrow_mut().layout),
-        }
-    }
-
-    pub fn set_layer_layout(&self, lt: LayerType, ctx: LayoutContext) {
-        match lt {
-            LayerType::Base => self.base.borrow_mut().layout = ctx,
-            LayerType::Overlay => self.overlay.borrow_mut().layout = ctx,
-            LayerType::Modal => self.modal.borrow_mut().layout = ctx,
-        }
-    }
-
-    pub fn layer_layout_root(&self, lt: LayerType) -> Option<LayoutNode> {
-        self.with_layout(lt, |l| l.root.clone())
-    }
-
     // ========== 命中测试 ==========
 
     pub fn layer_hit_test(&self, lt: LayerType, point: Point) -> Option<ElementId> {
-        self.with_layout(lt, |l| l.root.as_ref()?.hit_test_rec(point.x, point.y))
+        self.layer_root(lt)
+            .and_then(|rid| Self::hit_test_rec(&self.tree, rid, point.x, point.y))
+    }
+
+    fn hit_test_rec(tree: &ElementTree, id: ElementId, px: f32, py: f32) -> Option<ElementId> {
+        let layout = tree.layout(id);
+        if !layout.contains(px, py) {
+            return None;
+        }
+        // 优先命中更内层的节点，以支持嵌套监听（例如行可点击，行内的 Checkbox 也可点击）。
+        for cid in tree.children_of(id).iter().rev() {
+            if let Some(hit) = Self::hit_test_rec(tree, *cid, px, py) {
+                return Some(hit);
+            }
+        }
+        Some(id)
     }
 
     /// 跨所有层做命中测试，返回命中的层与元素（按 dispatch_order 优先高 z）

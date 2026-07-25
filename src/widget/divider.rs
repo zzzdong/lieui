@@ -1,26 +1,46 @@
-use crate::layout::box_model::BoxStyle;
-use crate::layout::flex::FlexStyle;
-use crate::theme;
-use crate::view::node::{DisplayMode, ViewNode};
-use crate::view::View;
+use crate::geometry::Color;
+use crate::layout::style::FlexStyle;
+use crate::view::node::ViewNode;
+use crate::view::paint::PaintStyle;
+use crate::widget::{BuildContext, Widget};
 
-pub struct Divider;
+pub struct Divider {
+    height: f32,
+    background: Option<Color>,
+}
 
-impl View for Divider {
-    fn build(&self) -> ViewNode {
-        let t = theme::current();
+impl Default for Divider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Divider {
+    pub fn new() -> Self {
+        Self {
+            height: 1.0,
+            background: None,
+        }
+    }
+    pub fn height(mut self, h: f32) -> Self {
+        self.height = h;
+        self
+    }
+    pub fn background(mut self, c: Color) -> Self {
+        self.background = Some(c);
+        self
+    }
+}
+
+impl Widget for Divider {
+    fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
+        let t = crate::theme::current();
         ViewNode::Div {
-            style: BoxStyle {
-                fixed_height: Some(1.0),
-                expand: true,
-                background_color: Some(t.border.default),
-                ..BoxStyle::default()
-            },
-            flex: FlexStyle::default(),
-            display: DisplayMode::Block,
+            layout: FlexStyle::block().height(self.height).flex_grow(1.0),
+            paint: PaintStyle::new().background(self.background.unwrap_or(t.border.default)),
             key: None,
             children: vec![],
-            listener: None,
+            listeners: vec![],
         }
     }
 }

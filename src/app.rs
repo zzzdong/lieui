@@ -1,5 +1,6 @@
 //! Application — 基于 winit 的窗口化 GUI 应用
 
+use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,11 +17,12 @@ use crate::render::renderer::Renderer as _;
 use crate::render::VelloRenderer;
 use crate::runtime::Runtime;
 use crate::state;
-use crate::view::node::{ClickCallbackRef, ViewNode};
+use crate::widget::{BuildContext, StateMap, Widget};
 
-pub struct Application<B: Fn() -> ViewNode> {
+pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
     builder: B,
     runtime: Runtime,
+    state: Rc<RefCell<StateMap>>,
     renderer: VelloRenderer,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -39,6 +41,12 @@ fn unpack_size(v: u64) -> (u32, u32) {
     ((v >> 32) as u32, v as u32)
 }
 
+/// 将 `PremulRgba8` 打包为 softbuffer 所需的 `0RGB` u32 像素。
+/// softbuffer 0.4 要求每个 u32 的最高 8 位为 0，其余按 R、G、B 从高到低排列。
+pub(crate) fn pack_softbuffer_pixel(p: vello_cpu::color::PremulRgba8) -> u32 {
+    (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16)
+}
+
 pub fn set_window_size(w: u32, h: u32) {
     WINDOW_SIZE.store(pack_size(w, h), Ordering::Relaxed);
 }
@@ -49,12 +57,13 @@ pub fn window_size() -> Size {
     Size::new(w as f32, h as f32)
 }
 
-impl<B: Fn() -> ViewNode + 'static> Application<B> {
+impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
     pub fn new(builder: B, viewport: Size) -> Self {
         set_window_size(viewport.width as u32, viewport.height as u32);
         Self {
             builder,
             runtime: Runtime::new(viewport),
+            state: Rc::new(RefCell::new(StateMap::new())),
             renderer: VelloRenderer::new(viewport.width as u16, viewport.height as u16),
             window: None,
             surface: None,
@@ -72,20 +81,22 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
 
     // ========== 构建/渲染管线 ==========
 
-    fn build_and_render(&mut self) {
+    fn build_and_render(&mut self, viewport_changed: bool, rebuild_requested: bool) {
         let pw = self.renderer.width();
         let ph = self.renderer.height();
         if pw == 0 || ph == 0 {
             return;
         }
 
-        let (ww, wh) = self.window_size;
-        self.runtime.set_viewport(Size::new(ww as f32, wh as f32));
+        if viewport_changed {
+            let (ww, wh) = self.window_size;
+            self.runtime.set_viewport(Size::new(ww as f32, wh as f32));
+        }
 
-        crate::state::clear_callbacks();
-
-        let view_tree = (self.builder)();
-        self.runtime.submit_view_tree(view_tree);
+        let mut ctx = BuildContext::new(Rc::clone(&self.state));
+        let root_widget = (self.builder)(&mut ctx);
+        let view_tree = root_widget.build(&mut ctx);
+        self.runtime.submit_view_tree(view_tree, rebuild_requested);
         let elements = self.runtime.frame();
 
         let pixmap = self.renderer.render(&elements);
@@ -142,11 +153,9 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         let buf_len = bw * bh;
         let copy_len = buf_len.min(data.len());
         for i in 0..copy_len {
-            let p = data[i];
-            buf[i] =
-                (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16) | ((p.a as u32) << 24);
+            buf[i] = pack_softbuffer_pixel(data[i]);
         }
-        const CLEAR: u32 = 0xFFF0F0F0;
+        const CLEAR: u32 = 0x00F0F0F0;
         for i in copy_len..buf_len {
             buf[i] = CLEAR;
         }
@@ -198,62 +207,75 @@ impl<B: Fn() -> ViewNode + 'static> Application<B> {
         Some(HitTestResult { target, path })
     }
 
-    /// 通用事件回调：拦截 Click / MouseDown / MouseUp 并触发全局回调
+    /// 通用事件回调：直接调用节点上附着的 `ViewListener`。
     ///
     /// HTML 式事件模型：任何挂有 listener 的节点都参与分发，事件按捕获 → 目标 → 冒泡
     /// 顺序传播，每层 listener 自行决定是否调用 `ctx.stop_propagation()`。
     ///
     /// 阶段语义：
-    /// - 捕获 Capture：仅运行 `WithCtx` 回调，使父节点可在到达 target 前拦截/停止传播；
-    ///   `Simple` 只在 Target/Bubble 触发，避免被祖先误吞或嵌套组件重复触发。
-    /// - 目标 Target：触发回调（Simple 自动 stop；WithCtx 由用户决定）。
-    /// - 冒泡 Bubble：WithCtx 已在捕获阶段触发过，避免重复；仅 `Simple` 触发。
+    /// - 捕获 Capture：只有 `Callback::WithCtx` 触发，使父节点可在到达 target 前拦截。
+    /// - 目标 Target：`Simple` 和 `WithCtx` 都触发。`Simple` 自动 `stop_propagation()`。
+    /// - 冒泡 Bubble：只有 `Callback::Simple` 触发，`WithCtx` 已在捕获阶段处理过。
+    ///
+    /// 只处理关注的事件类型，按 `Listener.event` 类型匹配分派。
     fn handle_lie_event(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
         event: &crate::event::Event,
         ctx: &mut crate::event::EventContext,
     ) {
-        // Click / MouseDown / MouseUp 均按 HTML 事件模型分发：
-        // - Capture：仅 WithCtx，允许祖先拦截；
-        // - Target：触发所有回调；
-        // - Bubble：仅 Simple（WithCtx 已在 Capture 触发，避免重复）。
-        match event {
-            crate::event::Event::Click { .. }
-            | crate::event::Event::MouseDown { .. }
-            | crate::event::Event::MouseUp { .. } => {
-                let has_listener = tree.get_node_ref(id).and_then(|n| n.listener()).is_some();
-                if !has_listener {
-                    return;
+        // 提取事件类型，非关注的事件跳过。
+        use crate::event::EventType as ET;
+        let event_type: ET = match event {
+            crate::event::Event::Click { .. } => ET::Click,
+            crate::event::Event::MouseDown { .. } => ET::MouseDown,
+            crate::event::Event::MouseUp { .. } => ET::MouseUp,
+            crate::event::Event::MouseMove { .. } => ET::MouseMove,
+            crate::event::Event::MouseWheel { .. } => ET::MouseWheel,
+            crate::event::Event::MouseEnter => ET::MouseEnter,
+            crate::event::Event::MouseLeave => ET::MouseLeave,
+            crate::event::Event::KeyDown { .. } => ET::KeyDown,
+            crate::event::Event::KeyUp { .. } => ET::KeyUp,
+            crate::event::Event::FocusIn => ET::FocusIn,
+            crate::event::Event::FocusOut => ET::FocusOut,
+            _ => return,
+        };
+        let Some(node) = tree.get_node_ref(id) else {
+            return;
+        };
+        for listener in node.listeners() {
+            if listener.event != event_type {
+                continue;
+            }
+            match ctx.phase() {
+                crate::event::EventPhase::Capture => {
+                    if let crate::view::node::Callback::WithCtx(cb) = &listener.callback {
+                        cb(ctx);
+                    }
                 }
-                match ctx.phase() {
-                    crate::event::EventPhase::Capture => {
-                        if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
-                            if let ClickCallbackRef::WithCtx(_) = cb {
-                                state::invoke_click(cb.id(), ctx);
-                            }
-                        }
+                crate::event::EventPhase::Target => match &listener.callback {
+                    crate::view::node::Callback::Simple(cb) => {
+                        cb();
+                        ctx.stop_propagation();
                     }
-                    crate::event::EventPhase::Target => {
-                        if let Some(cb_id) = tree.on_click(id) {
-                            state::invoke_click(cb_id, ctx);
-                        }
+                    crate::view::node::Callback::WithCtx(cb) => {
+                        cb(ctx);
                     }
-                    crate::event::EventPhase::Bubble => {
-                        if let Some(cb) = tree.get_node_ref(id).and_then(|n| n.listener()) {
-                            if let ClickCallbackRef::Simple(_) = cb {
-                                state::invoke_click(cb.id(), ctx);
-                            }
-                        }
+                },
+                crate::event::EventPhase::Bubble => {
+                    if let crate::view::node::Callback::Simple(cb) = &listener.callback {
+                        cb();
                     }
                 }
             }
-            _ => {}
+            if ctx.is_stopped() {
+                break;
+            }
         }
     }
 }
 
-impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
+impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler for Application<B> {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_none() {
             self.init_window(el);
@@ -352,12 +374,13 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                     self.runtime.viewport.height as u32,
                 );
                 let size_mismatch = self.window_size != viewport;
+                let rebuild_requested = state::take_rebuild_requested();
                 if !self.rendered_once
                     || self.surface.is_none()
-                    || state::take_rebuild_requested()
+                    || rebuild_requested
                     || size_mismatch
                 {
-                    self.build_and_render();
+                    self.build_and_render(size_mismatch, rebuild_requested);
                 } else {
                     self.render_visuals();
                 }
@@ -374,5 +397,31 @@ impl<B: Fn() -> ViewNode + 'static> ApplicationHandler for Application<B> {
                 w.request_redraw();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_softbuffer_pixel;
+    use vello_cpu::color::PremulRgba8;
+
+    #[test]
+    fn pack_softbuffer_obeys_0rgb_format() {
+        // softbuffer 0.4 要求 u32 像素格式为 0x00RRGGBB（小端内存中按 B、G、R、0 排列）
+        let red = PremulRgba8::from_u8_array([255, 0, 0, 255]);
+        assert_eq!(pack_softbuffer_pixel(red), 0x00FF0000);
+
+        let green = PremulRgba8::from_u8_array([0, 255, 0, 255]);
+        assert_eq!(pack_softbuffer_pixel(green), 0x0000FF00);
+
+        let blue = PremulRgba8::from_u8_array([0, 0, 255, 255]);
+        assert_eq!(pack_softbuffer_pixel(blue), 0x000000FF);
+
+        let white = PremulRgba8::from_u8_array([255, 255, 255, 255]);
+        assert_eq!(pack_softbuffer_pixel(white), 0x00FFFFFF);
+
+        // 最高 8 位必须为 0，避免把 alpha 错误地写入颜色通道
+        let semi = PremulRgba8::from_u8_array([128, 64, 32, 128]);
+        assert_eq!(pack_softbuffer_pixel(semi), 0x00804020);
     }
 }

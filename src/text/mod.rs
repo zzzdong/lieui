@@ -2,9 +2,13 @@
 
 use std::cell::RefCell;
 
-use parley::{style::StyleProperty, Alignment, AlignmentOptions, FontContext, LayoutContext};
+use parley::{
+    style::{FontFamily, FontWeight as ParleyFontWeight, StyleProperty},
+    Alignment, AlignmentOptions, FontContext, LayoutContext,
+};
 
 use crate::geometry::Color;
+use crate::view::paint::{FontWeight, TextAlign, TextStyle};
 
 /// 文本布局类型
 pub type TextLayout = parley::Layout<Color>;
@@ -21,20 +25,44 @@ pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<Colo
     FONT_CONTEXT.with(|fc| LAYOUT_CONTEXT.with(|lc| f(&mut fc.borrow_mut(), &mut lc.borrow_mut())))
 }
 
+fn apply_text_style(builder: &mut parley::RangedBuilder<Color>, style: &TextStyle) {
+    builder.push_default(StyleProperty::FontSize(style.font_size as f32));
+    builder.push_default(StyleProperty::Brush(style.color));
+    builder.push_default(StyleProperty::FontFamily(FontFamily::named(
+        &style.font_family,
+    )));
+
+    let pw = match &style.font_weight {
+        FontWeight::Normal => ParleyFontWeight::NORMAL,
+        FontWeight::Medium => ParleyFontWeight::MEDIUM,
+        FontWeight::Bold => ParleyFontWeight::BOLD,
+        FontWeight::Weight(w) => ParleyFontWeight::new(*w as f32),
+    };
+    builder.push_default(StyleProperty::FontWeight(pw));
+
+    // line_height 暂由上层通过额外行间距实现，parley 0.11.0 无直接 StyleProperty。
+}
+
+fn map_text_align(a: TextAlign) -> Alignment {
+    match a {
+        TextAlign::Start => Alignment::Start,
+        TextAlign::Center => Alignment::Center,
+        TextAlign::End => Alignment::End,
+        TextAlign::Justify => Alignment::Justify,
+    }
+}
+
 /// 创建文本布局
-pub fn create_text_layout(
-    text: &str,
-    font_size: f64,
-    color: Color,
-    max_width: Option<f64>,
-) -> TextLayout {
+pub fn create_text_layout(text: &str, style: &TextStyle) -> TextLayout {
     with_text_contexts(|fc, lc| {
         let mut builder = lc.ranged_builder(fc, text, 1.0, true);
-        builder.push_default(StyleProperty::FontSize(font_size as f32));
-        builder.push_default(StyleProperty::Brush(color));
+        apply_text_style(&mut builder, style);
         let mut layout = builder.build(text);
-        layout.break_all_lines(max_width.map(|w| w as f32));
-        layout.align(Alignment::Start, AlignmentOptions::default());
+        layout.break_all_lines(style.max_width.map(|w| w as f32));
+        layout.align(
+            map_text_align(style.text_align),
+            AlignmentOptions::default(),
+        );
         layout
     })
 }
@@ -42,15 +70,8 @@ pub fn create_text_layout(
 /// 文本引擎
 pub struct TextEngine;
 impl TextEngine {
-    pub fn measure_text(text: &str, font_size: f64, max_width: Option<f64>) -> (f64, f64) {
-        with_text_contexts(|fc, lc| {
-            let mut builder = lc.ranged_builder(fc, text, 1.0, true);
-            builder.push_default(StyleProperty::FontSize(font_size as f32));
-            builder.push_default(StyleProperty::Brush(Color::BLACK));
-            let mut layout = builder.build(text);
-            layout.break_all_lines(max_width.map(|w| w as f32));
-            layout.align(Alignment::Start, AlignmentOptions::default());
-            (layout.width() as f64, layout.height() as f64)
-        })
+    pub fn measure_text(text: &str, style: &TextStyle) -> (f64, f64) {
+        let layout = create_text_layout(text, style);
+        (layout.width() as f64, layout.height() as f64)
     }
 }

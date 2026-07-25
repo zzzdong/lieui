@@ -1,9 +1,9 @@
-use crate::layout::box_model::{BoxStyle, EdgeInsets};
-use crate::layout::flex::FlexStyle;
+use crate::layout::style::FlexStyle;
 use crate::state::State;
 use crate::theme;
-use crate::view::node::{DisplayMode, ViewNode};
-use crate::view::View;
+use crate::view::node::ViewNode;
+use crate::view::paint::PaintStyle;
+use crate::widget::{BuildContext, Widget};
 
 /// 带滚动样式的高容器
 ///
@@ -12,7 +12,7 @@ pub struct ListView {
     height: Option<f32>,
     expand: bool,
     scroll_y: State<f32>,
-    child: Option<Box<dyn View>>,
+    child: Option<Box<dyn Widget>>,
 }
 
 impl ListView {
@@ -35,58 +35,49 @@ impl ListView {
         }
     }
 
-    pub fn child(mut self, v: impl View + 'static) -> Self {
+    pub fn child(mut self, v: impl Widget + 'static) -> Self {
         self.child = Some(Box::new(v));
         self
     }
 }
 
-impl View for ListView {
-    fn build(&self) -> ViewNode {
+impl Widget for ListView {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
         let t = theme::current();
         let inner = match &self.child {
-            Some(c) => c.build(),
+            Some(c) => ctx.child(0, c.as_ref()),
             None => ViewNode::Div {
-                style: BoxStyle::default(),
-                flex: FlexStyle::default(),
-                display: DisplayMode::Block,
+                layout: FlexStyle::block(),
+                paint: PaintStyle::default(),
                 key: None,
                 children: vec![],
-                listener: None,
+                listeners: vec![],
             },
         };
 
         let scroll_y = *self.scroll_y.get();
         // 负 margin-top 将内容上移
         let offset_box = ViewNode::Div {
-            style: BoxStyle {
-                margin: EdgeInsets::new(0.0, -scroll_y, 0.0, 0.0),
-                ..BoxStyle::default()
-            },
-            flex: FlexStyle::default(),
-            display: DisplayMode::Block,
+            layout: FlexStyle::block().margin_top(-scroll_y),
+            paint: PaintStyle::default(),
             key: None,
             children: vec![inner],
-            listener: None,
+            listeners: vec![],
         };
 
-        let mut style = BoxStyle {
-            background_color: Some(t.background.secondary_default),
-            ..BoxStyle::default()
-        };
+        let mut layout = FlexStyle::block().flex_grow(1.0).flex_shrink(1.0);
         if let Some(h) = self.height {
-            style.fixed_height = Some(h);
+            layout = layout.height(h);
         } else if self.expand {
-            style.expand = true;
+            layout = layout.flex_grow(1.0);
         }
 
         ViewNode::Div {
-            style,
-            flex: FlexStyle::default(),
-            display: DisplayMode::Block,
+            layout,
+            paint: PaintStyle::new().background(t.background.secondary_default),
             key: None,
             children: vec![offset_box],
-            listener: None,
+            listeners: vec![],
         }
     }
 }

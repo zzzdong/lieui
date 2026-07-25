@@ -6,41 +6,42 @@ use lieui::event::{Event, EventManager, MouseButton};
 use lieui::geometry::{Point, Size};
 use lieui::prelude::*;
 use lieui::runtime::Runtime;
-use lieui::state;
-use lieui::view::node::{ClickCallbackRef, ViewNode};
-use lieui::view::View;
-use lieui::widget::Checkbox;
+use lieui::view::node::{Callback, Listener, ViewNode};
+use lieui::widget::{BuildContext, Checkbox, Widget};
+use std::rc::Rc;
 
-struct Clickable<V: View> {
+struct Clickable<V: Widget> {
     child: V,
-    callback_id: Option<u64>,
+    listeners: Vec<Listener>,
 }
 
-impl<V: View> Clickable<V> {
+impl<V: Widget> Clickable<V> {
     fn new(child: V) -> Self {
         Self {
             child,
-            callback_id: None,
+            listeners: Vec::new(),
         }
     }
     fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
-        self.callback_id = Some(state::register_click(Box::new(f)));
+        self.listeners.push(Listener::on_click(Rc::new(f)));
         self
     }
 }
 
-impl<V: View> View for Clickable<V> {
-    fn build(&self) -> ViewNode {
-        self.child
-            .build()
-            .with_listener(self.callback_id.map(ClickCallbackRef::Simple))
+impl<V: Widget> Widget for Clickable<V> {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        let mut node = ctx.child(0, &self.child);
+        for l in &self.listeners {
+            node.add_listener(l.clone());
+        }
+        node
     }
 }
 
 #[test]
 fn nested_click_stops_at_inner_listener() {
-    let inner = state::State::new(false);
-    let outer = state::State::new(false);
+    let inner = State::new(false);
+    let outer = State::new(false);
 
     let i = inner.clone();
     let o = outer.clone();
@@ -55,10 +56,10 @@ fn nested_click_stops_at_inner_listener() {
             )
             .on_click(move || o.set(true)),
         )
-        .build();
+        .build_node();
 
     let mut rt = Runtime::new(Size::new(400.0, 200.0));
-    rt.submit_view_tree(vt);
+    rt.submit_view_tree(vt, false);
     let _ = rt.frame();
 
     // 命中测试：点击 Checkbox 区域（大致在 (8, 8) 附近）
@@ -79,8 +80,13 @@ fn nested_click_stops_at_inner_listener() {
                 if ctx.phase() == lieui::event::EventPhase::Capture {
                     return;
                 }
-                if let Some(cb_id) = rt.layers.tree.on_click(id) {
-                    state::invoke_click(cb_id, ctx);
+                for l in rt.layers.tree.listeners(id) {
+                    if l.event == lieui::event::EventType::Click {
+                        if let Callback::Simple(cb) = &l.callback {
+                            cb();
+                            ctx.stop_propagation();
+                        }
+                    }
                 }
             }
         },

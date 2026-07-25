@@ -27,7 +27,7 @@ pub struct FlexNode {
     /// 文本叶子节点的排版内容（content, font_size）。
     /// 若存在，布局时按约束宽度重新测量以支持换行，
     /// 而非使用单行 intrinsic size（避免长文本溢出/不换行）。
-    pub measure_text: Option<(String, f64)>,
+    pub measure_text: Option<(String, crate::view::paint::TextStyle)>,
 }
 
 impl FlexNode {
@@ -961,24 +961,32 @@ impl FlexNode {
         let intrinsic_h = self.intrinsic_size.map_or(0.0, |(_, h)| h);
 
         // 文本叶子：根据可用宽度重新测量，以支持换行（而非使用单行 intrinsic size）
-        let (content_w, content_h) = if let Some((content, fs)) = &self.measure_text {
-            let avail_w = match width_measure_mode {
-                MeasureMode::Exactly | MeasureMode::AtMost => {
-                    if is_defined(aw) {
-                        aw
-                    } else {
-                        f32::MAX
+        // 但如果 style.wrap=false，保持单行，不按约束重新测量。
+        let (content_w, content_h) = if let Some((content, style)) = &self.measure_text {
+            if style.wrap {
+                let avail_w = match width_measure_mode {
+                    MeasureMode::Exactly | MeasureMode::AtMost => {
+                        if is_defined(aw) {
+                            aw
+                        } else {
+                            f32::MAX
+                        }
                     }
-                }
-                MeasureMode::Undefined => f32::MAX,
-            };
-            let max_w = if is_defined(avail_w) && avail_w < f32::MAX {
-                Some(avail_w as f64)
+                    MeasureMode::Undefined => f32::MAX,
+                };
+                let mut style = style.clone();
+                style.max_width = if is_defined(avail_w) && avail_w < f32::MAX {
+                    Some(avail_w as f64)
+                } else {
+                    None
+                };
+                let (mw, mh) = TextEngine::measure_text(content, &style);
+                (mw as f32, mh as f32)
             } else {
-                None
-            };
-            let (mw, mh) = TextEngine::measure_text(content, *fs, max_w);
-            (mw as f32, mh as f32)
+                // wrap=false：保留原始 style 中的 max_width（用户显式设置），不追加约束宽度
+                let (mw, mh) = TextEngine::measure_text(content, style);
+                (mw as f32, mh as f32)
+            }
         } else {
             (intrinsic_w, intrinsic_h)
         };

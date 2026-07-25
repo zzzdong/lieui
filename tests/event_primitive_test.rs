@@ -1,37 +1,45 @@
 //! 事件系统与 ViewNode 原语集成测试
 
 use lieui::core::layers::LayerType;
-use lieui::event::EventContext;
 use lieui::geometry::Size;
 use lieui::prelude::*;
 use lieui::runtime::Runtime;
-use lieui::state;
-use lieui::view::View;
+use lieui::view::node::Callback;
+use lieui::widget::Widget;
 
 #[test]
 fn button_hit_test_returns_clickable() {
     let mut runtime = Runtime::new(Size::new(800.0, 600.0));
 
-    let clicked = state::State::new(false);
+    let clicked = State::new(false);
     let c = clicked.clone();
     let vt = Column::new()
         .child(Button::new("Click me").on_click(move || {
             c.set(true);
         }))
-        .build();
+        .build_node();
 
-    runtime.submit_view_tree(vt);
+    runtime.submit_view_tree(vt, false);
     let _ = runtime.frame();
 
     // Button 大致位于 (4,4) ~ (80,40) 区域
     // 从根节点向下找到第一个附带点击回调的节点
     let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");
-    let cb = runtime.layers.tree.on_click(clickable_id);
-    assert!(cb.is_some(), "hit element should have on_click callback");
+    let listener = runtime.layers.tree.listeners(clickable_id);
+    assert!(
+        !listener.is_empty(),
+        "hit element should have on_click listener"
+    );
 
     // 触发回调
-    state::invoke_click(cb.unwrap(), &mut EventContext::new());
+    for l in &listener {
+        if l.event == lieui::event::EventType::Click {
+            if let Callback::Simple(cb) = &l.callback {
+                cb();
+            }
+        }
+    }
     assert!(*clicked.get(), "callback should have been invoked");
 }
 
@@ -41,9 +49,9 @@ fn button_hover_state_affects_background_render() {
 
     let vt = Column::new()
         .child(Button::new("Hover me").on_click(|| {}))
-        .build();
+        .build_node();
 
-    runtime.submit_view_tree(vt);
+    runtime.submit_view_tree(vt, false);
     let _ = runtime.frame();
 
     let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
@@ -84,26 +92,32 @@ fn button_hover_state_affects_background_render() {
 fn checkbox_hit_test_returns_clickable() {
     let mut runtime = Runtime::new(Size::new(800.0, 600.0));
 
-    let checked = state::State::new(false);
+    let checked = State::new(false);
     let c = checked.clone();
     let vt = Row::new()
         .child(Checkbox::new(false).label("Toggle").on_click(move || {
             let cur = *c.get();
             c.set(!cur);
         }))
-        .build();
+        .build_node();
 
-    runtime.submit_view_tree(vt);
+    runtime.submit_view_tree(vt, false);
     let _ = runtime.frame();
 
     let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");
     let node = runtime.layers.tree.get_node(clickable_id);
     eprintln!("checkbox clickable node = {:?}", node.type_name());
-    let cb = runtime.layers.tree.on_click(clickable_id);
-    assert!(cb.is_some(), "checkbox should have on_click");
+    let listener = runtime.layers.tree.listeners(clickable_id);
+    assert!(!listener.is_empty(), "checkbox should have on_click");
 
-    state::invoke_click(cb.unwrap(), &mut EventContext::new());
+    for l in &listener {
+        if l.event == lieui::event::EventType::Click {
+            if let Callback::Simple(cb) = &l.callback {
+                cb();
+            }
+        }
+    }
     assert!(*checked.get(), "checkbox callback should toggle state");
 }
 
@@ -112,10 +126,8 @@ fn find_clickable_in_tree(
     runtime: &Runtime,
     id: lieui::core::ElementId,
 ) -> Option<lieui::core::ElementId> {
-    if let Some(n) = runtime.layers.tree.get_node_ref(id) {
-        if n.on_click_id().is_some() {
-            return Some(id);
-        }
+    if !runtime.layers.tree.listeners(id).is_empty() {
+        return Some(id);
     }
     for child_id in runtime.layers.tree.children_of(id).to_vec() {
         if let Some(found) = find_clickable_in_tree(runtime, child_id) {

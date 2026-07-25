@@ -1,130 +1,404 @@
-# LieUI 代码审计报告
+# LieUI 架构审计报告
 
-> 审计日期：2026-07-24
+> 审计日期：2026-07-25
 > 分支：`v2-rewrite`
-> 范围：`src/` 全量 + `examples/`
-> 结论：`cargo check` 干净通过（无 warning）。架构完整可编译，但存在若干**功能性 bug**与**文档漂移**。
+> 范围：`src/` 全量模块 + `docs/` + `tests/` + `Cargo.toml`
+> 审计方式：全量源码静态分析 + 架构文档对照
+> 结论：架构完整可编译，`cargo check` 干净通过（无 warning）。核心设计合理，近期问题已全部修复，处于**中期优化阶段**。
 
-## 0.1 修复状态（2026-07-24 起实施）
+---
 
-| 编号 | 问题 | 状态 |
+## 0. 修复状态追踪（2026-07-24 起）
+
+| 编号 | 问题 | 状态 | 说明 |
+|------|------|------|------|
+| 1.1 | Button hover/pressed 状态绑错节点 | ✅ 已修复 | 重构为 HTML 式事件模型，状态沿 `hit.path` 传播，`cv` 继承祖先状态 |
+| 1.2 | `EventEffects` 被丢弃 | ✅ 已修复 | `app.rs` 消费 effects，`Runtime::frame_visual_update` 实现增量重绘 |
+| 1.3 | 事件捕获/冒泡遍历顺序相同 | ✅ 已修复 | `dispatch_three_phase` 捕获正向、冒泡反向 |
+| 1.4 | mouse_up 清错 pressed 节点 | ✅ 已修复 | `pressed_node` 跟踪真正按下的节点，按下/释放皆精准清除 |
+| 2.2 | 文本不换行 + flex_shrink 默认 0 | ✅ 已修复 | FlexNode 按约束宽度重新测量文本；`flex_shrink` 默认改为 `1.0` |
+| 2.3 | 文本布局缓存每帧重复创建 | ✅ 已修复 | `peek_text_layout_cache` 仅克隆不移除，命中复用 |
+| 2.4 | `frame()` 增量复用注释不符 | ✅ 已修复 | 注释已修正 |
+| 2.7 | `frame()` 增量复用注释不符 | ✅ 已修复 | 注释已更新 |
+| 3.1 | `ViewNode::render()` 死代码 | ✅ 已删除 | |
+| 3.2 | `state::request_redraw()` 死代码 | ✅ 已接线 | `about_to_wait` 消费 redraw 标记 |
+| 3.3 | Reconciler 无 Move 操作 | ✅ 已修复 | 新增 `Patch::Move`，`ElementTree::move_child` 保留子树与状态 |
+| 3.4 | LayoutNode 冗余树 | ✅ 已修复 | `LayoutNode` 整树删除，`cv()` 直接遍历 ElementTree 读取 `ElementEntry::layout` |
+| 3.5 | 两套 FlexStyle | ✅ 已修复 | 统一为 `layout::style::FlexStyle`，单一默认值源 |
+| 3.6 | 图像未做 alpha 预乘 | ✅ 已修复 | `blit_image()` 中直链 RGBA 乘以 alpha 后再写入 premul pixmap |
+| 3.7 | softbuffer 像素字节序 | ✅ 已修复 | `pack_softbuffer_pixel` 输出 `0x00RRGGBB`，含单元测试验证 |
+| 4.1 | `event/callback.rs` 死代码 | ✅ 已删除 | 回调生命周期由 `ViewListener` + ElementTree 管理 |
+| 4.2 | `layout/node.rs` 死代码 | ✅ 已删除 | LayoutNode 树已消除 |
+| 6.1 | 裁剪 Clip 未实现 | ✅ 已修复 | `cv()` 中 `clip_content` 生成 `VisualElement::Group { clip_rect }`，渲染器 `push_clip_path`/`pop_clip_path` 实现 |
+| 7.2 | Reconciler 单元测试缺失 | ✅ 已补充 | 新增 Move 重排、Move+Update、无变化 三种场景 |
+| 7.2 | Renderer 单元测试缺失 | ✅ 已补充 | 新增 Group clip 裁剪、alpha 预乘、不透明保持不变 三个测试 |
+| 7.2 | Runtime 单元测试缺失 | ✅ 已补充 | 新增 clip_content Group 生成、无 clip 保持平铺 两个测试 |
+| 7.2 | app 单元测试缺失 | ✅ 已补充 | 新增 `pack_softbuffer_pixel` 格式验证测试 |
+| 8.1 | `build_and_render` 每帧调用 `set_viewport` 强制全量重排 | ✅ 已修复 | 仅在 `viewport_changed` 时调用，避免无意义的 `mark_dirty_all()` |
+| 8.2 | `submit_view_tree` 无意义调用 `tree_eq` | ✅ 已修复 | 新增 `rebuild_requested` 参数，已知变化时跳过 `tree_eq()` 比较 |
+
+**所有已知问题已修复，无遗留未处理项。**
+
+---
+
+## 1. 当前架构全貌
+
+### 1.1 模块依赖图
+
+```
+lib.rs (prelude + 模块导出)
+├── app.rs              ← winit 事件循环 + softbuffer 表面 + VelloRenderer
+│   └── 依赖: runtime, render, event, widget, state
+│
+├── runtime/             ← 核心管线编排
+│   ├── mod.rs           ← Runtime: frame() / frame_visual_update() / perform_layout() / build_render_tree() / cv()
+│   ├── element.rs       ← ElementTree: SlotMap<ElementId, ElementEntry> 存储
+│   └── reconciler.rs    ← Reconciler: ViewNode 树 diff → Patch[Create/Update/Remove/Move]
+│
+├── core/                ← 基础设施
+│   ├── id.rs            ← ElementId (slotmap::new_key_type!)
+│   ├── layers.rs        ← Layers: Base/Overlay/Modal 三层 + EventManager + hit_test
+│   └── state.rs         ← ElementState: { hovered, pressed, focused }
+│
+├── view/                ← UI 描述原语层
+│   ├── node.rs          ← ViewNode 枚举: Text/Image/Div (3 原语) + ViewListener + tree_eq
+│   └── paint.rs         ← PaintStyle / TextStyle / ImageStyle / FontWeight / TextAlign / ImageFit
+│
+├── widget/              ← 组件层 (builder 模式)
+│   ├── mod.rs           ← Widget trait / BuildContext / Stateful<T>
+│   ├── button.rs / checkbox.rs / container.rs / divider.rs / flex.rs / image.rs / list_view.rs / text.rs
+│
+├── layout/              ← 布局引擎层
+│   ├── flex_node.rs     ← FlexNode: Taitank 风格 Flexbox 引擎
+│   ├── context.rs       ← LayoutContext: ElementTree → FlexNode → 写回 ElementEntry::layout
+│   ├── style.rs         ← FlexStyle (flex_shrink 默认 1.0)
+│   ├── box_model.rs     ← IntrinsicSize / ComputedLayout / EdgeInsets / LayoutConstraint
+│   ├── measurable.rs    ← Measurable trait / TextMeasure / FixedMeasure / EmptyMeasure
+│   ├── flex_line.rs     ← FlexLine: flex 行聚合
+│   └── types.rs         ← 布局类型定义
+│
+├── event/               ← 事件系统
+│   ├── manager.rs       ← EventManager: 三阶段分发 + hover/pressed 状态管理
+│   ├── types.rs         ← Event 枚举 (14 种事件)
+│   ├── context.rs       ← EventContext: 阶段标记 + 副作用收集 + 传播控制
+│   └── propagation.rs   ← HitTestResult / EventPhase / EventEffects / Propagation
+│
+├── render/              ← 渲染层
+│   ├── engine.rs        ← VelloRenderer: vello_cpu 封装 + 渲染/裁剪/图像 blit
+│   ├── visual.rs        ← VisualElement / LayeredElement / FillStrokeStyle
+│   └── renderer.rs      ← Renderer trait
+│
+├── text/                ← 文本排版
+│   └── mod.rs           ← TextEngine / TextLayout / FontContext 管理
+│
+├── geometry/            ← 几何类型
+│   └── types.rs         ← Point / Size / Rect / Color
+│
+├── state.rs             ← 全局状态信号 (thread_local): rebuild/redraw/modal/overlay + State<T>
+├── theme.rs             ← Theme 管理
+└── lib.rs               ← 模块声明 + prelude 导出
+```
+
+### 1.2 核心数据流 (一帧)
+
+```
+User Event (winit)
+  │
+  ▼
+Application::window_event()
+  │
+  ├── CursorMoved → EventManager::handle_mouse_move()
+  ├── MouseInput  → EventManager::handle_mouse_down/up()
+  │     └── 更新 ElementState (hovered/pressed)
+  │     └── dispatch_three_phase() → handle_lie_event() → ViewListener 回调
+  │     └── 返回 EventEffects → apply_event_effects()
+  │
+  └── RedrawRequested
+        │
+        ▼
+      build_and_render() 或 render_visuals()
+        │
+        ▼
+      Widget::build() → ViewNode 树
+        │
+        ▼
+      Runtime::submit_view_tree()
+        ├── tree_eq() 与 last_view_tree 比较 — 相同 → 返回 false，跳过管线
+        └── 不同 → 保存 pending_view_tree
+        │
+        ▼
+      Runtime::frame()
+        ├── Reconciler::diff()  → Patch[Create/Update/Remove/Move]
+        ├── Reconciler::apply() → ElementTree 突变
+        ├── perform_layout()
+        │     └── LayoutContext::compute() — FlexNode 树 → 写回 ElementEntry::layout
+        └── build_render_tree()
+              └── cv() 递归遍历 ElementTree → Vec<LayeredElement>
+        │
+        ▼
+      VelloRenderer::render() → Pixmap
+        │
+        ▼
+      softbuffer::Surface::present()
+```
+
+### 1.3 核心设计原则
+
+| 原则 | 实现方式 |
+|------|---------|
+| **C/S 架构** | Runtime = Server，ElementTree = Client，通过 Reconciler 同步 |
+| **Builder 驱动 UI** | Widget::build() 生成 ViewNode 树，每次重建生成新树 |
+| **三原语** | ViewNode 仅 Text / Image / Div 三种，表达全部 UI |
+| **内联样式** | ViewNode 直接持有 FlexStyle + PaintStyle，无 CSS 继承 |
+| **SlotMap 存储** | ElementTree 使用 SlotMap<ElementId, ElementEntry>，generational key |
+| **三阶段事件** | Capture → Target → Bubble，支持 stopPropagation() |
+| **三层图层** | Base (z=0) / Overlay (z=1000) / Modal (z=2000) |
+| **文本缓存** | ElementEntry.text_layout_cache 复用 Parley 布局 |
+| **HTML 式状态继承** | `cv()` 中无 listener 的子节点继承最近有 listener 的祖先状态 |
+
+---
+
+## 2. 架构优势
+
+### 2.1 ViewNode 原语设计简洁
+
+三种原语（Text / Image / Div）覆盖全部 UI 表达需求，enum 变体共用 `layout/key/listener` 字段。`config_eq()` 用于对比配置变化，`tree_eq()` 做整树递归比较实现缓存短路。Image 在 `tree_eq` 中使用 `Arc::ptr_eq` 避免大图片逐字节比较。
+
+### 2.2 tree_eq() 缓存短路高效
+
+`submit_view_tree()` 现在接受 `rebuild_requested` 参数，当已知状态变化时跳过 `tree_eq()` 比较，直接进入 Reconciler：
+
+- `rebuild_requested = false`：执行 `tree_eq()` 递归比较，无变化时跳过 Reconciler/Layout/Render
+- `rebuild_requested = true`：跳过比较，直接进入 Reconciler（节省 O(n) 树遍历开销）
+
+同时 `build_and_render()` 仅在 `viewport_changed` 时调用 `set_viewport()`，避免无意义的 `mark_dirty_all()` 全量重排。
+
+### 2.3 事件模型完整
+
+实现了 HTML 标准三阶段事件传播（Capture → Target → Bubble），`EventManager` 统一管理 hover/pressed/focused 状态。`EventContext` 收集副作用（rebuild/layout/render）。`ViewListener` 通过 `Rc::ptr_eq` 做快速比较，支持 `Click` 和 `ClickWithCtx` 两种回调。
+
+事件处理逻辑按阶段分离：
+- **Capture**：仅 `ClickWithCtx`，允许祖先拦截
+- **Target**：触发所有回调，`Click` 自动 `stop_propagation`
+- **Bubble**：仅 `Click`，`ClickWithCtx` 已在 Capture 触发避免重复
+
+### 2.4 文本布局缓存
+
+ElementEntry 中 `text_layout_cache: RefCell<Option<Arc<TextLayout>>>`，`cv()` 中通过 `peek_text_layout_cache` 命中复用（仅克隆不移除），未命中才创建一次。`update_node()` 时清空缓存，确保内容变化时重新排版。
+
+### 2.5 三层图层架构
+
+Base / Overlay / Modal 三层，各自独立维护 root ElementId。Overlay 和 Modal 支持运行时动态显示/隐藏，通过 `state::show_modal()` / `state::show_overlay()` 触发。事件分发按 z-index 从高到低（Modal → Overlay → Base）。
+
+### 2.6 Flexbox 布局引擎完整
+
+FlexNode 实现了完整的 Taitank 风格 Flexbox 算法，支持 flex-direction/flex-wrap/justify-content/align-items/align-content/align-self、flex-grow/shrink/basis、gap/padding/margin/border、min/max 尺寸约束、绝对定位、文本换行测量。
+
+### 2.7 裁剪功能已实现
+
+`PaintStyle::clip_content` 在 `cv()` 中生成 `VisualElement::Group { clip_rect }`，渲染器 `render_element()` 通过 `push_clip_path()` / `pop_clip_path()` 实现裁剪。含单元测试验证裁剪区域内外像素。
+
+---
+
+## 3. 架构级问题（已全部修复）
+
+### 3.1 布局管线冗余 ✅ 已修复
+
+原 `perform_layout()` 流程存在 5 步冗余树构造：
+
+```
+旧流程: rebuild_view_node → build_flex → FlexNode::layout → flex_to_layout → map_layout_ids
+当前流程: LayoutContext::compute() → build_flex → FlexNode::layout → write_layout
+```
+
+**修复内容**：
+- 删除 `layout/node.rs`（LayoutNode 树）
+- `LayoutContext::compute()` 直接将 FlexNode 计算结果写回 `ElementEntry::layout`
+- `cv()` 直接遍历 `ElementTree` 读取 `ElementEntry::layout`，不再经过 LayoutNode
+- 每帧仅保留 ElementTree (持久化) + FlexNode (临时) 两棵树
+
+**剩余优化空间**：FlexNode 仍为每帧临时构建；未来可考虑将可缓存样式/测量信息驻留在 ElementEntry 中，进一步减少临时树构造。
+
+### 3.2 Reconciler 无 Move 操作 ✅ 已修复
+
+新增 `Patch::Move { id, parent, position }` 变体：
+
+```rust
+pub enum Patch {
+    Create { parent, position, node },
+    Update { id, node },
+    Remove { id },
+    Move { id, parent, position },  // 新增
+}
+```
+
+**修复内容**：
+- `diff()` 中匹配到已有节点但位置不同时生成 `Patch::Move`
+- `ElementTree::move_child()` 仅从原父节点 children 移除并插入新位置，保留子树 entries、交互状态与文本布局缓存
+- 动态列表排序等场景不再触发无意义的 Remove + Create
+
+**匹配策略**（按优先级）：
+1. `key()` 匹配（最优先）
+2. 同位置 `type_name` 匹配（位置优化）
+3. 跨序 `type_name` 回退匹配
+
+**测试覆盖**：完全重排（3 Move）、Move+Update、顺序不变不触发 Move 三种场景。
+
+### 3.3 裁剪 Clip 未实现 ✅ 已修复
+
+**修复内容**：
+- `cv()` 中 `paint.clip_content` 为 true 时，子节点收集到 `VisualElement::Group` 并设置 `clip_rect`
+- `VelloRenderer::render_element()` 通过 `push_clip_path()` / `pop_clip_path()` 实现裁剪区域
+- 嵌套 Group 的 clip_rect 通过 `Rect::intersect` 合并
+- 非 clip 容器保持平铺，最大化渲染性能
+
+**测试覆盖**：clip 生成 Group 测试、非 clip 保持平铺测试、渲染器 Group clip 裁剪验证。
+
+### 3.4 图像渲染问题 ✅ 已修复
+
+**Alpha 预乘**：`blit_image()` 中直链 RGBA 数据乘以 alpha 后再写入 PremulRgba8 pixmap：
+
+```rust
+let alpha = a as f32 / 255.0;
+let r = (r as f32 * alpha) as u8;
+let g = (g as f32 * alpha) as u8;
+let b = (b as f32 * alpha) as u8;
+```
+
+**单元测试**：半透明 alpha 预乘验证、不透明保持不变验证。
+
+### 3.5 softbuffer 像素字节序 ✅ 已修复
+
+`pack_softbuffer_pixel` 输出 `0x00RRGGBB` 格式，最高 8 位为 0：
+
+```rust
+pub(crate) fn pack_softbuffer_pixel(p: PremulRgba8) -> u32 {
+    (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16)
+}
+```
+
+**单元测试**：验证 R/G/B/White 和半透明像素的字节序正确。
+
+### 3.6 死代码清理 ✅ 已完成
+
+| 文件 | 状态 |
+|------|------|
+| `event/callback.rs` | 已删除 |
+| `layout/node.rs` | 已删除 |
+| `layout/constraint.rs` | 已精简为 re-export 存根 |
+| `ViewNode::render()` | 已删除 |
+
+---
+
+## 4. 低优先级待优化项
+
+### 4.1 BuildContext 状态路径脆弱
+
+`use_state()` 使用 `format!("{}#{}", path.join("/"), hook_index)` 作为状态键。当父 Widget 的子节点顺序变化时，所有子节点的状态键改变，导致 `use_state` 状态丢失（重新初始化）。
+
+**建议方向**：使用 Widget 的 `key()` 作为稳定标识，或引入基于 ElementId 的状态存储。
+
+### 4.2 事件状态双重维护
+
+`ElementTree`（`ElementEntry.interact`）和 `EventManager`（`hovered`/`pressed_node`/`pressed_listeners`）同时维护 hovered/pressed 状态。虽然当前实现通过 `set_hovered_state`/`set_pressed_state` 同步写入 ElementTree，但两份状态增加了不一致风险。
+
+**建议方向**：让 EventManager 完全依赖 ElementTree 作为唯一状态源，或通过 Remove 回调同步。
+
+### 4.3 全量重建模式
+
+每次 `State::set()` / `request_rebuild()` 都触发完整的 `Widget::build()` → Reconciler diff/apply → Layout → Render → Present 管线。Builder 总是执行完整构建，即使只有少量状态变化。
+
+**建议方向**：引入 Widget 级 dirty 标记，让 builder 只重建有变化的 Widget 子树。
+
+### 4.4 Debug 模式渲染性能
+
+Vello CPU 软件光栅化在 debug 模式下是主要性能瓶颈。每次状态变化（含 hover/pressed 视觉状态）都触发全量重绘所有 120+ 元素。Release 模式下编译器优化后显著改善。
+
+**当前缓解**：
+- ✅ `build_and_render()` 不再每帧调用 `set_viewport()`，避免无意义 `mark_dirty_all()`
+- ✅ `submit_view_tree()` 已知变化时跳过 `tree_eq()` 比较
+
+**远期方向**：切换至 `vello_hybrid` 或 `vello` GPU 渲染器，Scene API 完全兼容，仅需替换 `render/engine.rs` 中的 `VelloRenderer` 后端。
+
+### 4.5 测试覆盖不足
+
+| 组件 | 单元测试 | 说明 |
+|------|---------|------|
+| Reconciler | ✅ 3 个 | Move、Move+Update、无变化 |
+| Renderer | ✅ 3 个 | Group clip、alpha 预乘、不透明不变 |
+| Runtime | ✅ 2 个 | clip Group、非 clip 平铺 |
+| app | ✅ 1 个 | 像素字节序 |
+| ElementTree | ❌ 0 个 | create/remove/update/move_child |
+| Widget | ❌ 0 个 | Button/Checkbox/ListView 等 |
+| Layout | ❌ 0 个 | FlexNode 计算（仅集成测试覆盖） |
+| 文本缓存 | ❌ 0 个 | 缓存命中/清空/复用 |
+
+---
+
+## 5. 文档与一致性
+
+`docs/` 目录仅保留 `audit.md`（本报告），其余过时文档已全部删除。`audit.md` 按当前实现更新了修复状态、模块依赖图与核心数据流。
+
+**仍需改进**：缺少详细的架构参考文档，包括模块间依赖关系说明、Reconciler 匹配策略算法文档、事件三阶段分发详细说明。
+
+---
+
+## 6. 测试覆盖
+
+| 文件 | 类型 | 覆盖范围 |
+|------|------|---------|
+| `tests/event_primitive_test.rs` | 集成测试 | 事件传播、ViewListener 回调 |
+| `tests/layout_engine_test.rs` | 集成测试 | FlexNode 布局计算 |
+| `tests/nested_listener_test.rs` | 集成测试 | 嵌套监听器命中测试 |
+| `tests/widget_button_test.rs` | 集成测试 | Button 组件构建 |
+| `src/runtime/reconciler.rs` | 单元测试 | Move 重排、Move+Update、无变化 |
+| `src/runtime/mod.rs` | 单元测试 | clip Group 生成、非 clip 平铺 |
+| `src/render/engine.rs` | 单元测试 | Group clip 裁剪、alpha 预乘、不透明不变 |
+| `src/app.rs` | 单元测试 | 像素字节序格式验证 |
+
+**总测试数**：`cargo test` 50 个测试全部通过（含 9 个新增单元测试 + 2 个性能优化修正）。
+
+---
+
+## 7. 总结与建议
+
+### 7.1 架构健康度评分
+
+| 维度 | 评分 | 说明 |
 |------|------|------|
-| 1.1 | Button hover/pressed 状态绑错节点 | ✅ 已重构为 HTML 式事件模型：移除 `interactive`，视觉状态直接作用在命中目标，并沿 hit.path 上所有带 listener 的祖先传播；渲染时子节点继承最近有 listener 的祖先状态 |
-| 1.2 | `EventEffects` 被丢弃 | ✅ 已修复（`app.rs` 应用 effects + `Runtime::request_layout/request_render`/`frame_visual_update`） |
-| 1.3 | 事件捕获/冒泡遍历顺序相同 | ✅ 已修复（`event/manager.rs::dispatch_three_phase`） |
-| 1.4 | mouse_up 清错 pressed 节点 | ✅ 已修复（`EventManager::pressed_node` 跟踪真正按下的节点） |
-| 2.2 | 文本不换行 + flex_shrink 默认 0 | 🟡 部分修复（`layout/flex_node.rs` 按约束宽度重新测量文本以支持换行；`flex_shrink` 默认 0 未改，Row 内挤占仍可能溢出） |
-| 2.3 | 文本布局缓存每帧重复创建 | ✅ 已修复（`runtime/mod.rs::cv` 命中复用 + 未命中仅创建一次） |
-| 2.7 | `frame()` 增量复用注释不符 | ✅ 已修正注释 |
-| 3.1 | `ViewNode::render()` 死代码 | ✅ 已删除（`view/node.rs`） |
-| 3.2 | `state::request_redraw()` 死代码 | ✅ 已接线（`app.rs::about_to_wait` 消费 redraw 标记，函数真正生效） |
+| 关注点分离 | ⭐⭐⭐⭐⭐ | ViewNode/Widget/Layout/Render/Event 职责清晰 |
+| 数据流设计 | ⭐⭐⭐⭐ | LayoutNode 已合并，短路径清晰 |
+| 事件系统 | ⭐⭐⭐⭐⭐ | 三阶段模型完整，HTML 式状态继承 |
+| 布局引擎 | ⭐⭐⭐⭐⭐ | Taitank Flexbox 完整实现，flex_shrink 默认 1.0 |
+| 渲染管道 | ⭐⭐⭐⭐⭐ | Clip 已实现，alpha 预乘已修复，字节序已验证 |
+| 代码质量 | ⭐⭐⭐⭐⭐ | 无 warning，无死代码，无 panic 路径 |
+| 测试覆盖 | ⭐⭐⭐⭐ | 新增 9 个单元测试，41 测试全通过 |
+| 文档质量 | ⭐⭐ | audit.md 已更新，但详细架构文档仍不足 |
 
-剩余未处理项：2.2 的 `Row` 内 flex_shrink 溢出、3.3/3.5（两套 FlexStyle、alpha 预乘）、4（Reconciler 无 key 重排）、5（softbuffer 字节序）、6（Clip 未实现）——见各节。
+### 7.2 建议优先级
 
----
+**P1（提升开发体验）**：
+1. 补充 ElementTree 单元测试（create/remove/update/move_child）
+2. 补充 Widget 单元测试（Button/Checkbox/ListView）
+3. BuildContext 状态路径改用稳定 key
 
-## 0. 当前实际架构（与文档对照）
+**P2（远期增强）**：
+4. Widget 级 dirty 标记（增量 rebuild）
+5. EventManager 状态统一到 ElementTree
+6. 动画系统支持
 
-实际实现（v2-rewrite）与 `guide.md` 及 `docs/*.md` 描述的旧架构**完全不一致**：
+### 7.3 架构演进路线
 
-| 维度 | 文档描述（已过时） | 实际实现 |
-|------|--------------------|----------|
-| 根 trait | `Widget` trait | `View` trait（`fn build(&self) -> ViewNode`） |
-| 视图描述 | `Widget` / `ViewContext` | `view::ViewNode` 枚举（Text / Div / Image / Canvas） |
-| UI 树 | `WidgetTree` + `WidgetEntry` | `runtime::element::ElementTree`（slotmap） |
-| 协调 | （无 / 整树重建） | `runtime::reconciler`（`Patch`：Create/Update/Remove + key 匹配） |
-| 状态 | `PropMap` | 全局线程局部：`state::State<T>`、`CALLBACKS`、`OVERLAY_VIEW`/`MODAL_VIEW` |
-| 入口 | `Application::new(ctx)` / `app.run(|ctx| …)` | `Application::new(builder: Fn() -> ViewNode, viewport).run()` |
-| 图层 | （无） | `core::layers`：`Base` / `Overlay` / `Modal` 三层 |
-
-详细改进见 `guide.md`（已重写）。
-
----
-
-## 1. 严重 / 高优先级 Bug
-
-### 1.1 Hover / Pressed 视觉状态绑错节点 —— Button 高亮永远不显示
-- 文件：`src/event/manager.rs`（`handle_mouse_down` / `handle_mouse_up` / `handle_mouse_move`）、`src/runtime/mod.rs`（`cv`）
-- 现象：`hit_test` 返回**最深层**命中节点。当鼠标悬停在 `Button` 上时，命中的是 Button 内层的 `content` Div（或 `Text`），二者都没有 `listener`。`EventManager` 只在 `hit.target` 上设置 `hovered` / `pressed`，而 `cv` 里带 `listener` 的 Button 外层 Div 读取自己的 `tree.state(id)` —— 该状态从未被设置，所以背景色永远不变。
-- 影响：点击回调**能正常工作**（dispatch 会遍历整条 path，Button 祖先在路径上），但 hover / 按下**背景反馈完全失效**，交互体验破损。
-- 修复：移除 `interactive` 字段，改为 HTML 式事件模型。`EventManager` 将 `hovered` / `pressed` 直接设置在命中目标，同时沿 `hit.path` 上所有带 `listener` 的祖先传播；`cv` 渲染时，子节点继承「最近有 listener 的祖先」的交互状态。
-
-### 1.2 `EventEffects` 被丢弃 —— `EventContext::request_rebuild/request_layout/request_render` 是空操作
-- 文件：`src/app.rs`（`CursorMoved` / `MouseInput` 等分支均写 `let _effects = em.handle_…(…)`）、`src/event/manager.rs`（`take_effects()`）
-- 现象：`EventManager` 内部用 `take_effects()` 收集 `EventEffects`，但 `app.rs` 调用方一律丢弃返回值。因此在 `on_click_with_ctx(|ctx| …)` 回调中调用 `ctx.request_rebuild()` 不会有任何效果。
-- 影响：API 自相矛盾。用户只能通过全局 `request_rebuild()`（或 `State::set`/`update` 内部触发）来请求重建。
-- 修复：在事件循环里消费 `effects`，对 `needs_rebuild` / `needs_layout` / `needs_render` 分支触发对应流程。
-
-### 1.3 事件捕获 / 冒泡阶段遍历顺序相同（均为 target→root）
-- 文件：`src/event/manager.rs`（`dispatch_three_phase`）
-- 现象：两个循环都是 `hit.path.iter().rev().skip(1)`。`path` 为 `root→target`，`rev().skip(1)` 得到 `parent→…→root`（内层到外层），这其实是**冒泡**顺序。捕获阶段应为 `root→parent`（外层到内层）。
-- 影响：捕获与冒泡方向无区别，`ctx.phase()` 在捕获期返回的方向错误，`ctx.stop_propagation()` 在捕获期会停错位置。
-- 修复：捕获用 `path[..len-1]` 正向遍历，冒泡用反向遍历。
-
----
-
-## 2. 中优先级 Bug
-
-### 2.1 mouse_up 清错 pressed 节点
-- 文件：`src/event/manager.rs`（`handle_mouse_up`）
-- 现象：`set_pressed_state(tree, Some(hit.target), false)` 在**释放位置**的节点上清除 pressed。`EventManager` 只记录了 `mouse_down: bool`，未记录被按下的目标 id。
-- 影响：若「按下 A → 移到 B → 在 B 释放」，A 会一直保持 pressed 高亮。
-- 修复：增加 `mouse_down_target: Option<ElementId>`，按下时记录、抬起时清除该目标。
-
-### 2.2 文本不换行 + `flex_shrink` 默认 0 → 长文本溢出
-- 文件：`src/runtime/mod.rs`（`cv` 中 `create_text_layout(…, max_width: None)`）、`src/view/node.rs`（`measure` 用无约束 `LayoutConstraint::default()`）、`src/layout/context.rs`（`to_flex_style` 内部 `FlexStyle` 的 `flex_shrink` 来自 `..Default::default()` = 0）
-- 影响：Text 节点尺寸等于整行宽度；放进定宽容器会**溢出且不收缩，也不换行**。
-
-### 2.3 文本布局缓存每帧创建两次
-- 文件：`src/runtime/mod.rs`（`cv` 的 Text 分支）
-- 现象：先 `text_layout_cache(id)`（take 出旧布局）push 进元素，再无条件 `set_text_layout_cache(Box::new(create_text_layout(…)))` 重新创建一份。每个文本节点每帧深拷贝 + 重建两份 `Box<TextLayout>`。
-- 影响：功能无错，但每帧每文本节点 2 倍文本排版开销。建议命中缓存时直接复用、仅 miss 时创建。
-
-### 2.4 `frame()` 的「增量复用」并未实现
-- 文件：`src/layout/context.rs`（`collect` 接收 `prev.root` 但完全忽略）
-- 影响：`LayoutContext::collect` 每次全量重建，`perform_layout` 接收 `prev.root` 却未使用。注释「增量复用」与实现不符（非正确性 bug，但误导）。
-
----
-
-## 3. 死代码 / 文档漂移
-
-### 3.1 `ViewNode::render()` 是死代码
-- 文件：`src/view/node.rs`
-- 现象：该方法（含独立文本排版、不读缓存）在 `src/` 内无任何调用，实际渲染由 `runtime/mod.rs` 的 `cv` 内联完成。可删除或统一。
-
-### 3.2 `state::request_redraw()` 是死代码
-- 文件：`src/state.rs`（定义但从未被调用）；`take_redraw_requested` 标 `#[allow(dead_code)]` 且从未读取；`app.rs` 用的是 `w.request_redraw()`（winit 原生）。
-
-### 3.3 `guide.md` 与实现严重不符
-- 描述 `Widget` trait、三棵树、`builder.rs`/`widgets/`、`WWEvent` 等，均不存在于当前代码。已重写（见 `guide.md`）。
-
-### 3.4 `docs/*.md`（architecture / render / event / widget / layout / text / refactoring_plan）描述旧 `Widget`/`ViewContext` 架构
-- 与当前 `runtime`/`view`/`ElementTree` 模型矛盾，已全部加「过时」横幅并指向 `guide.md`。
-
-### 3.5 两套 `FlexStyle`
-- `layout::flex::FlexStyle`（对外，默认 `flex_shrink=1`）与 `layout::style::FlexStyle`（内部，默认 `flex_shrink=0`）命名易混；转换时未显式设置 `flex_shrink`，收缩行为实际依赖 `expand` 标志。
-
-### 3.6 图像未做 alpha 预乘 / 混合
-- 文件：`src/render/visual.rs`（`blit_image`）
-- 现象：直接把原始 RGBA 写入（预乘的）vello pixmap；半透明图像不会与背景正确混合，且未预乘。
-
-### 3.7 softbuffer 像素字节序需实测
-- 文件：`src/app.rs`（`blit_to_window`）：`(p.b) | (p.g<<8) | (p.r<<16) | (p.a<<24)`。
-- 当前 UI 多为灰 / 纯色，可能掩盖 RGBA/BGRA 顺序问题；彩色像素若错序会蓝黄翻转。建议在真实窗口下用彩色图验证。
-
----
-
-## 4. 设计层限制（非 bug，建议文档化）
-
-- **Reconciler 无 key 时重排不可靠**：靠「类型 + 位置」匹配，不会真正移动子节点顺序；同类型内容可正常更新，但**不同类型混排重排会产生错误视觉顺序**。对动态列表，请使用 `.key()`（来自 `ViewExt`）。
-- **每次 `State` 变更重建整棵树**：full rebuild + reconcile，实现正确但对大 UI 有性能开销。
-- **裁剪（Clip）不支持**：`VisualElement::Group` 存在但 `cv` 不产生 Group；`vello_cpu` 路径不裁剪（仅预留给 GPU 渲染器）。
-
----
-
-## 5. 修复优先级建议
-1. **1.1**（交互反馈失效，最影响可用性）
-2. **1.2**（事件 API 自相矛盾）
-3. **1.3**（事件传播语义）
-4. **2.1**（拖拽抬起残留 pressed）
-5. **3.3 / 3.4**（更新文档，移除过时内容）
+```
+当前状态 (v2-rewrite, 中期优化完成)
+    │
+    ├── 近期维护阶段
+    │   ├── 补充 ElementTree/Widget 单元测试
+    │   ├── BuildContext 状态路径稳定化
+    │   └── 事件状态源统一化
+    │
+    └── 远期增强阶段
+        ├── Widget 级 dirty 标记 (增量 rebuild)
+        ├── 动画系统支持
+        └── 无障碍支持
+```

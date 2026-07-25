@@ -7,6 +7,7 @@
 
 use crate::layout::box_model::{IntrinsicSize, LayoutConstraint};
 use crate::text::TextEngine;
+use crate::view::paint::TextStyle;
 
 /// 可测量尺寸 trait
 pub trait Measurable: Send + Sync {
@@ -30,7 +31,7 @@ impl std::fmt::Debug for dyn Measurable {
 #[derive(Clone, Debug)]
 pub struct TextMeasure {
     pub content: String,
-    pub font_size: f64,
+    pub style: TextStyle,
     /// 水平方向额外增量（如 padding、图标宽度）
     pub extra_width: f32,
     /// 垂直方向固定高度
@@ -41,10 +42,18 @@ impl TextMeasure {
     pub fn new(content: impl Into<String>, font_size: f64) -> Self {
         Self {
             content: content.into(),
-            font_size,
+            style: TextStyle {
+                font_size,
+                ..TextStyle::default()
+            },
             extra_width: 0.0,
             fixed_height: None,
         }
+    }
+
+    pub fn with_style(mut self, style: TextStyle) -> Self {
+        self.style = style;
+        self
     }
 
     pub fn with_extra_width(mut self, w: f32) -> Self {
@@ -60,12 +69,19 @@ impl TextMeasure {
 
 impl Measurable for TextMeasure {
     fn measure(&self, constraint: &LayoutConstraint) -> IntrinsicSize {
-        let max_w = if constraint.max_width < f32::MAX {
-            Some((constraint.max_width - self.extra_width.max(0.0)) as f64)
-        } else {
-            None
-        };
-        let (mw, mh) = TextEngine::measure_text(&self.content, self.font_size, max_w);
+        let mut style = self.style.clone();
+        // wrap=false 时，不把约束宽度传给 max_width，按无限宽测量（保持单行）。
+        // 布局层 FlexNode::layout_single_node 中也有对应逻辑。
+        if style.wrap {
+            style.max_width = if constraint.max_width < f32::MAX {
+                Some((constraint.max_width - self.extra_width.max(0.0)) as f64)
+            } else {
+                None
+            };
+        }
+        // wrap=false：保留用户显式设置的 max_width（如 max_width(200)），但不追加约束宽度。
+        // 这样文本按自身长度或用户指定的 max_width 测量，不受父容器挤压影响。
+        let (mw, mh) = TextEngine::measure_text(&self.content, &style);
         let w = (mw as f32 + self.extra_width).clamp(constraint.min_width, constraint.max_width);
         let h = match self.fixed_height {
             Some(h) => h.clamp(constraint.min_height, constraint.max_height),

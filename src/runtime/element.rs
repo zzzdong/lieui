@@ -4,9 +4,11 @@
 use crate::core::{ElementId, ElementState};
 use crate::layout::box_model::{ComputedLayout, IntrinsicSize};
 use crate::text::TextLayout;
-use crate::view::node::{LayoutStyle, NodeType, ViewNode};
+use crate::view::node::{Listener, NodeType, ViewNode};
+use crate::view::paint::TextStyle;
 use slotmap::SlotMap;
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 /// 运行时元素条目：存储 ViewNode（不含孩子）+ 布局/交互状态
 pub struct ElementEntry {
@@ -17,8 +19,10 @@ pub struct ElementEntry {
     pub parent: Option<ElementId>,
     pub children: Vec<ElementId>,
     pub interact: Cell<ElementState>,
+    /// 节点上附带的监听器列表（生命周期与 Element 绑定）
+    pub listeners: RefCell<Vec<Listener>>,
     /// 文本布局缓存（Text 节点专用），update_node 时清除，render 时复用
-    pub text_layout_cache: RefCell<Option<Box<TextLayout>>>,
+    pub text_layout_cache: RefCell<Option<Arc<TextLayout>>>,
 }
 
 pub struct ElementTree {
@@ -37,6 +41,7 @@ impl ElementTree {
     /// 从 ViewNode 创建 Element（容器变体的 children 被清空，由 tree 管理）
     pub fn create_from_node(&mut self, n: &ViewNode) -> ElementId {
         let node = without_children(n);
+        let listeners = node.listeners().to_vec();
         self.entries.insert(ElementEntry {
             node,
             intrinsic: Cell::new(IntrinsicSize::zero()),
@@ -45,6 +50,7 @@ impl ElementTree {
             parent: None,
             children: Vec::new(),
             interact: Cell::new(ElementState::default()),
+            listeners: RefCell::new(listeners),
             text_layout_cache: RefCell::new(None),
         })
     }
@@ -54,23 +60,39 @@ impl ElementTree {
         self.entries.get(id).map(|e| e.node.type_name())
     }
     pub fn get_node(&self, id: ElementId) -> ViewNode {
+        use crate::layout::style::FlexStyle;
         self.entries
             .get(id)
             .map(|e| e.node.clone())
             .unwrap_or(ViewNode::Text {
                 content: String::new(),
-                font_size: 0.0,
-                color: crate::geometry::Color::TRANSPARENT,
+                style: TextStyle {
+                    font_size: 0.0,
+                    color: crate::geometry::Color::TRANSPARENT,
+                    ..TextStyle::default()
+                },
+                layout: FlexStyle::default(),
                 key: None,
-                listener: None,
+                listeners: Vec::new(),
             })
     }
 
     pub fn get_node_ref(&self, id: ElementId) -> Option<&ViewNode> {
         self.entries.get(id).map(|e| &e.node)
     }
-    pub fn on_click(&self, id: ElementId) -> Option<u64> {
-        self.entries.get(id)?.node.on_click_id()
+    /// 返回节点上附带的监听器列表。
+    pub fn listeners(&self, id: ElementId) -> Vec<Listener> {
+        self.entries
+            .get(id)
+            .map(|e| e.listeners.borrow().clone())
+            .unwrap_or_default()
+    }
+
+    /// 检查节点是否有关注的监听器（用于交互状态继承判断）。
+    pub fn has_any_listener(&self, id: ElementId) -> bool {
+        self.entries
+            .get(id)
+            .is_some_and(|e| !e.listeners.borrow().is_empty())
     }
 
     // ---- 交互状态 ----
@@ -138,6 +160,7 @@ impl ElementTree {
             e.node = without_children(new);
             e.dirty.set(true);
             e.text_layout_cache = RefCell::new(None); // 清除文本布局缓存
+            *e.listeners.borrow_mut() = e.node.listeners().to_vec();
         }
     }
 
@@ -157,6 +180,22 @@ impl ElementTree {
             p.children.insert(pos.min(p.children.len()), cid);
         }
     }
+    /// 将已有节点移动到目标父节点的指定位置，复用 Element 实例。
+    /// 仅从原父节点的 children 列表中移除，不删除子树 entries。
+    pub fn move_child(&mut self, id: ElementId, new_parent: ElementId, position: usize) {
+        if let Some(old_parent) = self.parent_of(id) {
+            if let Some(p) = self.entries.get_mut(old_parent) {
+                p.children.retain(|c| *c != id);
+            }
+        }
+        if let Some(c) = self.entries.get_mut(id) {
+            c.parent = Some(new_parent);
+            c.dirty.set(true);
+        }
+        if let Some(p) = self.entries.get_mut(new_parent) {
+            p.children.insert(position.min(p.children.len()), id);
+        }
+    }
     pub fn remove(&mut self, id: ElementId) -> bool {
         if !self.entries.contains_key(id) {
             return false;
@@ -172,7 +211,7 @@ impl ElementTree {
         if self.root == Some(id) {
             self.root = None;
         }
-        for rid in sub.into_iter().rev() {
+        for rid in sub.iter().rev().copied() {
             self.entries.remove(rid);
         }
         true
@@ -209,14 +248,6 @@ impl ElementTree {
 
     // ---- 布局辅助 ----
 
-    /// 快速获取节点的布局样式（通过 ViewNode.layout_style() 提取）
-    pub fn layout_style(&self, id: ElementId) -> LayoutStyle {
-        self.entries
-            .get(id)
-            .map(|e| e.node.layout_style())
-            .unwrap_or_default()
-    }
-
     /// 获取节点类型
     pub fn node_type_of(&self, id: ElementId) -> Option<NodeType> {
         self.entries.get(id).map(|e| e.node.node_type())
@@ -237,19 +268,38 @@ impl ElementTree {
             .any(|c| self.subtree_has_dirty(*c))
     }
 
+    /// 检查整棵树是否存在 dirty 节点（遍历所有 entries，O(n)）。
+    pub fn has_dirty_node(&self) -> bool {
+        self.entries.iter().any(|(_, e)| e.dirty.get())
+    }
+
+    /// 将所有节点标记为 dirty（例如 viewport 变化时需要全量重排）。
+    pub fn mark_dirty_all(&mut self) {
+        for (_, e) in self.entries.iter_mut() {
+            e.dirty.set(true);
+        }
+    }
+
+    /// 清除所有 dirty 标记（布局计算完成后调用）。
+    pub fn clear_dirty(&mut self) {
+        for (_, e) in self.entries.iter_mut() {
+            e.dirty.set(false);
+        }
+    }
+
     // ---- 文本布局缓存 ----
 
     /// 读取文本布局缓存（Text 节点专用）。
     /// 仅克隆返回给调用方使用，**不移除**缓存，避免每帧重建渲染树时
     /// take→clone→set 的额外开销（parley::Layout 在 debug 下 clone 极贵）。
-    pub fn peek_text_layout_cache(&self, id: ElementId) -> Option<Box<TextLayout>> {
+    pub fn peek_text_layout_cache(&self, id: ElementId) -> Option<Arc<TextLayout>> {
         self.entries
             .get(id)
             .and_then(|e| e.text_layout_cache.borrow().clone())
     }
 
     /// 设置文本布局缓存
-    pub fn set_text_layout_cache(&self, id: ElementId, layout: Box<TextLayout>) {
+    pub fn set_text_layout_cache(&self, id: ElementId, layout: Arc<TextLayout>) {
         if let Some(e) = self.entries.get(id) {
             *e.text_layout_cache.borrow_mut() = Some(layout);
         }
@@ -265,49 +315,43 @@ impl Default for ElementTree {
 fn without_children(n: &ViewNode) -> ViewNode {
     match n {
         ViewNode::Div {
-            style,
-            flex,
-            display,
+            layout,
+            paint,
             key,
-            listener,
+            listeners,
             ..
         } => ViewNode::Div {
-            style: style.clone(),
-            flex: flex.clone(),
-            display: *display,
+            layout: layout.clone(),
+            paint: paint.clone(),
             key: key.clone(),
             children: vec![],
-            listener: *listener,
+            listeners: listeners.clone(),
         },
         ViewNode::Text {
             content,
-            font_size,
-            color,
+            style,
+            layout,
             key,
-            listener,
+            listeners,
         } => ViewNode::Text {
             content: content.clone(),
-            font_size: *font_size,
-            color: *color,
+            style: style.clone(),
+            layout: layout.clone(),
             key: key.clone(),
-            listener: *listener,
+            listeners: listeners.clone(),
         },
         ViewNode::Image {
             data,
-            w,
-            h,
+            style,
+            layout,
             key,
-            listener,
+            listeners,
         } => ViewNode::Image {
             data: std::sync::Arc::clone(data),
-            w: *w,
-            h: *h,
+            style: *style,
+            layout: layout.clone(),
             key: key.clone(),
-            listener: *listener,
-        },
-        ViewNode::Canvas { key, listener } => ViewNode::Canvas {
-            key: key.clone(),
-            listener: *listener,
+            listeners: listeners.clone(),
         },
     }
 }
