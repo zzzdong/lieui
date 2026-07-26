@@ -8,7 +8,9 @@
 //! Shift+单击扩选、双击选词、三击选行。
 
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
+use crate::animation::Animation;
 use parley::BoundingBox;
 
 use crate::clipboard;
@@ -18,7 +20,7 @@ use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
 use crate::text::{
     align_to_utf8_boundary, apply_plain_editor_style, create_plain_editor, editor_cursor_geometry,
-    with_text_contexts, PlainTextEditor,
+    with_text_contexts, PlainTextEditor, TextEngine,
 };
 use crate::theme;
 use crate::view::node::{Listener, ViewNode};
@@ -31,7 +33,17 @@ pub struct InputState {
     pub focused: bool,
     /// 是否正在鼠标拖拽选择（MouseDown 置位，MouseUp 清除）。
     pub selecting: bool,
+    /// 最近一次用户输入 / 聚焦时刻，用于闪烁光标的"常亮 → 开始闪"计时。
+    pub last_activity: Option<Instant>,
+    /// 闪烁定时器句柄；聚焦期间存在，失焦时置 `None` 自动取消注册。
+    anim: Option<Animation>,
 }
+
+/// 闪烁光标参数：聚焦后先常亮 `BLINK_SOLID`，随后以 `BLINK_HALF` 为半周期闪烁。
+const BLINK_SOLID: Duration = Duration::from_millis(500);
+const BLINK_HALF: Duration = Duration::from_millis(530);
+/// 动画 tick 间隔，与半周期一致，保证每次翻转都恰好触发一次重建。
+const BLINK_INTERVAL: Duration = BLINK_HALF;
 
 impl InputState {
     pub fn new(style: &TextStyle) -> Self {
@@ -39,6 +51,8 @@ impl InputState {
             editor: create_plain_editor(style),
             focused: false,
             selecting: false,
+            last_activity: None,
+            anim: None,
         }
     }
 }
@@ -171,7 +185,23 @@ impl Input {
             event,
             callback: crate::view::node::Callback::WithCtx(Rc::new(
                 move |ctx: &mut EventContext| {
-                    state.update(|s| s.focused = focused);
+                    state.update(|s| {
+                        s.focused = focused;
+                        let now = Instant::now();
+                        if focused {
+                            // 聚焦：进入"常亮"相位并启动闪烁定时器。
+                            s.last_activity = Some(now);
+                            if s.anim.is_none() {
+                                s.anim = Some(Animation::new(BLINK_INTERVAL, || {
+                                    crate::state::request_rebuild();
+                                }));
+                            }
+                        } else {
+                            // 失焦：停止闪烁定时器（Drop 自动取消注册）。
+                            s.anim = None;
+                            s.last_activity = None;
+                        }
+                    });
                     ctx.request_render();
                 },
             )),
@@ -192,6 +222,7 @@ impl Input {
             let mut text_changed = false;
             {
                 let mut st = state.get_mut();
+                st.last_activity = Some(Instant::now());
                 let editor = &mut st.editor;
                 match key {
                     Key::Backspace => {
@@ -405,6 +436,7 @@ impl Input {
             let ly = y - rect.y - pad_v;
             state.update(|s| {
                 s.selecting = true;
+                s.last_activity = Some(Instant::now());
                 with_text_contexts(|fc, lc| {
                     let mut driver = s.editor.driver(fc, lc);
                     match clicks {
@@ -439,6 +471,7 @@ impl Input {
             let lx = x - rect.x - pad_h;
             let ly = y - rect.y - pad_v;
             state.update(|s| {
+                s.last_activity = Some(Instant::now());
                 with_text_contexts(|fc, lc| {
                     s.editor.driver(fc, lc).extend_selection_to_point(lx, ly);
                 });
@@ -465,9 +498,12 @@ impl Widget for Input {
         let state = ctx.use_state(|| InputState::new(&self.text_style));
 
         let content_width = (self.width - self.padding_h * 2.0).max(0.0);
+        // 单行内容高度以实际文本行高（含 ascent/descent/行距）为准，而非仅 font_size；
+        // 否则盒子比文本矮，文本会溢出并贴底。
+        let line_h = TextEngine::measure_text("Mg", &self.text_style).1 as f32;
         let inner_height = self
             .height
-            .unwrap_or(self.text_style.font_size as f32 + self.padding_v * 2.0);
+            .unwrap_or(line_h + self.padding_v * 2.0);
 
         // 同步样式/宽度，并计算光标与选区几何。
         let (text_content, caret, sel_rects, focused) = {
@@ -479,6 +515,24 @@ impl Widget for Input {
             let sel_rects = st.editor.selection_geometry();
             let text_content = st.editor.raw_text().to_string();
             (text_content, caret, sel_rects, st.focused)
+        };
+
+        // 闪烁光标：聚焦后先常亮一段时间，再按半周期翻转显隐。
+        let show_caret = if focused {
+            match state.get().last_activity {
+                Some(t) => {
+                    let elapsed = Instant::now().duration_since(t);
+                    if elapsed < BLINK_SOLID {
+                        true
+                    } else {
+                        let half = BLINK_HALF.as_millis();
+                        ((elapsed - BLINK_SOLID).as_millis() / half) % 2 == 0
+                    }
+                }
+                None => true,
+            }
+        } else {
+            false
         };
 
         let is_empty = text_content.is_empty();
@@ -498,6 +552,15 @@ impl Widget for Input {
             };
             s.wrap = self.multiline;
             s
+        };
+
+        // 单行时让文本垂直居中：以一致的文本行高（line_h）计算居中偏移，
+        // 避免空文本时 measure 返回 0 导致光标错位。多行时无需偏移。
+        let content_inner_h = inner_height - self.padding_v * 2.0;
+        let center_offset = if self.multiline {
+            0.0
+        } else {
+            ((content_inner_h - line_h) / 2.0).max(0.0)
         };
 
         let text_node = ViewNode::Text {
@@ -525,7 +588,7 @@ impl Widget for Input {
                         .height(h)
                         .absolute()
                         .position_left(self.padding_h + bb.x0 as f32)
-                        .position_top(self.padding_v + bb.y0.max(0.0) as f32),
+                        .position_top(self.padding_v + center_offset + bb.y0.max(0.0) as f32),
                     paint: PaintStyle::new().background(sel_color),
                     key: Some(format!("__sel_{}__", i)),
                     children: Vec::new(),
@@ -535,23 +598,19 @@ impl Widget for Input {
         }
         children.push(text_node);
 
-        // 光标：聚焦且能拿到几何时才显示。
-        if focused {
+        // 光标：聚焦、几何可用且当前处于"点亮"相位时显示。
+        if focused && show_caret {
             if let Some(BoundingBox { x0, y0, y1, .. }) = caret {
                 let caret_y = y0.max(0.0);
-                // 多行时使用字体行高；单行时仍保持撑满输入框高度。
-                let caret_height = if self.multiline {
-                    y1 - y0
-                } else {
-                    (y1 - y0).max((inner_height - self.padding_v * 2.0) as f64)
-                };
+                // 光标高度取该行块高度（与文本行一致），不再撑满整个输入框。
+                let caret_height = (y1 - y0).max(8.0);
                 let caret = ViewNode::Div {
                     layout: FlexStyle::default()
                         .width(1.0)
                         .height(caret_height as f32)
                         .absolute()
                         .position_left(self.padding_h + x0 as f32)
-                        .position_top(self.padding_v + caret_y as f32),
+                        .position_top(self.padding_v + center_offset + caret_y as f32),
                     paint: PaintStyle::new().background(self.text_style.color),
                     key: Some("__ime_caret__".to_string()),
                     children: Vec::new(),
@@ -568,7 +627,11 @@ impl Widget for Input {
         }
 
         let mut layout = FlexStyle::row()
-            .align_items(FlexAlign::Start)
+            .align_items(if self.multiline {
+                FlexAlign::Start
+            } else {
+                FlexAlign::Center
+            })
             .width(self.width)
             .height(inner_height)
             .padding_left(self.padding_h)

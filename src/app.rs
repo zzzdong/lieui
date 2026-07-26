@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::num::NonZeroU32;
+use std::time::Instant;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -554,7 +555,16 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
         }
     }
 
-    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // 推进到期动画；活跃时让循环休眠到下一次触发（避免忙等）。
+        let (fired, next) = crate::animation::tick(Instant::now());
+        if fired {
+            state::request_redraw();
+        }
+        match next {
+            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
+            None => el.set_control_flow(ControlFlow::Wait),
+        }
         // 允许应用代码在事件循环空闲时通过 `state::request_redraw()` 触发重绘
         // （动画、计时器、外部线程修改等场景）
         if state::take_redraw_requested() {
