@@ -20,6 +20,11 @@ pub struct FlexStyle {
     pub position_type: PositionType,
     pub display_type: DisplayType,
     pub overflow_scroll: bool,
+    /// 显式内容宽度（滚动容器专用）。设定后引擎以此作为内容总宽而非从子节点计算。
+    /// 用于 VirtualList 等虚拟化列表（真实内容 >> 窗口子节点）。
+    pub content_width: Option<f32>,
+    /// 显式内容高度（滚动容器专用）。同上，用于高度方向。
+    pub content_height: Option<f32>,
 
     pub flex_basis: f32,
     pub flex_grow: f32,
@@ -58,6 +63,8 @@ impl PartialEq for FlexStyle {
             && self.position_type == other.position_type
             && self.display_type == other.display_type
             && self.overflow_scroll == other.overflow_scroll
+            && self.content_width == other.content_width
+            && self.content_height == other.content_height
             && float_is_equal(self.flex_basis, other.flex_basis)
             && float_is_equal(self.flex_grow, other.flex_grow)
             && float_is_equal(self.flex_shrink, other.flex_shrink)
@@ -119,6 +126,8 @@ impl Default for FlexStyle {
             position_type: PositionType::Relative,
             display_type: DisplayType::Flex,
             overflow_scroll: false,
+            content_width: None,
+            content_height: None,
 
             dim: [VALUE_UNDEFINED; 2],
             min_dim: [VALUE_UNDEFINED; 2],
@@ -402,6 +411,25 @@ impl FlexStyle {
 
     pub fn is_overflow_scroll(&self) -> bool {
         self.overflow_scroll
+    }
+
+    /// 标记为可滚动容器：自身按视口尺寸布局，子节点在内容画布上自然排布，
+    /// 由布局/渲染/命中测试层统一处理滚动偏移与裁剪。
+    pub fn overflow_scroll(mut self) -> Self {
+        self.overflow_scroll = true;
+        self
+    }
+
+    /// 显式设置滚动容器的内容宽度（替代从子节点计算）。
+    pub fn content_width(mut self, v: f32) -> Self {
+        self.content_width = Some(v);
+        self
+    }
+
+    /// 显式设置滚动容器的内容高度（替代从子节点计算）。
+    pub fn content_height(mut self, v: f32) -> Self {
+        self.content_height = Some(v);
+        self
     }
 }
 

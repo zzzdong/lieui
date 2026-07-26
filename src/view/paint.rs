@@ -5,6 +5,23 @@
 
 use crate::geometry::Color;
 
+/// 阴影规格（对齐 PatternFly 的 box-shadow token）
+///
+/// 偏移/模糊/扩展均为像素，颜色自带 alpha（用 [`Color::rgba`]）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowSpec {
+    /// 水平偏移（px）
+    pub offset_x: f32,
+    /// 垂直偏移（px）
+    pub offset_y: f32,
+    /// 高斯模糊半径（px）
+    pub blur: f32,
+    /// 扩展半径（px，可为负）
+    pub spread: f32,
+    /// 阴影颜色（含 alpha）
+    pub color: Color,
+}
+
 /// Div / Canvas 的视觉样式
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PaintStyle {
@@ -24,6 +41,8 @@ pub struct PaintStyle {
     pub clip_content: bool,
     /// 不透明度（0.0 ~ 1.0）
     pub opacity: f32,
+    /// 投影（PatternFly 的 box-shadow token）
+    pub shadow: Option<ShadowSpec>,
 }
 
 impl PaintStyle {
@@ -67,6 +86,12 @@ impl PaintStyle {
 
     pub fn clip(mut self, v: bool) -> Self {
         self.clip_content = v;
+        self
+    }
+
+    /// 设置投影。传入主题中的 `ShadowTokens`（如 `theme.shadow.sm`）。
+    pub fn shadow(mut self, s: ShadowSpec) -> Self {
+        self.shadow = Some(s);
         self
     }
 }

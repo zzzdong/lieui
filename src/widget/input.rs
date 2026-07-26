@@ -57,14 +57,42 @@ impl InputState {
     }
 }
 
+/// PatternFly 文本输入校验状态（validation state）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputStatus {
+    /// 普通
+    #[default]
+    Default,
+    /// 校验通过
+    Success,
+    /// 警告
+    Warning,
+    /// 错误
+    Danger,
+}
+
+/// PatternFly 文本输入尺寸。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputSize {
+    /// 小
+    Sm,
+    /// 中（默认）
+    #[default]
+    Md,
+    /// 大
+    Lg,
+}
+
 pub struct Input {
     placeholder: String,
     width: f32,
     height: Option<f32>,
     text_style: TextStyle,
     paint: PaintStyle,
-    padding_h: f32,
-    padding_v: f32,
+    padding_h: Option<f32>,
+    padding_v: Option<f32>,
+    status: InputStatus,
+    size: InputSize,
     multiline: bool,
     on_change: Option<Rc<dyn Fn(String)>>,
     on_submit: Option<Rc<dyn Fn(String)>>,
@@ -79,7 +107,7 @@ impl Input {
             width: 200.0,
             height: None,
             text_style: TextStyle {
-                font_size: 14.0,
+                font_size: 0.0,
                 color: t.text.regular_default,
                 wrap: false,
                 text_align: crate::view::paint::TextAlign::Start,
@@ -89,8 +117,10 @@ impl Input {
                 .background(t.background.primary_default)
                 .border(1.0, t.border.default)
                 .radius(t.radius.small),
-            padding_h: t.spacer.sm,
-            padding_v: 6.0,
+            padding_h: None,
+            padding_v: None,
+            status: InputStatus::Default,
+            size: InputSize::Md,
             multiline: false,
             on_change: None,
             on_submit: None,
@@ -114,12 +144,24 @@ impl Input {
     }
 
     pub fn padding_h(mut self, v: f32) -> Self {
-        self.padding_h = v.max(0.0);
+        self.padding_h = Some(v.max(0.0));
         self
     }
 
     pub fn padding_v(mut self, v: f32) -> Self {
-        self.padding_v = v.max(0.0);
+        self.padding_v = Some(v.max(0.0));
+        self
+    }
+
+    /// PatternFly 校验状态（非 focus 时以此着色边框）。
+    pub fn status(mut self, s: InputStatus) -> Self {
+        self.status = s;
+        self
+    }
+
+    /// PatternFly 尺寸（决定默认 padding 与字号）。
+    pub fn size(mut self, s: InputSize) -> Self {
+        self.size = s;
         self
     }
 
@@ -416,7 +458,11 @@ impl Input {
     /// 并请求鼠标捕获以支持拖出控件继续选择。
     fn mouse_down_listener(&self, state: &Stateful<InputState>) -> Listener {
         let state = state.clone();
-        let (pad_h, pad_v) = (self.padding_h, self.padding_v);
+        let (sz_pv, sz_ph, _sz_font) = input_size_metrics(theme::current(), self.size);
+        let (pad_h, pad_v) = (
+            self.padding_h.unwrap_or(sz_ph),
+            self.padding_v.unwrap_or(sz_pv),
+        );
         Listener::on_mouse_down(Rc::new(move |ctx: &mut EventContext| {
             let (x, y, shift, clicks) = match ctx.event() {
                 Some(Event::MouseDown {
@@ -456,7 +502,11 @@ impl Input {
     /// 鼠标移动：拖拽中持续扩展选区（仅 selecting 期间生效）。
     fn mouse_move_listener(&self, state: &Stateful<InputState>) -> Listener {
         let state = state.clone();
-        let (pad_h, pad_v) = (self.padding_h, self.padding_v);
+        let (sz_pv, sz_ph, _sz_font) = input_size_metrics(theme::current(), self.size);
+        let (pad_h, pad_v) = (
+            self.padding_h.unwrap_or(sz_ph),
+            self.padding_v.unwrap_or(sz_pv),
+        );
         Listener::on_mouse_move(Rc::new(move |ctx: &mut EventContext| {
             if !state.get().selecting {
                 return;
@@ -492,25 +542,54 @@ impl Input {
     }
 }
 
+/// 返回 (垂直 padding, 水平 padding, 字号)。
+fn input_size_metrics(t: theme::Theme, s: InputSize) -> (f32, f32, f64) {
+    match s {
+        InputSize::Sm => (4.0, 8.0, t.font.sm),
+        InputSize::Md => (6.0, 12.0, t.font.sm),
+        InputSize::Lg => (8.0, 16.0, t.font.md),
+    }
+}
+
+/// 校验状态对应的边框色。
+fn input_status_color(t: theme::Theme, s: InputStatus) -> Color {
+    match s {
+        InputStatus::Default => t.border.default,
+        InputStatus::Success => t.status.success,
+        InputStatus::Warning => t.status.warning,
+        InputStatus::Danger => t.status.danger,
+    }
+}
+
 impl Widget for Input {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
         let t = theme::current();
-        let state = ctx.use_state(|| InputState::new(&self.text_style));
 
-        let content_width = (self.width - self.padding_h * 2.0).max(0.0);
+        // 尺寸解析：size 决定默认 padding/字号，可被显式覆盖。
+        let (sz_pv, sz_ph, sz_font) = input_size_metrics(t, self.size);
+        let pv = self.padding_v.unwrap_or(sz_pv);
+        let ph = self.padding_h.unwrap_or(sz_ph);
+        let mut text_style = self.text_style.clone();
+        if text_style.font_size <= 0.0 {
+            text_style.font_size = sz_font;
+        }
+
+        let state = ctx.use_state(|| InputState::new(&text_style));
+
+        let content_width = (self.width - ph * 2.0).max(0.0);
         // 单行内容高度以实际文本行高（含 ascent/descent/行距）为准，而非仅 font_size；
         // 否则盒子比文本矮，文本会溢出并贴底。
-        let line_h = TextEngine::measure_text("Mg", &self.text_style).1 as f32;
+        let line_h = TextEngine::measure_text("Mg", &text_style).1 as f32;
         let inner_height = self
             .height
-            .unwrap_or(line_h + self.padding_v * 2.0);
+            .unwrap_or(line_h + pv * 2.0);
 
         // 同步样式/宽度，并计算光标与选区几何。
         let (text_content, caret, sel_rects, focused) = {
             let mut st = state.get_mut();
-            apply_plain_editor_style(&mut st.editor, &self.text_style);
+            apply_plain_editor_style(&mut st.editor, &text_style);
             let caret =
-                editor_cursor_geometry(&mut st.editor, &self.text_style, Some(content_width), 1.0);
+                editor_cursor_geometry(&mut st.editor, &text_style, Some(content_width), 1.0);
             // editor_cursor_geometry 已 refresh_layout，选区几何直接可取。
             let sel_rects = st.editor.selection_geometry();
             let text_content = st.editor.raw_text().to_string();
@@ -544,11 +623,11 @@ impl Widget for Input {
         };
         let display_style = {
             let mut s = if show_placeholder {
-                let mut s = self.text_style.clone();
+                let mut s = text_style.clone();
                 s.color = t.text.subtle_default;
                 s
             } else {
-                self.text_style.clone()
+                text_style.clone()
             };
             s.wrap = self.multiline;
             s
@@ -556,7 +635,7 @@ impl Widget for Input {
 
         // 单行时让文本垂直居中：以一致的文本行高（line_h）计算居中偏移，
         // 避免空文本时 measure 返回 0 导致光标错位。多行时无需偏移。
-        let content_inner_h = inner_height - self.padding_v * 2.0;
+        let content_inner_h = inner_height - pv * 2.0;
         let center_offset = if self.multiline {
             0.0
         } else {
@@ -587,8 +666,8 @@ impl Widget for Input {
                         .width(w)
                         .height(h)
                         .absolute()
-                        .position_left(self.padding_h + bb.x0 as f32)
-                        .position_top(self.padding_v + center_offset + bb.y0.max(0.0) as f32),
+                        .position_left(ph + bb.x0 as f32)
+                        .position_top(pv + center_offset + bb.y0.max(0.0) as f32),
                     paint: PaintStyle::new().background(sel_color),
                     key: Some(format!("__sel_{}__", i)),
                     children: Vec::new(),
@@ -609,9 +688,9 @@ impl Widget for Input {
                         .width(1.0)
                         .height(caret_height as f32)
                         .absolute()
-                        .position_left(self.padding_h + x0 as f32)
-                        .position_top(self.padding_v + center_offset + caret_y as f32),
-                    paint: PaintStyle::new().background(self.text_style.color),
+                        .position_left(ph + x0 as f32)
+                        .position_top(pv + center_offset + caret_y as f32),
+                    paint: PaintStyle::new().background(text_style.color),
                     key: Some("__ime_caret__".to_string()),
                     children: Vec::new(),
                     listeners: Vec::new(),
@@ -620,10 +699,12 @@ impl Widget for Input {
             }
         }
 
-        // 焦点时边框用品牌色。
+        // 焦点时边框用品牌色；否则按校验状态着色（非 Default）。
         let mut paint = self.paint.clone();
         if focused {
             paint.border_color = Some(t.text.brand_default);
+        } else if self.status != InputStatus::Default {
+            paint.border_color = Some(input_status_color(t, self.status));
         }
 
         let mut layout = FlexStyle::row()
@@ -634,10 +715,10 @@ impl Widget for Input {
             })
             .width(self.width)
             .height(inner_height)
-            .padding_left(self.padding_h)
-            .padding_right(self.padding_h)
-            .padding_top(self.padding_v)
-            .padding_bottom(self.padding_v);
+            .padding_left(ph)
+            .padding_right(ph)
+            .padding_top(pv)
+            .padding_bottom(pv);
         if let Some(h) = self.height {
             layout = layout.height(h);
         }

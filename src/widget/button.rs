@@ -3,9 +3,121 @@ use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
 use crate::theme;
 use crate::view::node::{Listener, ViewNode};
-use crate::view::paint::{PaintStyle, TextStyle};
+use crate::view::paint::{FontWeight, PaintStyle, TextStyle};
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
+
+/// PatternFly Button 变体（variant）。决定默认配色与边框。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ButtonVariant {
+    /// 实心品牌主色（默认）
+    #[default]
+    Primary,
+    /// 描边：白底 + 品牌色边框与文字
+    Secondary,
+    /// 透明底 + 品牌色边框与文字（常用于深色背景）
+    Tertiary,
+    /// 危险操作：实心红
+    Danger,
+    /// 警告：实心金（深文字）
+    Warning,
+    /// 文字型按钮（无背景/边框）
+    Link,
+    /// 朴素按钮（无背景无边框，hover 浅底）
+    Plain,
+    /// 表单控件按钮（输入框旁）
+    Control,
+}
+
+/// PatternFly Button 尺寸（size）。决定 padding 与字号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ButtonSize {
+    /// 小：紧凑 padding + 14px 字号
+    Sm,
+    /// 中（默认）
+    #[default]
+    Md,
+    /// 大：宽松 padding + 16px 字号
+    Lg,
+}
+
+/// 将 PatternFly 变体解析为默认视觉样式与文本色。
+fn resolve_variant(t: theme::Theme, v: ButtonVariant) -> (PaintStyle, Color) {
+    let r = t.radius.small;
+    match v {
+        ButtonVariant::Primary => (
+            PaintStyle::new()
+                .background(t.background.brand_default)
+                .hover_background(t.background.brand_hover)
+                .pressed_background(t.background.brand_clicked)
+                .radius(r),
+            t.text.on_brand_default,
+        ),
+        ButtonVariant::Secondary => (
+            PaintStyle::new()
+                .background(t.background.primary_default)
+                .hover_background(t.background.secondary_default)
+                .pressed_background(t.background.secondary_default)
+                .border(1.0, t.background.brand_default)
+                .radius(r),
+            t.background.brand_default,
+        ),
+        ButtonVariant::Tertiary => (
+            PaintStyle::new()
+                .hover_background(t.background.secondary_default)
+                .pressed_background(t.background.secondary_default)
+                .border(1.0, t.background.brand_default)
+                .radius(r),
+            t.background.brand_default,
+        ),
+        ButtonVariant::Danger => (
+            PaintStyle::new()
+                .background(t.status.danger)
+                .hover_background(Color::from_hex("#a30000"))
+                .pressed_background(Color::from_hex("#a30000"))
+                .radius(r),
+            Color::WHITE,
+        ),
+        ButtonVariant::Warning => (
+            PaintStyle::new()
+                .background(t.status.warning)
+                .hover_background(Color::from_hex("#c98a00"))
+                .pressed_background(Color::from_hex("#c98a00"))
+                .radius(r),
+            t.text.regular_default,
+        ),
+        ButtonVariant::Link => (
+            PaintStyle::new()
+                .hover_background(t.background.secondary_default)
+                .radius(r),
+            t.text.link_default,
+        ),
+        ButtonVariant::Plain => (
+            PaintStyle::new()
+                .hover_background(t.background.secondary_default)
+                .radius(r),
+            t.text.regular_default,
+        ),
+        ButtonVariant::Control => (
+            PaintStyle::new()
+                .background(t.background.primary_default)
+                .hover_background(t.background.secondary_default)
+                .pressed_background(t.background.secondary_default)
+                .border(1.0, t.border.default)
+                .radius(r),
+            t.text.regular_default,
+        ),
+    }
+}
+
+/// 将 PatternFly 尺寸解析为 (垂直 padding, 水平 padding, 字号)。
+fn button_size_metrics(t: theme::Theme, s: ButtonSize) -> (f32, f32, f64) {
+    match s {
+        ButtonSize::Sm => (4.0, 12.0, t.font.sm),
+        ButtonSize::Md => (6.0, 16.0, t.font.sm),
+        ButtonSize::Lg => (10.0, 24.0, t.font.md),
+    }
+}
 
 pub struct Button {
     label: String,
@@ -21,6 +133,10 @@ pub struct Button {
     paint: Option<PaintStyle>,
     padding_h: Option<f32>,
     padding_v: Option<f32>,
+    /// PatternFly 变体，决定默认配色与边框。
+    variant: ButtonVariant,
+    /// PatternFly 尺寸，决定 padding 与字号。
+    size: ButtonSize,
 }
 
 impl Button {
@@ -36,11 +152,25 @@ impl Button {
             paint: None,
             padding_h: None,
             padding_v: None,
+            variant: ButtonVariant::Primary,
+            size: ButtonSize::Md,
         }
     }
 
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
         self.listeners.push(Listener::on_click(Rc::new(f)));
+        self
+    }
+
+    /// PatternFly 变体。
+    pub fn variant(mut self, v: ButtonVariant) -> Self {
+        self.variant = v;
+        self
+    }
+
+    /// PatternFly 尺寸。
+    pub fn size(mut self, s: ButtonSize) -> Self {
+        self.size = s;
         self
     }
 
@@ -89,7 +219,7 @@ impl Button {
     }
 
     /// 字重
-    pub fn font_weight(mut self, w: impl Into<crate::view::paint::FontWeight>) -> Self {
+    pub fn font_weight(mut self, w: impl Into<FontWeight>) -> Self {
         self.text_style
             .get_or_insert_with(TextStyle::default)
             .font_weight = w.into();
@@ -144,7 +274,9 @@ impl Button {
 
     /// 不透明度
     pub fn opacity(mut self, o: f32) -> Self {
-        self.paint.get_or_insert_with(PaintStyle::new).opacity = o.clamp(0.0, 1.0);
+        self.paint
+            .get_or_insert_with(PaintStyle::new)
+            .opacity = o.clamp(0.0, 1.0);
         self
     }
 
@@ -166,12 +298,14 @@ impl Button {
 impl Widget for Button {
     fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
         let t = theme::current();
+        let (base_paint, base_text) = resolve_variant(t, self.variant);
+        let (def_pv, def_ph, def_font) = button_size_metrics(t, self.size);
 
-        // ── 文本样式：主题打底 + 用户自定义覆盖 ──
+        // ── 文本样式：变体打底 + 用户自定义覆盖 ──
         let label_style = {
             let mut s = TextStyle {
-                font_size: 13.0,
-                color: t.text.on_brand_default,
+                font_size: def_font,
+                color: base_text,
                 ..TextStyle::default()
             };
             if let Some(custom) = &self.text_style {
@@ -220,8 +354,8 @@ impl Widget for Button {
 
         // ── 外部容器尺寸 ──
         let mut layout = FlexStyle::block();
-        let ph = self.padding_h.unwrap_or(t.spacer.md);
-        let pv = self.padding_v.unwrap_or(6.0);
+        let ph = self.padding_h.unwrap_or(def_ph);
+        let pv = self.padding_v.unwrap_or(def_pv);
         layout = layout
             .padding_left(ph)
             .padding_right(ph)
@@ -237,12 +371,8 @@ impl Widget for Button {
             layout = layout.min_width(mw);
         }
 
-        // ── 视觉样式：主题打底 + 用户自定义覆盖 ──
-        let mut paint = PaintStyle::new()
-            .background(t.background.brand_default)
-            .hover_background(t.background.brand_hover)
-            .pressed_background(t.background.brand_clicked)
-            .radius(t.radius.small);
+        // ── 视觉样式：变体打底 + 用户自定义覆盖 ──
+        let mut paint = base_paint;
         if let Some(custom) = &self.paint {
             if custom.background_color.is_some() {
                 paint.background_color = custom.background_color;

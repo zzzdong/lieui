@@ -12,12 +12,13 @@ use crate::widget::{BuildContext, Widget};
 
 /// 等高分项的虚拟滚动列表。
 ///
-/// 只构建视口内可见的窗口 `[first, last)` 子项，配合 `clip` 视口裁剪与
-/// 内层 `margin_top` 偏移实现滚动，避免一次性布局全部数据（万级条目也不卡）。
+/// 基于 ViewNode 层 engine 滚动：视口标记 `overflow_scroll` + `content_height`。
+/// 只构建视口内可见的窗口 `[first, last)` 子项，配合 engine 裁剪与偏移实现滚动，
+/// 避免一次性布局全部数据（万级条目也不卡）。
 ///
 /// - `height`：视口高度（固定）。
 /// - `item_count` / `item_height`：数据总量与每项高度，决定可滚动总高。
-/// - `scroll_y`：外部 `State<f32>`，由滚轮事件更新并钳制在 `[0, total - height]`。
+/// - `scroll_y`：外部 `State<f32>`，由引擎滚轮事件同步更新，用于读取当前偏移计算窗口。
 /// - `item`：按索引生成子控件的工厂。
 pub struct VirtualList {
     height: f32,
@@ -77,7 +78,6 @@ impl Widget for VirtualList {
         let h = self.height;
         let count = self.item_count;
         let total = count as f32 * ih;
-        let max_scroll = (total - h).max(0.0);
 
         let first = if ih > 0.0 {
             (((sy / ih).floor() as usize).saturating_sub(self.overscan)).min(count)
@@ -89,14 +89,13 @@ impl Widget for VirtualList {
         } else {
             count
         };
-        let offset = first as f32 * ih - sy;
 
         let mut items = Vec::with_capacity(last.saturating_sub(first));
         for i in first..last {
             let row_widget = (*self.item)(i);
             let node = ctx.child(i, &*row_widget);
             items.push(ViewNode::Div {
-                layout: FlexStyle::default().height(ih),
+                layout: FlexStyle::default().height(ih).flex_shrink(0.0),
                 paint: PaintStyle::new(),
                 children: vec![node],
                 listeners: vec![],
@@ -104,30 +103,37 @@ impl Widget for VirtualList {
             });
         }
 
+        // 滚轮：监听器同步更新 scroll_y State，引擎同时会更新 store 偏移，
+        // 两者始终使用相同 delta → 保持同步。
         let value = self.scroll_y.clone();
         let on_wheel = Rc::new(move |ctx: &mut EventContext| {
             if let Some(Event::MouseWheel { delta_y, .. }) = ctx.event() {
                 let dy = *delta_y;
-                value.update(|v| *v = (*v + dy).clamp(0.0, max_scroll));
+                value.update(|v| *v = (*v + dy).max(0.0));
             }
         });
 
-        ViewNode::Div {
-            layout: FlexStyle::default().height(h),
-                paint: PaintStyle::new()
-                    .background(current().background.primary_default)
-                    .clip(true),
-            children: vec![ViewNode::Div {
-                layout: FlexStyle::column().margin_top(offset),
-                paint: PaintStyle::new(),
-                children: items,
-                listeners: vec![Listener::on_mouse_wheel(on_wheel)],
-                key: Some("content".into()),
-            }],
+        let content_box = ViewNode::Div {
+            layout: FlexStyle::column().flex_shrink(0.0),
+            paint: PaintStyle::new(),
+            children: items,
             listeners: vec![],
+            key: Some("content".into()),
+        };
+
+        ViewNode::Div {
+            layout: FlexStyle::default()
+                .height(h)
+                .overflow_scroll()
+                .content_height(total),
+            paint: PaintStyle::new()
+                .background(current().background.primary_default)
+                .clip(true),
+            children: vec![content_box],
+            // 监听器放在视口上，确保视口内任意区域都能触发滚动更新
+            listeners: vec![Listener::on_mouse_wheel(on_wheel)],
             key: None,
         }
     }
-
 
 }

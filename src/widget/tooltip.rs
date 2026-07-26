@@ -3,6 +3,7 @@ use std::rc::Rc;
 use crate::event::EventContext;
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
+use crate::layout::types::FlexAlign;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{PaintStyle, TextStyle};
 use crate::widget::{BuildContext, Widget};
@@ -47,10 +48,12 @@ impl Widget for Tooltip {
                     .absolute()
                     .position_top(-30.0)
                     .position_left(0.0)
-                    .padding_all(6.0),
+                    .padding_all(6.0)
+                    .align_items(FlexAlign::Center)
+                    .justify_content(FlexAlign::Center),
                 paint: PaintStyle::new()
                     .background(Color::from_hex("#222222"))
-                    .radius(4.0),
+                    .radius(crate::theme::current().radius.small),
                 children: vec![ViewNode::Text {
                     content: self.tip.clone(),
                     style: TextStyle {

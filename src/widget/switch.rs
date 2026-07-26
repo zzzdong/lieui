@@ -2,10 +2,11 @@ use std::rc::Rc;
 
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
+use crate::layout::types::FlexAlign;
 use crate::state::State;
 use crate::theme::current;
 use crate::view::node::{Listener, ViewNode};
-use crate::view::paint::PaintStyle;
+use crate::view::paint::{PaintStyle, TextStyle};
 use crate::widget::{BuildContext, Widget};
 
 /// 开关（Toggle）。选中状态由外部 `State<bool>` 持有，点击切换。
@@ -18,6 +19,7 @@ pub struct Switch {
     knob_color: Color,
     width: f32,
     height: f32,
+    label: Option<String>,
 }
 
 impl Switch {
@@ -29,7 +31,13 @@ impl Switch {
             knob_color: Color::WHITE,
             width: 44.0,
             height: 24.0,
+            label: None,
         }
+    }
+    /// 在开关右侧显示文本标签。
+    pub fn label(mut self, s: impl Into<String>) -> Self {
+        self.label = Some(s.into());
+        self
     }
     pub fn on_color(mut self, c: Color) -> Self {
         self.on_color = c;
@@ -69,7 +77,7 @@ impl Widget for Switch {
             .width(knob)
             .height(knob);
 
-        ViewNode::Div {
+        let toggle = ViewNode::Div {
             layout: FlexStyle::default().width(w).height(h),
             paint: PaintStyle::new()
                 .background(if on { self.on_color } else { self.off_color })
@@ -85,6 +93,32 @@ impl Widget for Switch {
             }],
             listeners: vec![Listener::on_click(on_click)],
             key: None,
+        };
+
+        match &self.label {
+            Some(text) => ViewNode::Div {
+                layout: FlexStyle::row()
+                    .align_items(FlexAlign::Center)
+                    .gap(8.0),
+                paint: PaintStyle::new(),
+                children: vec![
+                    toggle,
+                    ViewNode::Text {
+                        content: text.clone(),
+                        style: TextStyle {
+                            font_size: 14.0,
+                            color: current().text.regular_default,
+                            ..Default::default()
+                        },
+                        layout: FlexStyle::default(),
+                        key: None,
+                        listeners: vec![],
+                    },
+                ],
+                listeners: vec![],
+                key: None,
+            },
+            None => toggle,
         }
     }
 }

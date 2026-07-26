@@ -110,6 +110,11 @@ impl Container {
         self.paint.get_or_insert_with(PaintStyle::new).opacity = o.clamp(0.0, 1.0);
         self
     }
+    /// 投影（PatternFly 的 box-shadow token）
+    pub fn shadow(mut self, s: crate::view::paint::ShadowSpec) -> Self {
+        self.paint.get_or_insert_with(PaintStyle::new).shadow = Some(s);
+        self
+    }
 }
 impl Default for Container {
     fn default() -> Self {
@@ -150,6 +155,9 @@ impl Widget for Container {
             }
             if p.opacity != 1.0 {
                 paint = paint.opacity(p.opacity);
+            }
+            if let Some(sh) = p.shadow {
+                paint = paint.shadow(sh);
             }
         }
         if self.clip_content {

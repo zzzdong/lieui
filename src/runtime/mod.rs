@@ -15,6 +15,8 @@ pub struct Runtime {
     pub(crate) viewport: Size,
     needs_layout: bool,
     needs_render: bool,
+    /// 强制重排：滚动偏移变化时不标记脏节点，但需重跑布局以重写子节点偏移坐标。
+    force_layout: bool,
     pending_view_tree: Option<std::rc::Rc<ViewNode>>,
     /// 上一次提交的 ViewNode 树，用于缓存 diff 短路。
     /// 当 builder 产出与上次完全相同的树时，跳过 Reconciler 和 callback 清空。
@@ -34,6 +36,7 @@ impl Runtime {
             viewport,
             needs_layout: true,
             needs_render: true,
+            force_layout: false,
             pending_view_tree: None,
             last_view_tree: None,
             debug_stats: DebugStats::default(),
@@ -218,16 +221,58 @@ impl Runtime {
     }
 
     fn perform_layout(&mut self) {
-        // 若整棵树没有 dirty 节点，说明无需重排（viewport 变化时会全量标记 dirty）。
-        if !self.layers.tree.has_dirty_node() {
+        // 若整棵树没有 dirty 节点且无需强制重排，则跳过（viewport 变化时会全量标记 dirty）。
+        if !self.force_layout && !self.layers.tree.has_dirty_node() {
             return;
         }
+        self.force_layout = false;
         for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
             if let Some(rid) = self.layers.layer_root(lt) {
                 LayoutContext::compute(rid, &self.layers.tree, self.viewport);
             }
         }
         self.layers.tree.clear_dirty();
+    }
+
+    /// 调整滚动容器偏移并钳制到内容范围，请求重排+重绘。
+    /// 滚动不改变 Style（不触发 rebuild/重测量），只驱动布局平移与裁剪。
+    pub fn scroll_by(&mut self, id: crate::core::ElementId, dx: f32, dy: f32) {
+        let cl = self.layers.tree.layout(id);
+        if !cl.overflow_scroll {
+            return;
+        }
+        let (ox, oy) = self.layers.tree.scroll_offset(id);
+        let (cw, ch) = self.layers.tree.content_size(id);
+        let vw = cl.width;
+        let vh = cl.height;
+        let max_x = (cw - vw).max(0.0);
+        let max_y = (ch - vh).max(0.0);
+        let nox = (ox + dx).clamp(0.0, max_x);
+        let noy = (oy + dy).clamp(0.0, max_y);
+        self.layers.tree.set_scroll_offset(id, (nox, noy));
+        self.needs_layout = true;
+        self.needs_render = true;
+        self.force_layout = true;
+    }
+
+    /// 滚轮事件：从命中目标向上查找最近的 overflow_scroll 容器并滚动它。
+    pub fn handle_wheel_scroll(
+        &mut self,
+        hit: &crate::event::HitTestResult,
+        dx: f32,
+        dy: f32,
+    ) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        for &id in hit.path.iter().rev() {
+            if let Some(node) = self.layers.tree.get_node_ref(id) {
+                if node.layout().overflow_scroll {
+                    self.scroll_by(id, dx, dy);
+                    return;
+                }
+            }
+        }
     }
 
     fn build_render_tree(&self) -> Vec<LayeredElement> {
@@ -351,8 +396,36 @@ impl Runtime {
             } else {
                 paint.background_color
             };
+            let rect = computed.rect();
+            // 投影：在背景矩形之前绘制，保证位于其下方
+            if let Some(sh) = paint.shadow {
+                let rx = rect.x as f64;
+                let ry = rect.y as f64;
+                let rw = rect.width as f64;
+                let rh = rect.height as f64;
+                let sx = rx + sh.offset_x as f64 - sh.spread as f64;
+                let sy = ry + sh.offset_y as f64 - sh.spread as f64;
+                let sw = rw + 2.0 * sh.spread as f64;
+                let shh = rh + 2.0 * sh.spread as f64;
+                elements.push(
+                    crate::render::visual::LayeredElement::new(
+                        crate::render::visual::VisualElement::ShadowRoundedRect {
+                            rect: crate::render::visual::KRect::new(
+                                sx,
+                                sy,
+                                sx + sw,
+                                sy + shh,
+                            ),
+                            radius: (paint.border_radius + sh.spread) as f64,
+                            std_dev: sh.blur as f64,
+                            color: sh.color,
+                        },
+                        z_index,
+                    )
+                    .with_id(id.as_ffi()),
+                );
+            }
             if let Some(bg) = bg {
-                let r = computed.rect();
                 let mut fs = crate::render::visual::FillStrokeStyle::new().with_fill(bg);
                 if let Some(bc) = paint.border_color {
                     if paint.border_width > 0.0 {
@@ -363,10 +436,10 @@ impl Runtime {
                     crate::render::visual::LayeredElement::new(
                         crate::render::visual::VisualElement::RoundedRect {
                             rect: crate::render::visual::KRect::new(
-                                r.x as f64,
-                                r.y as f64,
-                                (r.x + r.width) as f64,
-                                (r.y + r.height) as f64,
+                                rect.x as f64,
+                                rect.y as f64,
+                                (rect.x + rect.width) as f64,
+                                (rect.y + rect.height) as f64,
                             ),
                             radius: paint.border_radius as f64,
                             style: fs,
@@ -377,9 +450,9 @@ impl Runtime {
                 );
             }
 
-            // 子节点渲染：clip_content 时收集到 Group 并设置 clip_rect，
+            // 子节点渲染：clip_content 或 overflow_scroll 时收集到 Group 并设置 clip_rect，
             // 否则保持平铺以最大化渲染性能。
-            if paint.clip_content {
+            if paint.clip_content || computed.overflow_scroll {
                 let mut child_elements = Vec::new();
                 for &cid in layers.tree.children_ref(id) {
                     Self::cv(

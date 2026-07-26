@@ -495,6 +495,33 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
                     w.request_redraw();
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // winit 的 y 方向：macOS 默认自然（手指下移→负）、Windows 默认传统（滚轮下滚→正）。
+                // 在非 macOS 上反转 dy 以统一为自然滚动：手指/滚轮方向 = 内容移动方向。
+                let (dx, dy) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 16.0, y * 16.0),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                };
+                // 非 macOS 反转 dy，统一为自然滚动（macOS 的自然方向由系统 / winit 处理）
+                let dy = if cfg!(target_os = "macos") { dy } else { -dy };
+                let hit = self.build_hit_result();
+                if let Some(hit) = &hit {
+                    let point = self.mouse_pos;
+                    let effects = {
+                        let tree = &self.runtime.layers.tree;
+                        let mut em = self.runtime.layers.event_manager.borrow_mut();
+                        em.handle_wheel(point, dx, dy, hit, |id, event, ctx| {
+                            Self::handle_lie_event(tree, id, event, ctx)
+                        })
+                    };
+                    self.apply_event_effects(effects);
+                    // 引擎层滚动：命中目标向上最近的 overflow_scroll 容器处理滚轮。
+                    self.runtime.handle_wheel_scroll(hit, dx, dy);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }

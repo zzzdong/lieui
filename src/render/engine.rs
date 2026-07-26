@@ -293,6 +293,15 @@ impl VelloRenderer {
                     }
                 }
             }
+            VisualElement::ShadowRoundedRect {
+                rect,
+                radius,
+                std_dev,
+                color,
+            } => {
+                self.ctx.set_paint(Self::cv(color));
+                self.ctx.fill_blurred_rounded_rect(rect, *radius as f32, *std_dev as f32);
+            }
             VisualElement::Circle {
                 center,
                 radius,

@@ -54,7 +54,16 @@ impl LayoutContext {
 
         // 叶子节点：测量 intrinsic size 并存储
         if is_leaf {
-            let m = view.measure(&LayoutConstraint::default());
+            // 按需测量：节点未变化（dirty=false）时直接复用上次布局算出的 intrinsic，
+            // 避免每次 rebuild 都对全部文本/叶子重新测量（文本整形很贵）；
+            // 新节点或内容/样式变化的节点（dirty=true）才真正测量并写入缓存。
+            let m = if !tree.is_dirty(id) {
+                tree.intrinsic(id)
+            } else {
+                let m = view.measure(&LayoutConstraint::default());
+                tree.set_intrinsic(id, m);
+                m
+            };
 
             // 记录文本排版内容，供布局时按约束宽度重新测量（支持换行）
             if let ViewNode::Text { content, style, .. } = view {
@@ -68,6 +77,15 @@ impl LayoutContext {
         for &cid in children {
             let child_fn = Self::build_flex(cid, tree);
             fn_node.children.push(child_fn);
+        }
+
+        // 滚动容器：直接子节点必须保持自然尺寸，禁止被收缩到视口高度，
+        // 否则滚动内容会塌陷、看不到滚动。
+        if view.layout().overflow_scroll {
+            for c in fn_node.children.iter_mut() {
+                c.style.flex_shrink = 0.0;
+                c.style.flex_grow = 0.0;
+            }
         }
 
         fn_node
@@ -90,12 +108,38 @@ impl LayoutContext {
                 y: global_y,
                 width: node.get_width(),
                 height: node.get_height(),
+                overflow_scroll: node.style.overflow_scroll,
             },
         );
 
         let children_ids = tree.children_ref(id);
+
+        // 滚动容器：读取滚动偏移，计算内容尺寸并钳制，子节点整体平移 -offset。
+        let (child_origin_x, child_origin_y) = if node.style.overflow_scroll {
+            let (ox, oy) = tree.scroll_offset(id);
+            let cw = node
+                .style
+                .content_width
+                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_left() + c.get_width())));
+            let ch = node
+                .style
+                .content_height
+                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_top() + c.get_height())));
+            let vw = node.get_width();
+            let vh = node.get_height();
+            let max_x = (cw - vw).max(0.0);
+            let max_y = (ch - vh).max(0.0);
+            let nox = ox.clamp(0.0, max_x);
+            let noy = oy.clamp(0.0, max_y);
+            tree.set_scroll_offset(id, (nox, noy));
+            tree.set_content_size(id, (cw, ch));
+            (global_x - nox, global_y - noy)
+        } else {
+            (global_x, global_y)
+        };
+
         for (child_fn, child_id) in node.children.iter().zip(children_ids.iter()) {
-            Self::write_layout(child_fn, tree, *child_id, global_x, global_y);
+            Self::write_layout(child_fn, tree, *child_id, child_origin_x, child_origin_y);
         }
     }
 }

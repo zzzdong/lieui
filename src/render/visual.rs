@@ -106,6 +106,13 @@ pub enum VisualElement {
         radius: f64,
         style: FillStrokeStyle,
     },
+    /// 投影（PatternFly 的 box-shadow）：用高斯模糊圆角矩形绘制。
+    ShadowRoundedRect {
+        rect: KRect,
+        radius: f64,
+        std_dev: f64,
+        color: Color,
+    },
     Circle {
         center: KPoint,
         radius: f64,
@@ -161,6 +168,17 @@ impl std::fmt::Debug for VisualElement {
                 .field("rect", rect)
                 .field("radius", radius)
                 .finish(),
+            Self::ShadowRoundedRect {
+                rect,
+                radius,
+                std_dev,
+                ..
+            } => f
+                .debug_struct("ShadowRoundedRect")
+                .field("rect", rect)
+                .field("radius", radius)
+                .field("std_dev", std_dev)
+                .finish(),
             Self::TextRun {
                 text,
                 color,
@@ -202,6 +220,17 @@ impl Clone for VisualElement {
                 rect: *rect,
                 radius: *radius,
                 style: style.clone(),
+            },
+            Self::ShadowRoundedRect {
+                rect,
+                radius,
+                std_dev,
+                color,
+            } => Self::ShadowRoundedRect {
+                rect: *rect,
+                radius: *radius,
+                std_dev: *std_dev,
+                color: *color,
             },
             Self::Circle {
                 center,

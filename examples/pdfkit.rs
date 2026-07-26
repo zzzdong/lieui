@@ -61,7 +61,6 @@ fn main() {
     let selected = State::new(Vec::<bool>::new());
     let current = State::new(None::<usize>);
     let status = State::new("Ready — click Import PDF... to begin".to_string());
-    let sidebar_scroll = State::new(0.0f32);
 
     let load = {
         let p = pages.clone();
@@ -239,7 +238,7 @@ fn main() {
             let sidebar = Container::new()
                 .width(220.0)
                 .background(sbb)
-                .child(ListView::new(520.0, &sidebar_scroll).child(side));
+                .child(ScrollView::new(520.0).child(side));
 
             // ── 右侧 ──
 

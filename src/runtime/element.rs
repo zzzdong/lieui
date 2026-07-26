@@ -19,6 +19,11 @@ pub struct ElementEntry {
     pub parent: Option<ElementId>,
     pub children: Vec<ElementId>,
     pub interact: Cell<ElementState>,
+    /// 滚动容器当前滚动偏移（内容画布相对视口的位移）。运行时状态，
+    /// 不进入 Style/eq，故滚动不会触发 rebuild/重测量，仅驱动重排+重绘。
+    pub scroll_offset: Cell<(f32, f32)>,
+    /// 滚动容器内容尺寸（由布局阶段计算并写入，用于钳制滚动范围）。
+    pub content_size: Cell<(f32, f32)>,
     /// 节点上附带的监听器列表（生命周期与 Element 绑定）
     pub listeners: RefCell<Vec<Listener>>,
     /// 文本布局缓存（Text 节点专用），update_node 时清除，render 时复用
@@ -50,6 +55,8 @@ impl ElementTree {
             parent: None,
             children: Vec::new(),
             interact: Cell::new(ElementState::default()),
+            scroll_offset: Cell::new((0.0, 0.0)),
+            content_size: Cell::new((0.0, 0.0)),
             listeners: RefCell::new(listeners),
             text_layout_cache: RefCell::new(None),
         })
@@ -190,6 +197,35 @@ impl ElementTree {
             .get(id)
             .map(|e| e.layout.get())
             .unwrap_or_default()
+    }
+
+    // ---- 滚动状态（运行时，keyed by id）----
+
+    /// 读取滚动容器当前滚动偏移（内容画布相对视口的位移）。
+    pub fn scroll_offset(&self, id: ElementId) -> (f32, f32) {
+        self.entries
+            .get(id)
+            .map(|e| e.scroll_offset.get())
+            .unwrap_or((0.0, 0.0))
+    }
+    /// 写入滚动偏移。
+    pub fn set_scroll_offset(&self, id: ElementId, v: (f32, f32)) {
+        if let Some(e) = self.entries.get(id) {
+            e.scroll_offset.set(v);
+        }
+    }
+    /// 读取滚动容器内容尺寸（由布局阶段写入）。
+    pub fn content_size(&self, id: ElementId) -> (f32, f32) {
+        self.entries
+            .get(id)
+            .map(|e| e.content_size.get())
+            .unwrap_or((0.0, 0.0))
+    }
+    /// 写入内容尺寸。
+    pub fn set_content_size(&self, id: ElementId, v: (f32, f32)) {
+        if let Some(e) = self.entries.get(id) {
+            e.content_size.set(v);
+        }
     }
     pub fn update_node(&mut self, id: ElementId, new: &ViewNode) {
         if let Some(e) = self.entries.get_mut(id) {

@@ -36,11 +36,11 @@ pub mod prelude {
     pub use crate::layout::{FlexAlign, FlexDirection, FlexWrap};
 
     // ── theme ──
-    pub use crate::theme::{current, set_theme, Theme};
+    pub use crate::theme::{current, set, Theme};
 
     // ── widgets ──
     pub use crate::widget::{
-        Button, Checkbox, Column, Container, Divider, Image, Input, ListView, Progress, Radio,
-        Row, Slider, Switch, Text, Tooltip, VirtualList,
+        Button, Card, Checkbox, Column, Container, Divider, Image, Input, Progress, ScrollView,
+        Radio, Row, Slider, Switch, Tab, Text, Tooltip, VirtualList,
     };
 }

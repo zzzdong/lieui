@@ -139,6 +139,9 @@ pub struct ComputedLayout {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// 是否为滚动容器（overflow_scroll）。渲染层据此自动裁剪，
+    /// 布局层据此对子节点施加滚动偏移。
+    pub overflow_scroll: bool,
 }
 
 impl ComputedLayout {
@@ -158,6 +161,7 @@ impl Default for ComputedLayout {
             y: 0.0,
             width: 0.0,
             height: 0.0,
+            overflow_scroll: false,
         }
     }
 }
