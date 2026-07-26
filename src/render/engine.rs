@@ -9,6 +9,7 @@ use vello_cpu::{Pixmap, RenderContext, Resources};
 
 use crate::render::renderer::Renderer;
 use crate::render::visual::{LayeredElement, Stroke, VisualElement};
+use crate::view::paint::ImageFit;
 
 pub struct VelloRenderer {
     ctx: RenderContext,
@@ -125,57 +126,129 @@ impl VelloRenderer {
             data,
             width,
             height,
+            opacity,
+            fit,
+            border_radius,
             ..
         } = &img.element
         {
             let pw = pix.width() as usize;
             let ph = pix.height() as usize;
-            let ix = bounds.x0.max(0.0) as usize;
-            let iy = bounds.y0.max(0.0) as usize;
+            let img_w = *width as f64;
+            let img_h = *height as f64;
+            if img_w <= 0.0 || img_h <= 0.0 || data.len() < 4 {
+                return;
+            }
+            let bw = bounds.width();
+            let bh = bounds.height();
+            if bw <= 0.0 || bh <= 0.0 {
+                return;
+            }
+
+            // 依据 fit 计算图像在容器中的绘制矩形（绘制坐标，左上角原点）。
+            let (dw, dh, dx0, dy0) = match fit {
+                ImageFit::None => (img_w, img_h, bounds.x0, bounds.y0),
+                ImageFit::Fill => (bw, bh, bounds.x0, bounds.y0),
+                ImageFit::Contain => {
+                    let s = (bw / img_w).min(bh / img_h);
+                    let dw = img_w * s;
+                    let dh = img_h * s;
+                    (dw, dh, bounds.x0 + (bw - dw) / 2.0, bounds.y0 + (bh - dh) / 2.0)
+                }
+                ImageFit::Cover => {
+                    let s = (bw / img_w).max(bh / img_h);
+                    let dw = img_w * s;
+                    let dh = img_h * s;
+                    (dw, dh, bounds.x0 + (bw - dw) / 2.0, bounds.y0 + (bh - dh) / 2.0)
+                }
+            };
+
+            // 把外层 clip 与绘制矩形相交，减少逐像素判断。
+            let clip = match clip {
+                Some(c) => {
+                    let x0 = c.x0.max(dx0);
+                    let y0 = c.y0.max(dy0);
+                    let x1 = c.x1.min(dx0 + dw);
+                    let y1 = c.y1.min(dy0 + dh);
+                    if x1 > x0 && y1 > y0 {
+                        Some(Rect::new(x0, y0, x1, y1))
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+
+            let op = opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+            let radius = *border_radius;
             let iw = *width as usize;
             let ih = *height as usize;
-            let clip = clip.map(|r| {
-                // 将 clip 限制在图像 bounds 内，减少后续判断。
-                let x0 = r.x0.max(bounds.x0);
-                let y0 = r.y0.max(bounds.y0);
-                let x1 = r.x1.min(bounds.x1);
-                let y1 = r.y1.min(bounds.y1);
-                Rect::new(x0, y0, x1.max(x0), y1.max(y0))
-            });
             let d = pix.data_mut();
-            for row in 0..ih {
-                let py = iy + row;
-                if py >= ph {
+
+            let cols = dw.ceil() as usize;
+            let rows = dh.ceil() as usize;
+            for py in 0..rows {
+                let dy = (dy0 + py as f64) as usize;
+                if dy >= ph {
                     break;
                 }
-                for col in 0..iw {
-                    let px = ix + col;
-                    if px >= pw {
+                for px in 0..cols {
+                    let dx = (dx0 + px as f64) as usize;
+                    if dx >= pw {
                         break;
                     }
-                    // 若存在 clip，跳过 clip 区域外的像素。
                     if let Some(c) = clip {
-                        let fx = (ix + col) as f64 + 0.5;
-                        let fy = (iy + row) as f64 + 0.5;
+                        let fx = dx as f64 + 0.5;
+                        let fy = dy as f64 + 0.5;
                         if fx < c.x0 || fx >= c.x1 || fy < c.y0 || fy >= c.y1 {
                             continue;
                         }
                     }
-                    let si = (row * iw + col) * 4;
-                    if si + 3 >= data.len() {
-                        break;
+                    // 圆角裁剪：超出圆角矩形外的像素跳过。
+                    if radius > 0.5 {
+                        let r = (radius as f64).min(dw / 2.0).min(dh / 2.0);
+                        let in_corner_x = (dx as f64) < dx0 + r || (dx as f64) > dx0 + dw - r;
+                        let in_corner_y = (dy as f64) < dy0 + r || (dy as f64) > dy0 + dh - r;
+                        let inside = if in_corner_x && in_corner_y {
+                            let ccx = if (dx as f64) < dx0 + r { dx0 + r } else { dx0 + dw - r };
+                            let ccy = if (dy as f64) < dy0 + r { dy0 + r } else { dy0 + dh - r };
+                            let ddx = dx as f64 - ccx;
+                            let ddy = dy as f64 - ccy;
+                            ddx * ddx + ddy * ddy <= r * r
+                        } else {
+                            true
+                        };
+                        if !inside {
+                            continue;
+                        }
                     }
-                    // 输入为直链 RGBA（Image::from_rgba 的约定），需要预乘 alpha
-                    // 再写入 PremulRgba8 pixmap，否则半透明图像与背景混合会偏亮。
+                    // 由目标像素反算源像素（最近邻采样）。
+                    let mut sx = ((px as f64 / dw) * img_w) as usize;
+                    let mut sy = ((py as f64 / dh) * img_h) as usize;
+                    if sx >= iw {
+                        sx = iw - 1;
+                    }
+                    if sy >= ih {
+                        sy = ih - 1;
+                    }
+                    let si = (sy * iw + sx) * 4;
+                    if si + 3 >= data.len() {
+                        continue;
+                    }
                     let r = data[si];
                     let g = data[si + 1];
                     let b = data[si + 2];
                     let a = data[si + 3];
-                    let alpha = a as f32 / 255.0;
+                    if a == 0 {
+                        continue;
+                    }
+                    let final_a = (a as f32 * op) as u8;
+                    let alpha = final_a as f32 / 255.0;
                     let r = (r as f32 * alpha) as u8;
                     let g = (g as f32 * alpha) as u8;
                     let b = (b as f32 * alpha) as u8;
-                    d[py * pw + px] = vello_cpu::color::PremulRgba8::from_u8_array([r, g, b, a]);
+                    d[dy * pw + dx] =
+                        vello_cpu::color::PremulRgba8::from_u8_array([r, g, b, final_a]);
                 }
             }
         }
@@ -374,6 +447,8 @@ mod tests {
                 width: 2,
                 height: 2,
                 opacity: Some(1.0),
+                fit: ImageFit::Fill,
+                border_radius: 0.0,
             },
             0,
         );
@@ -399,6 +474,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 opacity: Some(1.0),
+                fit: ImageFit::Fill,
+                border_radius: 0.0,
             },
             0,
         );

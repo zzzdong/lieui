@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::time::Instant;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +36,8 @@ pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
     /// 上一次设置给窗口的 IME 状态，用于避免每帧重复调用。
     last_ime_allowed: bool,
     last_ime_cursor: Option<crate::geometry::Rect>,
+    /// 启动时需注册到排版引擎的自定义字体文件。
+    fonts: Vec<PathBuf>,
 }
 
 static WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
@@ -117,10 +120,25 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             rendered_once: false,
             last_ime_allowed: false,
             last_ime_cursor: None,
+            fonts: Vec::new(),
         }
     }
 
+    /// 注册一个自定义字体文件，应用启动（`run`）时加载到排版引擎，
+    /// 之后即可在 `TextStyle::font_family` 中使用该字体的 family 名。
+    pub fn with_font<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
+        self.fonts.push(path.as_ref().to_path_buf());
+        self
+    }
+
     pub fn run(mut self) {
+        // 在事件循环启动前把自定义字体注册进 parley，确保首次排版即可用。
+        for f in &self.fonts {
+            let families = crate::text::register_font_file(f);
+            if !families.is_empty() {
+                eprintln!("[lieui] 已注册字体 {:?} -> {:?}", f, families);
+            }
+        }
         let el = EventLoop::new().unwrap();
         el.set_control_flow(ControlFlow::Wait);
         let _ = el.run_app(&mut self);

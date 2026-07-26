@@ -100,6 +100,20 @@ impl Listener {
         }
     }
 
+    pub fn on_mouse_enter(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::MouseEnter,
+            callback: Callback::WithCtx(cb),
+        }
+    }
+
+    pub fn on_mouse_leave(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::MouseLeave,
+            callback: Callback::WithCtx(cb),
+        }
+    }
+
     pub fn on_key_down(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
         Self {
             event: EventType::KeyDown,

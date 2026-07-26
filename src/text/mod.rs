@@ -188,3 +188,32 @@ pub fn editor_layout_size(
         (layout.width(), layout.height())
     })
 }
+
+/// 注册自定义字体字节（.ttf / .otf / .woff 等），返回可用在 `TextStyle::font_family`
+/// 中的 family 名称列表。
+///
+/// 内部走 parley 的 `FontContext.collection.register_fonts`，与系统字体共用同一套
+/// 解析链路；多次注册同名族不会破坏解析，只是追加数据源。
+pub fn register_font_bytes(bytes: Vec<u8>) -> Vec<String> {
+    FONT_CONTEXT.with(|fc| {
+        let mut fc = fc.borrow_mut();
+        let blob = parley::fontique::Blob::from(bytes);
+        let registered = fc.collection.register_fonts(blob, None);
+        registered
+            .into_iter()
+            .filter_map(|(fid, _)| fc.collection.family_name(fid).map(|s| s.to_string()))
+            .collect()
+    })
+}
+
+/// 从字体文件读取并注册，等价于 `register_font_bytes(std::fs::read(path)?)`。
+/// 失败（文件不存在/读取错误）时打印告警并返回空列表。
+pub fn register_font_file<P: AsRef<std::path::Path>>(path: P) -> Vec<String> {
+    match std::fs::read(path.as_ref()) {
+        Ok(bytes) => register_font_bytes(bytes),
+        Err(e) => {
+            eprintln!("[lieui] 加载字体失败 {:?}: {e}", path.as_ref());
+            Vec::new()
+        }
+    }
+}

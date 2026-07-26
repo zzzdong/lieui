@@ -1,6 +1,7 @@
 //! VisualElement — 纯数据渲染描述（基于 liecharts）
 use crate::geometry::Color;
 use crate::text::TextLayout;
+use crate::view::paint::ImageFit;
 pub use kurbo::{Affine, BezPath, Point as KPoint, Rect as KRect, Vec2};
 use std::sync::Arc;
 
@@ -135,6 +136,10 @@ pub enum VisualElement {
         width: u32,
         height: u32,
         opacity: Option<f32>,
+        /// 内容缩放模式（Contain/Cover/Fill/None）。
+        fit: ImageFit,
+        /// 圆角半径（像素），0 表示不裁剪。
+        border_radius: f32,
     },
     Group {
         children: Vec<LayeredElement>,
@@ -241,12 +246,16 @@ impl Clone for VisualElement {
                 width,
                 height,
                 opacity,
+                fit,
+                border_radius,
             } => Self::Image {
                 bounds: *bounds,
                 data: data.clone(),
                 width: *width,
                 height: *height,
                 opacity: *opacity,
+                fit: *fit,
+                border_radius: *border_radius,
             },
             Self::Group {
                 children,

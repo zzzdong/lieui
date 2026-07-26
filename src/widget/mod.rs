@@ -11,7 +11,13 @@ pub mod flex;
 pub mod image;
 pub mod input;
 pub mod list_view;
+pub mod progress;
+pub mod radio;
+pub mod slider;
+pub mod switch;
 pub mod text;
+pub mod tooltip;
+pub mod virtual_list;
 
 pub use button::Button;
 pub use checkbox::Checkbox;
@@ -21,7 +27,13 @@ pub use flex::{Column, Row};
 pub use image::Image;
 pub use input::Input;
 pub use list_view::ListView;
+pub use progress::Progress;
+pub use radio::Radio;
+pub use slider::Slider;
+pub use switch::Switch;
 pub use text::Text;
+pub use tooltip::Tooltip;
+pub use virtual_list::VirtualList;
 
 use crate::view::node::ViewNode;
 use std::any::Any;

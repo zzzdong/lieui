@@ -336,6 +336,8 @@ impl Runtime {
                         width: style.width,
                         height: style.height,
                         opacity: Some(style.opacity),
+                        fit: style.fit,
+                        border_radius: style.border_radius,
                     },
                     z_index,
                 )

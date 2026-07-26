@@ -13,6 +13,7 @@ slotmap = "1.0"
 winit = "0.30"
 softbuffer = "0.4"
 arboard = "3.4"
+image = "0.25"
 
 # debug 构建下自身代码用 O1，依赖（vello_cpu/parley 等纯 CPU 密集库）用 O2，
 # 否则 debug 运行光栅化/排版慢数十倍，无法正常交互调试。
