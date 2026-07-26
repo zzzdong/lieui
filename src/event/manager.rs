@@ -25,6 +25,13 @@ pub struct EventManager {
     pressed_node: Option<ElementId>,
     /// 按下时 hit.path 上所有带 listener 的节点，释放时需清除它们的 pressed 状态
     pressed_listeners: Vec<ElementId>,
+    /// 当前焦点元素是否监听 IME 事件。
+    focused_ime: bool,
+    /// 连击计数状态：上次按下时刻/位置/按钮。
+    last_click_at: Option<std::time::Instant>,
+    last_click_pos: Point,
+    last_click_button: Option<MouseButton>,
+    click_count: u8,
 }
 
 impl EventManager {
@@ -37,6 +44,11 @@ impl EventManager {
             hovered_listeners: Vec::new(),
             pressed_node: None,
             pressed_listeners: Vec::new(),
+            focused_ime: false,
+            last_click_at: None,
+            last_click_pos: Point::zero(),
+            last_click_button: None,
+            click_count: 0,
         }
     }
 
@@ -44,6 +56,10 @@ impl EventManager {
 
     pub fn focused(&self) -> Option<ElementId> {
         self.focused
+    }
+
+    pub fn focused_ime(&self) -> bool {
+        self.focused_ime
     }
 
     pub fn hovered(&self) -> Option<ElementId> {
@@ -80,6 +96,29 @@ impl EventManager {
         }
     }
 
+    /// 从命中目标向上查找最近的「可聚焦」节点。
+    /// 可聚焦定义为：注册了 FocusIn 或任意 IME 事件监听器。
+    /// 找不到时返回 None，表示点击空白/非可聚焦区域，应清除焦点。
+    fn find_focusable_ancestor(tree: &ElementTree, hit: &HitTestResult) -> Option<ElementId> {
+        for &id in hit.path.iter().rev() {
+            if tree.has_any_listener(id) {
+                let listeners = tree.listeners(id);
+                if listeners.iter().any(|l| {
+                    matches!(
+                        l.event,
+                        crate::event::EventType::FocusIn
+                            | crate::event::EventType::ImePreedit
+                            | crate::event::EventType::ImeCommit
+                            | crate::event::EventType::ImeDisabled
+                    )
+                }) {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
     // ---- 事件处理 ----
 
     /// 处理鼠标按下
@@ -87,6 +126,7 @@ impl EventManager {
         &mut self,
         point: Point,
         button: MouseButton,
+        modifiers: Modifiers,
         hit: &HitTestResult,
         tree: &ElementTree,
         mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
@@ -94,12 +134,31 @@ impl EventManager {
         self.mouse_down = true;
         let mut effects = EventEffects::default();
 
-        // 视觉状态与焦点直接作用在命中目标上（HTML 式行为）
+        // 连击计数：同按钮、500ms 内、位移 ≤ 4px 时递增（1→2→3→1 循环）。
+        let now = std::time::Instant::now();
+        let is_multi = self
+            .last_click_at
+            .is_some_and(|t| now.duration_since(t).as_millis() <= 500)
+            && self.last_click_button == Some(button)
+            && (point.x - self.last_click_pos.x).abs() <= 4.0
+            && (point.y - self.last_click_pos.y).abs() <= 4.0;
+        self.click_count = if is_multi {
+            self.click_count % 3 + 1
+        } else {
+            1
+        };
+        self.last_click_at = Some(now);
+        self.last_click_pos = point;
+        self.last_click_button = Some(button);
+
+        // 焦点应落到最近的「可聚焦」祖先：优先查找带 FocusIn/IME 监听器的节点，
+        // 找不到则清除焦点。这样点击 Input 内的 Text 子节点时，焦点仍归 Input。
+        let focus_target = Self::find_focusable_ancestor(tree, hit);
         let target = hit.target;
 
         // 焦点变化
-        if self.focused != Some(target) {
-            let focus_effects = self.handle_focus_change(Some(target), tree, &mut handler);
+        if self.focused != focus_target {
+            let focus_effects = self.handle_focus_change(focus_target, tree, &mut handler);
             effects.merge(&focus_effects);
         }
 
@@ -122,6 +181,10 @@ impl EventManager {
         for &id in &self.pressed_listeners {
             Self::set_pressed_state(tree, Some(id), true);
         }
+        // pressed 视觉状态变化需要重绘，否则按下反馈不会显示。
+        if !self.pressed_listeners.is_empty() {
+            effects.request_render();
+        }
 
         // 三阶段分发
         let mut ctx = EventContext::with_target(hit.target);
@@ -129,8 +192,14 @@ impl EventManager {
             x: point.x,
             y: point.y,
             button,
+            modifiers,
+            click_count: self.click_count,
         };
         dispatch_three_phase(&event, hit, &mut handler, &mut ctx);
+        // 回调可能请求鼠标捕获（拖拽选取等），释放时自动解除。
+        if let Some(cap) = ctx.take_capture_request() {
+            self.mouse_capture = Some(cap);
+        }
         effects.merge(&ctx.take_effects());
 
         effects
@@ -153,6 +222,10 @@ impl EventManager {
         Self::set_pressed_state(tree, self.pressed_node, false);
         for &id in &self.pressed_listeners {
             Self::set_pressed_state(tree, Some(id), false);
+        }
+        // 清除 pressed 后同样需要重绘恢复常态视觉。
+        if self.pressed_node.is_some() || !self.pressed_listeners.is_empty() {
+            effects.request_render();
         }
         self.pressed_node = None;
         self.pressed_listeners.clear();
@@ -309,6 +382,8 @@ impl EventManager {
             return effects;
         }
 
+        self.focused_ime = new_focus.is_some_and(|id| tree.has_ime_listener(id));
+
         if let Some(old_id) = old_focus {
             let mut ctx = EventContext::with_target(old_id);
             handler(old_id, &Event::FocusOut, &mut ctx);
@@ -361,6 +436,59 @@ impl EventManager {
         if let Some(target) = self.focused {
             let mut ctx = EventContext::with_target(target);
             handler(target, &Event::KeyUp { key, modifiers }, &mut ctx);
+            ctx.take_effects()
+        } else {
+            EventEffects::default()
+        }
+    }
+
+    // ---- IME 事件 ----
+
+    pub fn handle_ime_preedit(
+        &mut self,
+        text: String,
+        cursor_start: Option<usize>,
+        cursor_end: Option<usize>,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
+    ) -> EventEffects {
+        if let Some(target) = self.focused {
+            let mut ctx = EventContext::with_target(target);
+            handler(
+                target,
+                &Event::ImePreedit {
+                    text,
+                    cursor_start,
+                    cursor_end,
+                },
+                &mut ctx,
+            );
+            ctx.take_effects()
+        } else {
+            EventEffects::default()
+        }
+    }
+
+    pub fn handle_ime_commit(
+        &mut self,
+        text: String,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
+    ) -> EventEffects {
+        if let Some(target) = self.focused {
+            let mut ctx = EventContext::with_target(target);
+            handler(target, &Event::ImeCommit { text }, &mut ctx);
+            ctx.take_effects()
+        } else {
+            EventEffects::default()
+        }
+    }
+
+    pub fn handle_ime_disabled(
+        &mut self,
+        mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
+    ) -> EventEffects {
+        if let Some(target) = self.focused {
+            let mut ctx = EventContext::with_target(target);
+            handler(target, &Event::ImeDisabled, &mut ctx);
             ctx.take_effects()
         } else {
             EventEffects::default()

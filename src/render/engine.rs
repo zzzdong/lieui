@@ -199,11 +199,15 @@ impl VelloRenderer {
             } => {
                 if let Some(f) = &style.fill {
                     if *r < 0.5 {
-                        // radius 为 0 时避免走 blurred rounded rect 的昂贵路径
+                        // radius 为 0 时直接矩形填充
                         self.apply_fill(f, rect);
                     } else {
+                        // 普通圆角矩形路径填充。
+                        // 注意不要用 fill_blurred_rounded_rect(std_dev=0)：
+                        // 那是高斯模糊专用路径，每像素代价比路径填充高一个量级。
+                        let rr = vello_cpu::kurbo::RoundedRect::from_rect(*rect, *r as f64);
                         self.ctx.set_paint(Self::cv(f));
-                        self.ctx.fill_blurred_rounded_rect(rect, *r as f32, 0.0);
+                        self.ctx.fill_path(&rr.to_path(0.1));
                     }
                 }
                 if let Some(s) = &style.stroke {

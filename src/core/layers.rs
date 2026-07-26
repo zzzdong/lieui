@@ -107,7 +107,7 @@ impl Layers {
             return None;
         }
         // 优先命中更内层的节点，以支持嵌套监听（例如行可点击，行内的 Checkbox 也可点击）。
-        for cid in tree.children_of(id).iter().rev() {
+        for cid in tree.children_ref(id).iter().rev() {
             if let Some(hit) = Self::hit_test_rec(tree, *cid, px, py) {
                 return Some(hit);
             }

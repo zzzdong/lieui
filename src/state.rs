@@ -23,6 +23,12 @@ pub(crate) fn take_rebuild_requested() -> bool {
     REBUILD_REQUESTED.with(|r| r.replace(false))
 }
 
+/// 公开版本：检查并清除重建标记。
+/// 供嵌入式驱动（自定义事件循环）与性能测试使用。
+pub fn take_rebuild_requested_pub() -> bool {
+    take_rebuild_requested()
+}
+
 /// 请求仅重绘（不跑 builder/layout，只更新交互状态渲染）
 pub fn request_redraw() {
     REDRAW_REQUESTED.with(|r| r.set(true));

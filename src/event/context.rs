@@ -3,7 +3,8 @@
 //! v1 的 EventContext 简化版，仅保留核心功能。
 
 use crate::core::ElementId;
-use crate::event::{EventEffects, EventPhase, Propagation};
+use crate::event::{Event, EventEffects, EventPhase, Propagation};
+use crate::geometry::Rect;
 
 /// 事件处理上下文
 ///
@@ -19,6 +20,14 @@ pub struct EventContext {
     effects: EventEffects,
     /// 传播状态
     propagation: Propagation,
+    /// 当前正在处理的事件数据（WithCtx 回调可读取）
+    event: Option<Event>,
+    /// 当前正在执行回调的节点（分发器每次调用 handler 前设置）
+    current_id: Option<ElementId>,
+    /// 当前节点的布局矩形（窗口坐标），供回调换算局部坐标
+    current_rect: Option<Rect>,
+    /// 鼠标捕获请求：分发结束后由 EventManager 处理
+    capture_request: Option<ElementId>,
 }
 
 impl EventContext {
@@ -26,8 +35,7 @@ impl EventContext {
         Self {
             target_id: None,
             phase: EventPhase::Target,
-            effects: EventEffects::default(),
-            propagation: Propagation::Continue,
+            ..Default::default()
         }
     }
 
@@ -35,8 +43,16 @@ impl EventContext {
         Self {
             target_id: Some(target),
             phase: EventPhase::Target,
-            effects: EventEffects::default(),
-            propagation: Propagation::Continue,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_event(target: ElementId, event: Event) -> Self {
+        Self {
+            target_id: Some(target),
+            phase: EventPhase::Target,
+            event: Some(event),
+            ..Default::default()
         }
     }
 
@@ -86,5 +102,46 @@ impl EventContext {
 
     pub fn target(&self) -> Option<ElementId> {
         self.target_id
+    }
+
+    // ---- Event ----
+
+    pub fn set_event(&mut self, event: Event) {
+        self.event = Some(event);
+    }
+
+    pub fn event(&self) -> Option<&Event> {
+        self.event.as_ref()
+    }
+
+    pub fn take_event(&mut self) -> Option<Event> {
+        self.event.take()
+    }
+
+    // ---- Current node ----
+
+    /// 分发器在每次调用节点回调前设置当前节点及其布局矩形。
+    pub fn set_current(&mut self, id: ElementId, rect: Rect) {
+        self.current_id = Some(id);
+        self.current_rect = Some(rect);
+    }
+
+    /// 当前节点的布局矩形（窗口坐标），回调可用于换算局部坐标。
+    pub fn current_rect(&self) -> Option<Rect> {
+        self.current_rect
+    }
+
+    // ---- Mouse capture ----
+
+    /// 请求鼠标捕获：后续 MouseMove/MouseUp 直接派发给当前节点，
+    /// 即使指针移出节点范围（文本拖拽选取等场景必需）。
+    /// 鼠标释放时自动解除。
+    pub fn capture_mouse(&mut self) {
+        self.capture_request = self.current_id;
+    }
+
+    /// 取走捕获请求（EventManager 在分发结束后调用）。
+    pub fn take_capture_request(&mut self) -> Option<ElementId> {
+        self.capture_request.take()
     }
 }

@@ -15,10 +15,11 @@ pub struct Runtime {
     pub(crate) viewport: Size,
     needs_layout: bool,
     needs_render: bool,
-    pending_view_tree: Option<ViewNode>,
+    pending_view_tree: Option<std::rc::Rc<ViewNode>>,
     /// 上一次提交的 ViewNode 树，用于缓存 diff 短路。
     /// 当 builder 产出与上次完全相同的树时，跳过 Reconciler 和 callback 清空。
-    last_view_tree: Option<ViewNode>,
+    /// 与 pending 共享同一 Rc，避免每次提交都深克隆整棵树。
+    last_view_tree: Option<std::rc::Rc<ViewNode>>,
     pub debug_stats: DebugStats,
 }
 #[derive(Debug, Default)]
@@ -60,7 +61,8 @@ impl Runtime {
             self.pending_view_tree = None;
             return false;
         }
-        self.last_view_tree = Some(vt.clone());
+        let vt = std::rc::Rc::new(vt);
+        self.last_view_tree = Some(std::rc::Rc::clone(&vt));
         self.pending_view_tree = Some(vt);
         self.needs_render = true;
         true
@@ -79,20 +81,30 @@ impl Runtime {
     pub fn frame(&mut self) -> Vec<LayeredElement> {
         if state::take_rebuild_requested() || self.pending_view_tree.is_some() {
             if let Some(vt) = self.pending_view_tree.take() {
+                let vt: &ViewNode = &vt;
+                let span = crate::perf::Span::start("reconcile");
                 let mut r = Reconciler::new();
                 if self.layers.layer_root(LayerType::Base).is_none() {
-                    let id = self.layers.tree.create_from_node(&vt);
+                    let id = self.layers.tree.create_from_node(vt);
                     self.layers.tree.set_root(id);
                     self.layers.set_base_root(id);
                     let mut p = Vec::new();
-                    r.diff(&vt, id, &self.layers.tree, &mut p);
+                    r.diff(vt, id, &self.layers.tree, &mut p);
                     r.apply(p, &mut self.layers.tree);
                 } else {
                     let rid = self.layers.layer_root(LayerType::Base).unwrap();
                     let mut p = Vec::new();
-                    r.diff(&vt, rid, &self.layers.tree, &mut p);
+                    r.diff(vt, rid, &self.layers.tree, &mut p);
                     r.apply(p, &mut self.layers.tree);
                     self.debug_stats.reconciler = r.stats;
+                }
+                span.finish();
+                if crate::perf::enabled() {
+                    let s = &self.debug_stats.reconciler;
+                    eprintln!(
+                        "[lieui-perf] reconcile-stats  created={} updated={} removed={} moved={}",
+                        s.created, s.updated, s.removed, s.moved
+                    );
                 }
                 self.needs_layout = true;
             }
@@ -130,7 +142,9 @@ impl Runtime {
             self.needs_layout = true;
         }
         if self.needs_layout {
+            let span = crate::perf::Span::start("layout");
             self.perform_layout();
+            span.finish();
             self.needs_layout = false;
             // 调试：LIEUI_DUMP_LAYOUT=1 时打印布局树
             if cfg!(debug_assertions) && std::env::var("LIEUI_DUMP_LAYOUT").is_ok_and(|v| v == "1")
@@ -168,7 +182,10 @@ impl Runtime {
         if self.needs_render {
             self.needs_render = false;
             self.debug_stats.element_count = self.layers.tree.len();
-            self.build_render_tree()
+            let span = crate::perf::Span::start("render-tree");
+            let e = self.build_render_tree();
+            span.finish();
+            e
         } else {
             Vec::new()
         }
@@ -362,7 +379,7 @@ impl Runtime {
             // 否则保持平铺以最大化渲染性能。
             if paint.clip_content {
                 let mut child_elements = Vec::new();
-                for cid in layers.tree.children_of(id) {
+                for &cid in layers.tree.children_ref(id) {
                     Self::cv(
                         cid,
                         z_index,
@@ -391,7 +408,7 @@ impl Runtime {
                     );
                 }
             } else {
-                for cid in layers.tree.children_of(id) {
+                for &cid in layers.tree.children_ref(id) {
                     Self::cv(cid, z_index, layers, elements, next_listener_state);
                 }
             }
@@ -399,7 +416,7 @@ impl Runtime {
         }
 
         // Text / Image 为叶子节点，无 children；Div 分支已在上方处理。
-        for cid in layers.tree.children_of(id) {
+        for &cid in layers.tree.children_ref(id) {
             Self::cv(cid, z_index, layers, elements, next_listener_state);
         }
     }

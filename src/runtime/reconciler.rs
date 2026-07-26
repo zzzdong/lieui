@@ -25,6 +25,12 @@ pub enum Patch {
         parent: ElementId,
         position: usize,
     },
+    /// 仅刷新监听器回调（builder 每次 rebuild 都会新建闭包）。
+    /// 不标记 dirty、不清排版缓存，避免回调指针变化触发全量重排。
+    UpdateListeners {
+        id: ElementId,
+        listeners: Vec<crate::view::node::Listener>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -59,7 +65,7 @@ impl Reconciler {
         tree: &ElementTree,
         patches: &mut Vec<Patch>,
     ) {
-        let existing = tree.children_of(parent_id);
+        let existing = tree.children_ref(parent_id);
         let mut matched = Vec::new();
         let mut used = std::collections::HashSet::new();
 
@@ -68,7 +74,7 @@ impl Reconciler {
             std::collections::HashMap::new();
         let mut by_type: std::collections::HashMap<&'static str, Vec<ElementId>> =
             std::collections::HashMap::new();
-        for &id in &existing {
+        for &id in existing {
             if let Some(node) = tree.get_node_ref(id) {
                 if let Some(key) = node.key() {
                     by_key.entry(key.to_owned()).or_default().push(id);
@@ -78,7 +84,7 @@ impl Reconciler {
         }
 
         for (pos, child_node) in view_node.children().iter().enumerate() {
-            match self.find_match(child_node, pos, &existing, &used, &by_key, &by_type, tree) {
+            match self.find_match(child_node, pos, existing, &used, &by_key, &by_type, tree) {
                 Ok(id) => {
                     used.insert(id);
                     matched.push(id);
@@ -99,6 +105,12 @@ impl Reconciler {
                             node: child_node.clone(),
                         });
                         self.stats.updated += 1;
+                    } else if !child_node.listeners().is_empty() {
+                        // config 未变但闭包是新建的：只换回调，不触发重排。
+                        patches.push(Patch::UpdateListeners {
+                            id,
+                            listeners: child_node.listeners().to_vec(),
+                        });
                     }
                     self.diff(child_node, id, tree, patches);
                 }
@@ -112,7 +124,7 @@ impl Reconciler {
                 }
             }
         }
-        for child_id in &existing {
+        for child_id in existing {
             if !matched.contains(child_id) && tree.contains(*child_id) {
                 patches.push(Patch::Remove { id: *child_id });
                 self.stats.removed += 1;
@@ -183,6 +195,9 @@ impl Reconciler {
                     position,
                 } => {
                     tree.move_child(id, parent, position);
+                }
+                Patch::UpdateListeners { id, listeners } => {
+                    tree.set_listeners(id, listeners);
                 }
             }
         }

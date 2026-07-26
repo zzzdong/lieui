@@ -48,7 +48,7 @@ impl LayoutContext {
             _ => LayoutNodeType::Default,
         };
 
-        let children = tree.children_of(id);
+        let children = tree.children_ref(id);
         let is_leaf = children.is_empty();
         let mut fn_node = FlexNode::new(0, fs);
 
@@ -65,7 +65,7 @@ impl LayoutContext {
         }
 
         // 递归构建子树
-        for cid in children {
+        for &cid in children {
             let child_fn = Self::build_flex(cid, tree);
             fn_node.children.push(child_fn);
         }
@@ -93,7 +93,7 @@ impl LayoutContext {
             },
         );
 
-        let children_ids = tree.children_of(id);
+        let children_ids = tree.children_ref(id);
         for (child_fn, child_id) in node.children.iter().zip(children_ids.iter()) {
             Self::write_layout(child_fn, tree, *child_id, global_x, global_y);
         }

@@ -9,6 +9,7 @@ pub mod container;
 pub mod divider;
 pub mod flex;
 pub mod image;
+pub mod input;
 pub mod list_view;
 pub mod text;
 
@@ -18,6 +19,7 @@ pub use container::Container;
 pub use divider::Divider;
 pub use flex::{Column, Row};
 pub use image::Image;
+pub use input::Input;
 pub use list_view::ListView;
 pub use text::Text;
 

@@ -127,6 +127,44 @@ impl Listener {
             callback: Callback::WithCtx(cb),
         }
     }
+
+    pub fn on_ime_preedit(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::ImePreedit,
+            callback: Callback::WithCtx(cb),
+        }
+    }
+
+    pub fn on_ime_commit(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::ImeCommit,
+            callback: Callback::WithCtx(cb),
+        }
+    }
+
+    pub fn on_ime_disabled(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::ImeDisabled,
+            callback: Callback::WithCtx(cb),
+        }
+    }
+}
+
+/// 比较两组监听器的「签名」是否相同：只看数量、事件类型与回调形态，
+/// 不比较回调指针。builder 每次 rebuild 都会新建闭包，`Rc::ptr_eq` 永远
+/// 不相等，若直接参与 config 比较会导致所有带监听器的节点每帧都被
+/// Update（清空排版缓存 + 全量重排）。回调本体由 Reconciler 通过
+/// 轻量的 UpdateListeners 补丁单独刷新。
+pub fn listeners_sig_eq(a: &[Listener], b: &[Listener]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x.event == y.event
+                && matches!(
+                    (&x.callback, &y.callback),
+                    (Callback::Simple(_), Callback::Simple(_))
+                        | (Callback::WithCtx(_), Callback::WithCtx(_))
+                )
+        })
 }
 
 /// 节点类型标记
@@ -270,7 +308,7 @@ impl ViewNode {
                     listeners: r2,
                     ..
                 },
-            ) => a == x && b == y && l1 == r1 && l2 == r2,
+            ) => a == x && b == y && l1 == r1 && listeners_sig_eq(l2, r2),
             (
                 Image {
                     data: a,
@@ -286,7 +324,7 @@ impl ViewNode {
                     listeners: r2,
                     ..
                 },
-            ) => a == x && b == y && l1 == r1 && l2 == r2,
+            ) => a == x && b == y && l1 == r1 && listeners_sig_eq(l2, r2),
             (
                 Div {
                     layout: l1,
@@ -300,7 +338,7 @@ impl ViewNode {
                     listeners: r2,
                     ..
                 },
-            ) => l1 == r1 && p1 == p2 && l2 == r2,
+            ) => l1 == r1 && p1 == p2 && listeners_sig_eq(l2, r2),
             _ => false,
         }
     }
@@ -343,7 +381,7 @@ impl ViewNode {
                     listeners: r2,
                     ..
                 },
-            ) => a == x && b == y && l1 == r1 && l2 == r2,
+            ) => a == x && b == y && l1 == r1 && listeners_sig_eq(l2, r2),
             (
                 Image {
                     data: a,
@@ -359,7 +397,7 @@ impl ViewNode {
                     listeners: r2,
                     ..
                 },
-            ) => Arc::ptr_eq(a, x) && b == y && l1 == r1 && l2 == r2,
+            ) => Arc::ptr_eq(a, x) && b == y && l1 == r1 && listeners_sig_eq(l2, r2),
             (
                 Div {
                     layout: l1,
@@ -373,7 +411,7 @@ impl ViewNode {
                     listeners: r2,
                     ..
                 },
-            ) => l1 == r1 && p1 == p2 && l2 == r2,
+            ) => l1 == r1 && p1 == p2 && listeners_sig_eq(l2, r2),
             _ => false,
         }
     }

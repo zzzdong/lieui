@@ -95,6 +95,35 @@ impl ElementTree {
             .is_some_and(|e| !e.listeners.borrow().is_empty())
     }
 
+    /// 检查节点是否监听 IME 事件。
+    pub fn has_ime_listener(&self, id: ElementId) -> bool {
+        self.entries.get(id).is_some_and(|e| {
+            e.listeners.borrow().iter().any(|l| {
+                matches!(
+                    l.event,
+                    crate::event::EventType::ImePreedit
+                        | crate::event::EventType::ImeCommit
+                        | crate::event::EventType::ImeDisabled
+                )
+            })
+        })
+    }
+
+    /// 在直接子节点中查找指定 key 的节点。
+    pub fn find_child_by_key(&self, id: ElementId, key: &str) -> Option<ElementId> {
+        self.entries.get(id).and_then(|e| {
+            e.children
+                .iter()
+                .find(|&&c| self.key_of(c) == Some(key))
+                .copied()
+        })
+    }
+
+    /// 获取节点的 key。
+    pub fn key_of(&self, id: ElementId) -> Option<&str> {
+        self.entries.get(id).and_then(|e| e.node.key())
+    }
+
     // ---- 交互状态 ----
     pub fn state(&self, id: ElementId) -> ElementState {
         self.entries
@@ -123,6 +152,13 @@ impl ElementTree {
             .get(id)
             .map(|e| e.children.clone())
             .unwrap_or_default()
+    }
+    /// 零拷贝访问子节点列表（热路径专用，避免 children_of 的 Vec 克隆）。
+    pub fn children_ref(&self, id: ElementId) -> &[ElementId] {
+        self.entries
+            .get(id)
+            .map(|e| e.children.as_slice())
+            .unwrap_or(&[])
     }
     pub fn contains(&self, id: ElementId) -> bool {
         self.entries.contains_key(id)
@@ -157,10 +193,41 @@ impl ElementTree {
     }
     pub fn update_node(&mut self, id: ElementId, new: &ViewNode) {
         if let Some(e) = self.entries.get_mut(id) {
+            // 文本内容与样式未变时保留排版缓存（仅布局/监听器变化不影响排版）。
+            let keep_text_cache = matches!(
+                (&e.node, new),
+                (
+                    ViewNode::Text {
+                        content: a,
+                        style: sa,
+                        ..
+                    },
+                    ViewNode::Text {
+                        content: b,
+                        style: sb,
+                        ..
+                    },
+                ) if a == b && sa == sb
+            );
             e.node = without_children(new);
             e.dirty.set(true);
-            e.text_layout_cache = RefCell::new(None); // 清除文本布局缓存
+            if !keep_text_cache {
+                e.text_layout_cache = RefCell::new(None); // 清除文本布局缓存
+            }
             *e.listeners.borrow_mut() = e.node.listeners().to_vec();
+        }
+    }
+
+    /// 仅替换监听器回调，不标记 dirty、不清排版缓存。
+    /// 用于 rebuild 后刷新闭包（闭包每次都是新建的，但不影响布局/绘制）。
+    pub fn set_listeners(&mut self, id: ElementId, listeners: Vec<Listener>) {
+        if let Some(e) = self.entries.get_mut(id) {
+            match &mut e.node {
+                ViewNode::Div { listeners: l, .. }
+                | ViewNode::Text { listeners: l, .. }
+                | ViewNode::Image { listeners: l, .. } => *l = listeners.clone(),
+            }
+            *e.listeners.borrow_mut() = listeners;
         }
     }
 
@@ -263,7 +330,7 @@ impl ElementTree {
         if self.is_dirty(id) {
             return true;
         }
-        self.children_of(id)
+        self.children_ref(id)
             .iter()
             .any(|c| self.subtree_has_dirty(*c))
     }

@@ -1,8 +1,10 @@
 pub mod app;
+pub mod clipboard;
 pub mod core;
 pub mod event;
 pub mod geometry;
 pub mod layout;
+pub mod perf;
 pub mod render;
 pub mod runtime;
 pub mod state;
@@ -37,6 +39,6 @@ pub mod prelude {
 
     // ── widgets ──
     pub use crate::widget::{
-        Button, Checkbox, Column, Container, Divider, Image, ListView, Row, Text,
+        Button, Checkbox, Column, Container, Divider, Image, Input, ListView, Row, Text,
     };
 }

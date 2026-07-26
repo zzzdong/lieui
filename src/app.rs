@@ -6,9 +6,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key as WinitKey, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::event::{EventEffects, HitTestResult, MouseButton};
@@ -28,7 +29,11 @@ pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     window_size: (u32, u32),
     mouse_pos: Point,
+    modifiers: winit::keyboard::ModifiersState,
     rendered_once: bool,
+    /// 上一次设置给窗口的 IME 状态，用于避免每帧重复调用。
+    last_ime_allowed: bool,
+    last_ime_cursor: Option<crate::geometry::Rect>,
 }
 
 static WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
@@ -39,6 +44,44 @@ fn pack_size(w: u32, h: u32) -> u64 {
 
 fn unpack_size(v: u64) -> (u32, u32) {
     ((v >> 32) as u32, v as u32)
+}
+
+fn map_winit_key(key: &WinitKey) -> crate::event::Key {
+    use crate::event::Key;
+    match key {
+        WinitKey::Character(s) => s.chars().next().map(Key::Character).unwrap_or(Key::Unknown),
+        WinitKey::Named(named) => match named {
+            NamedKey::Enter => Key::Enter,
+            NamedKey::Escape => Key::Escape,
+            NamedKey::Backspace => Key::Backspace,
+            NamedKey::Delete => Key::Delete,
+            NamedKey::Tab => Key::Tab,
+            NamedKey::Space => Key::Space,
+            NamedKey::Home => Key::Home,
+            NamedKey::End => Key::End,
+            NamedKey::PageUp => Key::PageUp,
+            NamedKey::PageDown => Key::PageDown,
+            NamedKey::ArrowUp => Key::ArrowUp,
+            NamedKey::ArrowDown => Key::ArrowDown,
+            NamedKey::ArrowLeft => Key::ArrowLeft,
+            NamedKey::ArrowRight => Key::ArrowRight,
+            NamedKey::Shift => Key::Shift,
+            NamedKey::Control => Key::Ctrl,
+            NamedKey::Alt => Key::Alt,
+            NamedKey::Meta => Key::Meta,
+            _ => Key::Unknown,
+        },
+        _ => Key::Unknown,
+    }
+}
+
+fn map_winit_modifiers(m: winit::keyboard::ModifiersState) -> crate::event::Modifiers {
+    crate::event::Modifiers {
+        shift: m.shift_key(),
+        ctrl: m.control_key(),
+        alt: m.alt_key(),
+        meta: m.super_key(),
+    }
 }
 
 /// 将 `PremulRgba8` 打包为 softbuffer 所需的 `0RGB` u32 像素。
@@ -69,7 +112,10 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             surface: None,
             window_size: (viewport.width as u32, viewport.height as u32),
             mouse_pos: Point::zero(),
+            modifiers: winit::keyboard::ModifiersState::empty(),
             rendered_once: false,
+            last_ime_allowed: false,
+            last_ime_cursor: None,
         }
     }
 
@@ -93,14 +139,23 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             self.runtime.set_viewport(Size::new(ww as f32, wh as f32));
         }
 
+        let span = crate::perf::Span::start("builder");
         let mut ctx = BuildContext::new(Rc::clone(&self.state));
         let root_widget = (self.builder)(&mut ctx);
         let view_tree = root_widget.build(&mut ctx);
+        span.finish();
+        let span = crate::perf::Span::start("submit");
         self.runtime.submit_view_tree(view_tree, rebuild_requested);
+        span.finish();
         let elements = self.runtime.frame();
 
+        let span = crate::perf::Span::start("raster");
         let pixmap = self.renderer.render(&elements);
+        span.finish();
+        let span = crate::perf::Span::start("blit");
         self.blit_to_window(pixmap.data());
+        span.finish();
+        self.update_ime_state();
         self.rendered_once = true;
     }
 
@@ -126,6 +181,47 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         }
         let pix = self.renderer.render(&elements);
         self.blit_to_window(pix.data());
+        self.update_ime_state();
+    }
+
+    /// 根据当前焦点与布局结果更新 IME 的启用状态及候选窗位置。
+    /// 缓存上一次的值，避免每帧重复调用系统 IME API（Windows 上可能引发卡顿）。
+    fn update_ime_state(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let em = self.runtime.layers.event_manager.borrow();
+        let allowed = em.focused_ime();
+        let focused = em.focused();
+        let caret_area = focused.map(|id| {
+            let tree = &self.runtime.layers.tree;
+            let caret_id = tree.find_child_by_key(id, "__ime_caret__");
+            caret_id.map_or_else(|| tree.layout(id).rect(), |cid| tree.layout(cid).rect())
+        });
+        drop(em);
+
+        if self.last_ime_allowed != allowed {
+            window.set_ime_allowed(allowed);
+            self.last_ime_allowed = allowed;
+        }
+
+        if !allowed {
+            if self.last_ime_cursor.is_some() {
+                self.last_ime_cursor = None;
+            }
+            return;
+        }
+
+        let Some(area) = caret_area else {
+            return;
+        };
+        if self.last_ime_cursor != Some(area) {
+            window.set_ime_cursor_area(
+                LogicalPosition::new(area.x as f64, area.y as f64),
+                LogicalSize::new(area.width as f64, area.height as f64),
+            );
+            self.last_ime_cursor = Some(area);
+        }
     }
 
     fn blit_to_window(&mut self, data: &[vello_cpu::color::PremulRgba8]) {
@@ -152,13 +248,13 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         }
         let buf_len = bw * bh;
         let copy_len = buf_len.min(data.len());
-        for i in 0..copy_len {
-            buf[i] = pack_softbuffer_pixel(data[i]);
+        // 用切片迭代代替逐下标索引，避免每像素边界检查（debug 下差距显著）。
+        let dst = &mut buf[..buf_len];
+        for (d, s) in dst[..copy_len].iter_mut().zip(&data[..copy_len]) {
+            *d = pack_softbuffer_pixel(*s);
         }
         const CLEAR: u32 = 0x00F0F0F0;
-        for i in copy_len..buf_len {
-            buf[i] = CLEAR;
-        }
+        dst[copy_len..].fill(CLEAR);
         let _ = buf.present();
     }
 
@@ -224,6 +320,10 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         event: &crate::event::Event,
         ctx: &mut crate::event::EventContext,
     ) {
+        ctx.set_event(event.clone());
+        // 注入当前节点及其布局矩形，供回调换算局部坐标/请求鼠标捕获。
+        ctx.set_current(id, tree.layout(id).rect());
+
         // 提取事件类型，非关注的事件跳过。
         use crate::event::EventType as ET;
         let event_type: ET = match event {
@@ -238,7 +338,9 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             crate::event::Event::KeyUp { .. } => ET::KeyUp,
             crate::event::Event::FocusIn => ET::FocusIn,
             crate::event::Event::FocusOut => ET::FocusOut,
-            _ => return,
+            crate::event::Event::ImePreedit { .. } => ET::ImePreedit,
+            crate::event::Event::ImeCommit { .. } => ET::ImeCommit,
+            crate::event::Event::ImeDisabled => ET::ImeDisabled,
         };
         let Some(node) = tree.get_node_ref(id) else {
             return;
@@ -333,10 +435,16 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
                     };
                     let effects = {
                         let tree = &self.runtime.layers.tree;
+                        let modifiers = map_winit_modifiers(self.modifiers);
                         let mut em = self.runtime.layers.event_manager.borrow_mut();
-                        em.handle_mouse_down(self.mouse_pos, btn, &hit, tree, |id, event, ctx| {
-                            Self::handle_lie_event(tree, id, event, ctx)
-                        })
+                        em.handle_mouse_down(
+                            self.mouse_pos,
+                            btn,
+                            modifiers,
+                            &hit,
+                            tree,
+                            |id, event, ctx| Self::handle_lie_event(tree, id, event, ctx),
+                        )
                     };
                     self.apply_event_effects(effects);
                 }
@@ -366,6 +474,63 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let key = map_winit_key(&event.logical_key);
+                let modifiers = map_winit_modifiers(self.modifiers);
+                let effects = {
+                    let tree = &self.runtime.layers.tree;
+                    let mut em = self.runtime.layers.event_manager.borrow_mut();
+                    match event.state {
+                        ElementState::Pressed => {
+                            em.handle_key_down(key, modifiers, |id, ev, ctx| {
+                                Self::handle_lie_event(tree, id, ev, ctx)
+                            })
+                        }
+                        ElementState::Released => {
+                            em.handle_key_up(key, modifiers, |id, ev, ctx| {
+                                Self::handle_lie_event(tree, id, ev, ctx)
+                            })
+                        }
+                    }
+                };
+                self.apply_event_effects(effects);
+                if effects.needs_render() || effects.needs_rebuild() {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                let effects = {
+                    let tree = &self.runtime.layers.tree;
+                    let mut em = self.runtime.layers.event_manager.borrow_mut();
+                    match ime {
+                        Ime::Preedit(text, cursor) => {
+                            let (start, end) =
+                                cursor.map_or((None, None), |(s, e)| (Some(s), Some(e)));
+                            em.handle_ime_preedit(text, start, end, |id, ev, ctx| {
+                                Self::handle_lie_event(tree, id, ev, ctx)
+                            })
+                        }
+                        Ime::Commit(text) => em.handle_ime_commit(text, |id, ev, ctx| {
+                            Self::handle_lie_event(tree, id, ev, ctx)
+                        }),
+                        Ime::Disabled => em.handle_ime_disabled(|id, ev, ctx| {
+                            Self::handle_lie_event(tree, id, ev, ctx)
+                        }),
+                        Ime::Enabled => EventEffects::default(),
+                    }
+                };
+                self.apply_event_effects(effects);
+                if effects.needs_render() || effects.needs_rebuild() {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {

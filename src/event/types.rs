@@ -30,6 +30,10 @@ pub enum Event {
         button: MouseButton,
         x: f32,
         y: f32,
+        /// 按下时的键盘修饰键（Shift+点击扩选等场景需要）
+        modifiers: Modifiers,
+        /// 连击计数：1=单击 2=双击 3=三击（循环）
+        click_count: u8,
     },
     MouseUp {
         button: MouseButton,
