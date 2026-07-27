@@ -215,6 +215,10 @@ impl Input {
         self.listeners.push(Listener::on_click(Rc::new(f)));
         self
     }
+    pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
+        self
+    }
 
     fn focus_listener(state: &Stateful<InputState>, focused: bool) -> Listener {
         let state = state.clone();
@@ -647,7 +651,7 @@ impl Widget for Input {
             style: display_style,
             layout: FlexStyle::default().flex_grow(1.0),
             key: None,
-            listeners: Vec::new(),
+            listeners: vec![],
         };
 
         // 选区高亮：排在文本之前（先绘），品牌色半透明，不遮挡字形。
@@ -670,8 +674,8 @@ impl Widget for Input {
                         .position_top(pv + center_offset + bb.y0.max(0.0) as f32),
                     paint: PaintStyle::new().background(sel_color),
                     key: Some(format!("__sel_{}__", i)),
-                    children: Vec::new(),
-                    listeners: Vec::new(),
+                    children: vec![],
+                    listeners: vec![],
                 });
             }
         }
@@ -692,8 +696,8 @@ impl Widget for Input {
                         .position_top(pv + center_offset + caret_y as f32),
                     paint: PaintStyle::new().background(text_style.color),
                     key: Some("__ime_caret__".to_string()),
-                    children: Vec::new(),
-                    listeners: Vec::new(),
+                    children: vec![],
+                    listeners: vec![],
                 };
                 children.push(caret);
             }

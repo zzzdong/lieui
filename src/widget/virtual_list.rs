@@ -1,14 +1,10 @@
-use std::rc::Rc;
-use std::sync::Arc;
-
-use crate::event::Event;
-use crate::event::EventContext;
 use crate::layout::style::FlexStyle;
 use crate::state::State;
 use crate::theme::current;
-use crate::view::node::{Listener, ViewNode};
+use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
 use crate::widget::{BuildContext, Widget};
+use std::sync::Arc;
 
 /// 等高分项的虚拟滚动列表。
 ///
@@ -16,37 +12,48 @@ use crate::widget::{BuildContext, Widget};
 /// 只构建视口内可见的窗口 `[first, last)` 子项，配合 engine 裁剪与偏移实现滚动，
 /// 避免一次性布局全部数据（万级条目也不卡）。
 ///
+/// 滚动偏移通过 `FlexStyle::bind_scroll_state` 由引擎自动同步写入 `scroll_state`，
+/// 消除手动 wheel listener 的偏移漂移风险。
+///
 /// - `height`：视口高度（固定）。
 /// - `item_count` / `item_height`：数据总量与每项高度，决定可滚动总高。
-/// - `scroll_y`：外部 `State<f32>`，由引擎滚轮事件同步更新，用于读取当前偏移计算窗口。
+/// - `scroll_state`：引擎自动同步的 `State<(f32, f32)>`，读取 `.1` 获得 Y 偏移。
 /// - `item`：按索引生成子控件的工厂。
+#[derive(Clone)]
 pub struct VirtualList {
     height: f32,
     item_count: usize,
     item_height: f32,
-    scroll_y: State<f32>,
+    /// 引擎自动同步的滚动偏移 State（Y 轴通过 `.get().1` 读取）。
+    scroll_state: State<(f32, f32)>,
     item: Arc<dyn Fn(usize) -> Box<dyn Widget>>,
     overscan: usize,
 }
 
 impl VirtualList {
+    /// `scroll_state` 由引擎自动同步，读取时 `state.get().1` 获得 Y 轴偏移。
     pub fn new(
         height: f32,
         item_count: usize,
         item_height: f32,
-        scroll_y: State<f32>,
+        scroll_state: State<(f32, f32)>,
     ) -> Self {
         Self {
             height,
             item_count,
             item_height,
-            scroll_y,
+            scroll_state,
             item: Arc::new(|_| Box::new(Empty)),
             overscan: 3,
         }
     }
     pub fn item(mut self, f: impl Fn(usize) -> Box<dyn Widget> + 'static) -> Self {
         self.item = Arc::new(f);
+        self
+    }
+    /// 直接设置已有的 `Arc` 工厂（用于 ListView 等组合控件复用现有工厂）。
+    pub fn item_arc(mut self, f: Arc<dyn Fn(usize) -> Box<dyn Widget>>) -> Self {
+        self.item = f;
         self
     }
     pub fn overscan(mut self, n: usize) -> Self {
@@ -73,7 +80,7 @@ impl Widget for Empty {
 
 impl Widget for VirtualList {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
-        let sy = *self.scroll_y.get();
+        let sy = self.scroll_state.get().1; // 读取 Y 轴偏移
         let ih = self.item_height;
         let h = self.height;
         let count = self.item_count;
@@ -103,16 +110,6 @@ impl Widget for VirtualList {
             });
         }
 
-        // 滚轮：监听器同步更新 scroll_y State，引擎同时会更新 store 偏移，
-        // 两者始终使用相同 delta → 保持同步。
-        let value = self.scroll_y.clone();
-        let on_wheel = Rc::new(move |ctx: &mut EventContext| {
-            if let Some(Event::MouseWheel { delta_y, .. }) = ctx.event() {
-                let dy = *delta_y;
-                value.update(|v| *v = (*v + dy).max(0.0));
-            }
-        });
-
         let content_box = ViewNode::Div {
             layout: FlexStyle::column().flex_shrink(0.0),
             paint: PaintStyle::new(),
@@ -121,17 +118,19 @@ impl Widget for VirtualList {
             key: Some("content".into()),
         };
 
+        // 不再需要手动 wheel listener：引擎 scroll_by() 自动同步 scroll_state，
+        // scroll_state 的变化触发 State::set() → request_rebuild() → 重新计算窗口。
         ViewNode::Div {
             layout: FlexStyle::default()
                 .height(h)
                 .overflow_scroll()
-                .content_height(total),
+                .content_height(total)
+                .bind_scroll_state(&self.scroll_state),
             paint: PaintStyle::new()
                 .background(current().background.primary_default)
                 .clip(true),
             children: vec![content_box],
-            // 监听器放在视口上，确保视口内任意区域都能触发滚动更新
-            listeners: vec![Listener::on_mouse_wheel(on_wheel)],
+            listeners: vec![],
             key: None,
         }
     }

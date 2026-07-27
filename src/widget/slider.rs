@@ -17,6 +17,7 @@ use crate::widget::{BuildContext, Widget};
 /// 抬起释放。手柄以「固定宽度的流内元素」夹在填充与占位之间实现近似定位——
 /// 因为 flex 布局下填充/占位按 `value : (1 - value)` 瓜分剩余空间，手柄恰好落在
 /// 比例分界处，且始终保持在轨道内。
+#[derive(Clone)]
 pub struct Slider {
     value: State<f32>,
     track_height: f32,
@@ -109,7 +110,11 @@ impl Widget for Slider {
             Listener::on_mouse_up(on_up),
         ];
 
+        // Row 轨道：在 Column 中可能不被拉伸，显式 align_self(Stretch)
+        // 使 flex_grow 有机会分配剩余空间，手柄位置才正确。
+        // 不开启 clip：手柄（14px）高于轨道（6px），裁剪会导致手柄内容缺失。
         let track = FlexStyle::row()
+            .align_self(FlexAlign::Stretch)
             .align_items(FlexAlign::Center)
             .height(h);
         let fill = FlexStyle::default().flex_grow(v).height(h);
@@ -122,8 +127,7 @@ impl Widget for Slider {
             layout: track,
             paint: PaintStyle::new()
                 .background(self.track_color)
-                .radius(r)
-                .clip(true),
+                .radius(r),
             children: vec![
                 ViewNode::Div {
                     layout: fill,

@@ -1,5 +1,6 @@
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
+use crate::layout::types::FlexAlign;
 use crate::theme::current;
 use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
@@ -8,9 +9,11 @@ use crate::widget::Widget;
 
 /// 进度条（确定型，value ∈ [0, 1]）。
 ///
-/// 轨道与填充均为 `Div`：轨道按行布局，填充与占位分别用 `flex_grow(value)` /
+/// 轨道按行布局，填充与占位分别用 `flex_grow(value)` /
 /// `flex_grow(1 - value)` 按比例瓜分轨道宽度，因此无需知道父容器像素宽度即可
-/// 自适应。轨道开启 `clip`，使填充始终裁剪在轨道圆角矩形内。
+/// 自适应。轨道设置 `align_self(Stretch)` 以在 Column 等非 Stretch 父容器中仍能
+/// 撑满宽度；`clip(true)` 使填充始终裁剪在轨道圆角矩形内。
+#[derive(Clone)]
 pub struct Progress {
     value: f64,
     height: f32,
@@ -51,7 +54,9 @@ impl Widget for Progress {
         let h = self.height;
         let r = h / 2.0;
 
-        let track = FlexStyle::row().height(h);
+        let track = FlexStyle::row()
+            .align_self(FlexAlign::Stretch)
+            .height(h);
         let fill = FlexStyle::default().flex_grow(v.max(0.0)).height(h);
         let spacer = FlexStyle::default().flex_grow((1.0 - v).max(0.0)).height(h);
 

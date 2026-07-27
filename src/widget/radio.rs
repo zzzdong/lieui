@@ -12,6 +12,7 @@ use crate::widget::{BuildContext, Widget};
 /// 单选组。选中索引由外部 `State<usize>` 持有。
 ///
 /// 每个选项是一行（圆点 + 文本），点击设置选中索引；圆点在选中时填充品牌色。
+#[derive(Clone)]
 pub struct Radio {
     value: State<usize>,
     options: Vec<String>,

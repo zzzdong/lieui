@@ -15,6 +15,8 @@ use crate::widget::{BuildContext, Widget};
 pub struct Tooltip {
     child: Box<dyn Widget>,
     tip: String,
+    /// 提示气泡相对子控件顶部的垂直偏移（默认 -30，即在上方）。
+    offset_y: f32,
 }
 
 impl Tooltip {
@@ -22,7 +24,14 @@ impl Tooltip {
         Self {
             child,
             tip: tip.into(),
+            offset_y: -30.0,
         }
+    }
+
+    /// 设置提示气泡的垂直偏移。负值向上，正值向下。
+    pub fn offset_y(mut self, v: f32) -> Self {
+        self.offset_y = v;
+        self
     }
 }
 
@@ -46,7 +55,7 @@ impl Widget for Tooltip {
             let tip_node = ViewNode::Div {
                 layout: FlexStyle::default()
                     .absolute()
-                    .position_top(-30.0)
+                    .position_top(self.offset_y)
                     .position_left(0.0)
                     .padding_all(6.0)
                     .align_items(FlexAlign::Center)

@@ -15,6 +15,7 @@ pub struct Column {
     justify: FlexAlign,
     align: FlexAlign,
     expand: bool,
+    flex_shrink: f32,
     children: Vec<Box<dyn Widget>>,
     listeners: Vec<Listener>,
     /// 视觉样式自定义。
@@ -27,6 +28,7 @@ impl Column {
             justify: FlexAlign::Start,
             align: FlexAlign::Stretch,
             expand: false,
+            flex_shrink: 1.0,
             children: Vec::new(),
             listeners: Vec::new(),
             paint: None,
@@ -50,6 +52,10 @@ impl Column {
     }
     pub fn expand(mut self, v: bool) -> Self {
         self.expand = v;
+        self
+    }
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
     pub fn center(mut self) -> Self {
@@ -142,6 +148,7 @@ pub struct Row {
     justify: FlexAlign,
     align: FlexAlign,
     expand: bool,
+    flex_shrink: f32,
     children: Vec<Box<dyn Widget>>,
     listeners: Vec<Listener>,
     /// 视觉样式自定义。
@@ -154,6 +161,7 @@ impl Row {
             justify: FlexAlign::Start,
             align: FlexAlign::Center,
             expand: false,
+            flex_shrink: 1.0,
             children: Vec::new(),
             listeners: Vec::new(),
             paint: None,
@@ -177,6 +185,10 @@ impl Row {
     }
     pub fn expand(mut self, v: bool) -> Self {
         self.expand = v;
+        self
+    }
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
     pub fn center(mut self) -> Self {
@@ -247,6 +259,9 @@ impl Widget for Row {
             .wrap(FlexWrap::NoWrap);
         if self.expand {
             layout = layout.flex_grow(1.0);
+        }
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
         }
         ViewNode::Div {
             layout,

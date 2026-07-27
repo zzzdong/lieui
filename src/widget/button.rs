@@ -119,6 +119,7 @@ fn button_size_metrics(t: theme::Theme, s: ButtonSize) -> (f32, f32, f64) {
     }
 }
 
+#[derive(Clone)]
 pub struct Button {
     label: String,
     listeners: Vec<Listener>,
@@ -339,7 +340,7 @@ impl Widget for Button {
             style: label_style,
             layout: FlexStyle::default(),
             key: None,
-            listeners: Vec::new(),
+            listeners: vec![],
         };
         let content = ViewNode::Div {
             layout: FlexStyle::row()
@@ -349,7 +350,7 @@ impl Widget for Button {
             paint: PaintStyle::default(),
             key: None,
             children: vec![label_node],
-            listeners: Vec::new(),
+            listeners: vec![],
         };
 
         // ── 外部容器尺寸 ──

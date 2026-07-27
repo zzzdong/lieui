@@ -236,6 +236,7 @@ impl Runtime {
 
     /// 调整滚动容器偏移并钳制到内容范围，请求重排+重绘。
     /// 滚动不改变 Style（不触发 rebuild/重测量），只驱动布局平移与裁剪。
+    /// 如果容器绑定了 `scroll_state`，自动同步写入。
     pub fn scroll_by(&mut self, id: crate::core::ElementId, dx: f32, dy: f32) {
         let cl = self.layers.tree.layout(id);
         if !cl.overflow_scroll {
@@ -250,6 +251,33 @@ impl Runtime {
         let nox = (ox + dx).clamp(0.0, max_x);
         let noy = (oy + dy).clamp(0.0, max_y);
         self.layers.tree.set_scroll_offset(id, (nox, noy));
+        // 同步更新绑定的 scroll_state（如 VirtualList 需要感知偏移以重新计算窗口）
+        if let Some(s) = self.layers.tree.scroll_state(id) {
+            s.set((nox, noy));
+        }
+        self.needs_layout = true;
+        self.needs_render = true;
+        self.force_layout = true;
+    }
+
+    /// 直接将滚动容器偏移跳转到指定位置（像素）。
+    /// 与 `scroll_by` 不同，`scroll_to` 是绝对定位而非增量。
+    pub fn scroll_to(&mut self, id: crate::core::ElementId, x: f32, y: f32) {
+        let cl = self.layers.tree.layout(id);
+        if !cl.overflow_scroll {
+            return;
+        }
+        let (cw, ch) = self.layers.tree.content_size(id);
+        let vw = cl.width;
+        let vh = cl.height;
+        let max_x = (cw - vw).max(0.0);
+        let max_y = (ch - vh).max(0.0);
+        let nox = x.clamp(0.0, max_x);
+        let noy = y.clamp(0.0, max_y);
+        self.layers.tree.set_scroll_offset(id, (nox, noy));
+        if let Some(s) = self.layers.tree.scroll_state(id) {
+            s.set((nox, noy));
+        }
         self.needs_layout = true;
         self.needs_render = true;
         self.force_layout = true;
@@ -465,6 +493,16 @@ impl Runtime {
                 }
                 if !child_elements.is_empty() {
                     let r = computed.rect();
+                    if crate::perf::enabled() && computed.overflow_scroll {
+                        let scroll_off = layers.tree.scroll_offset(id);
+                        eprintln!(
+                            "[scroll] r={:.0},{:.0}+{:.0}x{:.0} offset=({:.1},{:.1}) content=({:.0},{:.0})",
+                            r.x, r.y, r.width, r.height,
+                            scroll_off.0, scroll_off.1,
+                            layers.tree.content_size(id).0,
+                            layers.tree.content_size(id).1,
+                        );
+                    }
                     elements.push(
                         crate::render::visual::LayeredElement::new(
                             crate::render::visual::VisualElement::Group {
@@ -481,6 +519,56 @@ impl Runtime {
                         )
                         .with_id(id.as_ffi()),
                     );
+                }
+
+                // 引擎层自绘滚动条——布局后已知确切实时视口/内容尺寸，thumb 计算精确
+                if computed.overflow_scroll && node_ref.layout().show_scrollbar {
+                    let rr = computed.rect();
+                    let sw = 8.0f32;
+                    let (_ox, oy) = layers.tree.scroll_offset(id);
+                    let (_cw, ch) = layers.tree.content_size(id);
+                    if ch > 0.0 && rr.height > 0.0 {
+                        let track_x = rr.x + rr.width - sw;
+                        let track_y = rr.y;
+                        let track_h = rr.height;
+                        let max_scroll = (ch - rr.height).max(1.0);
+                        let thumb_ratio = (rr.height / ch).clamp(0.02, 1.0);
+                        let thumb_size = (track_h * thumb_ratio).max(8.0);
+                        let thumb_off = (oy / max_scroll) * (track_h - thumb_size);
+                        let radius = 3.0;
+                        // track
+                        elements.push(
+                            crate::render::visual::LayeredElement::new(
+                                crate::render::visual::VisualElement::RoundedRect {
+                                    rect: crate::render::visual::KRect::new(
+                                        track_x as f64, track_y as f64,
+                                        (track_x + sw) as f64, (track_y + track_h) as f64,
+                                    ),
+                                    radius,
+                                    style: crate::render::visual::FillStrokeStyle::new()
+                                        .with_fill(crate::geometry::Color::rgba(0, 0, 0, 16)),
+                                },
+                                z_index + 1,
+                            )
+                            .with_id(id.as_ffi()),
+                        );
+                        // thumb
+                        elements.push(
+                            crate::render::visual::LayeredElement::new(
+                                crate::render::visual::VisualElement::RoundedRect {
+                                    rect: crate::render::visual::KRect::new(
+                                        track_x as f64, (track_y + thumb_off) as f64,
+                                        (track_x + sw) as f64, (track_y + thumb_off + thumb_size) as f64,
+                                    ),
+                                    radius,
+                                    style: crate::render::visual::FillStrokeStyle::new()
+                                        .with_fill(crate::geometry::Color::rgba(0, 0, 0, 80)),
+                                },
+                                z_index + 2,
+                            )
+                            .with_id(id.as_ffi()),
+                        );
+                    }
                 }
             } else {
                 for &cid in layers.tree.children_ref(id) {

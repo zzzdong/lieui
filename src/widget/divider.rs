@@ -4,6 +4,7 @@ use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
 use crate::widget::{BuildContext, Widget};
 
+#[derive(Clone)]
 pub struct Divider {
     height: f32,
     background: Option<Color>,

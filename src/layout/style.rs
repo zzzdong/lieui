@@ -20,11 +20,17 @@ pub struct FlexStyle {
     pub position_type: PositionType,
     pub display_type: DisplayType,
     pub overflow_scroll: bool,
+    /// 是否由引擎在渲染时自动绘制滚动条（thumb 尺寸与位置基于 layout 后的实际视口/内容尺寸计算）。
+    pub show_scrollbar: bool,
     /// 显式内容宽度（滚动容器专用）。设定后引擎以此作为内容总宽而非从子节点计算。
     /// 用于 VirtualList 等虚拟化列表（真实内容 >> 窗口子节点）。
     pub content_width: Option<f32>,
     /// 显式内容高度（滚动容器专用）。同上，用于高度方向。
     pub content_height: Option<f32>,
+    /// 可选的滚动偏移 State 绑定。设置后引擎滚动时自动同步写入此 State，
+    /// 供 ScrollBar / VirtualList 等外部控件读取当前滚动偏移，
+    /// 消除手动 wheel listener 同步的风险。
+    pub scroll_state: Option<crate::state::State<(f32, f32)>>,
 
     pub flex_basis: f32,
     pub flex_grow: f32,
@@ -63,6 +69,7 @@ impl PartialEq for FlexStyle {
             && self.position_type == other.position_type
             && self.display_type == other.display_type
             && self.overflow_scroll == other.overflow_scroll
+            && self.show_scrollbar == other.show_scrollbar
             && self.content_width == other.content_width
             && self.content_height == other.content_height
             && float_is_equal(self.flex_basis, other.flex_basis)
@@ -126,8 +133,10 @@ impl Default for FlexStyle {
             position_type: PositionType::Relative,
             display_type: DisplayType::Flex,
             overflow_scroll: false,
+            show_scrollbar: false,
             content_width: None,
             content_height: None,
+            scroll_state: None,
 
             dim: [VALUE_UNDEFINED; 2],
             min_dim: [VALUE_UNDEFINED; 2],
@@ -429,6 +438,22 @@ impl FlexStyle {
     /// 显式设置滚动容器的内容高度（替代从子节点计算）。
     pub fn content_height(mut self, v: f32) -> Self {
         self.content_height = Some(v);
+        self
+    }
+
+    /// 绑定一个 State，使引擎滚动时自动同步写入此 State。
+    /// 用于 VirtualList / ScrollBar 等需要读取当前滚动偏移的控件，
+    /// 消除手动 wheel listener 同步的偏移漂移风险。
+    pub fn bind_scroll_state(mut self, s: &crate::state::State<(f32, f32)>) -> Self {
+        self.scroll_state = Some(s.clone());
+        self
+    }
+
+    /// 启用/禁用引擎层自动渲染的滚动条（默认关闭）。
+    /// 滚动条的 thumb 位置和大小基于 layout 后的实际视口/内容尺寸计算，
+    /// 不受 build-time 猜测影响。需要配合 `overflow_scroll` 使用。
+    pub fn scrollbar(mut self, show: bool) -> Self {
+        self.show_scrollbar = show;
         self
     }
 }

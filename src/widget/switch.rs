@@ -12,6 +12,7 @@ use crate::widget::{BuildContext, Widget};
 /// 开关（Toggle）。选中状态由外部 `State<bool>` 持有，点击切换。
 ///
 /// 容器为相对定位，圆形手柄以绝对定位水平滑动到开启/关闭位置。
+#[derive(Clone)]
 pub struct Switch {
     value: State<bool>,
     on_color: Color,

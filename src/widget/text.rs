@@ -7,6 +7,7 @@ use crate::view::paint::{FontWeight, TextAlign, TextStyle};
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
+#[derive(Clone)]
 pub struct Text {
     content: String,
     style: TextStyle,

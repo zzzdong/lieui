@@ -10,8 +10,9 @@ use crate::view::paint::PaintStyle;
 use crate::widget::{BuildContext, Widget};
 
 /// 滚动条方向。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScrollOrientation {
+    #[default]
     Vertical,
     Horizontal,
 }
@@ -20,32 +21,39 @@ pub enum ScrollOrientation {
 ///
 /// 一个带拖拽缩放的轻量滚动条。依赖外部提供 `offset`、`viewport` 与 `content`。
 ///
+/// `offset` 使用 `State<(f32, f32)>`，与引擎 `FlexStyle::bind_scroll_state` 兼容：
+/// - 垂直滚动条读取 `.1`（Y 轴）
+/// - 水平滚动条读取 `.0`（X 轴）
+///
 /// **与 VirtualList 配合：**
 /// ```ignore
+/// let scroll = State::new((0.0, 0.0));
 /// Row::new()
-///     .child(VirtualList::new(360.0, 1000, 34.0, scroll_y.clone()))
-///     .child(ScrollBar::vertical(360.0, scroll_y.clone(), 360.0, 34000.0))
+///     .child(VirtualList::new(360.0, 1000, 34.0, scroll.clone()))
+///     .child(ScrollBar::vertical(360.0, scroll.clone(), 360.0, 34000.0))
 /// ```
 ///
-/// **与 ScrollView 配合**（先 `bind_scroll_y` 获得 State）：
+/// **与 ScrollView 配合（推荐）：**
 /// ```ignore
-/// let scroll_ofs = State::new(0.0);
+/// let scroll = State::new((0.0, 0.0));
 /// ScrollView::new(200.0)
-///     .bind_scroll_y(&scroll_ofs)
+///     .bind_scroll_state(&scroll)
 ///     .child(content)
 /// ```
+#[derive(Clone)]
 pub struct ScrollBar {
     orientation: ScrollOrientation,
     length: f32,
-    offset: State<f32>,
+    /// 滚动偏移。垂直方向读 `.1`，水平方向读 `.0`。
+    offset: State<(f32, f32)>,
     viewport: f32,
     content: f32,
     thickness: f32,
 }
 
 impl ScrollBar {
-    /// 垂直滚动条。
-    pub fn vertical(length: f32, offset: State<f32>, viewport: f32, content: f32) -> Self {
+    /// 垂直滚动条（读取 `offset.get().1` 作为 Y 轴偏移）。
+    pub fn vertical(length: f32, offset: State<(f32, f32)>, viewport: f32, content: f32) -> Self {
         Self {
             orientation: ScrollOrientation::Vertical,
             length,
@@ -56,8 +64,8 @@ impl ScrollBar {
         }
     }
 
-    /// 水平滚动条。
-    pub fn horizontal(length: f32, offset: State<f32>, viewport: f32, content: f32) -> Self {
+    /// 水平滚动条（读取 `offset.get().0` 作为 X 轴偏移）。
+    pub fn horizontal(length: f32, offset: State<(f32, f32)>, viewport: f32, content: f32) -> Self {
         Self {
             orientation: ScrollOrientation::Horizontal,
             length,
@@ -78,10 +86,16 @@ impl ScrollBar {
 impl Widget for ScrollBar {
     fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
         let t = theme::current();
+        // 根据方向读取对应轴偏移
+        let ofs = if self.orientation == ScrollOrientation::Vertical {
+            self.offset.get().1
+        } else {
+            self.offset.get().0
+        };
         let max = (self.content - self.viewport).max(1.0);
         let thumb_ratio = (self.viewport / self.content).clamp(0.02, 1.0);
         let thumb_size = (self.length * thumb_ratio).max(8.0);
-        let thumb_offset = (*self.offset.get() / max) * (self.length - thumb_size);
+        let thumb_offset = (ofs / max) * (self.length - thumb_size);
 
         let is_vertical = self.orientation == ScrollOrientation::Vertical;
 
@@ -89,7 +103,6 @@ impl Widget for ScrollBar {
         let captured = Rc::new(Cell::new(false));
         let last_pos = Rc::new(Cell::new(0.0f32));
         let state = self.offset.clone();
-        let _max_c = max;
         let len = self.length;
         let ts = thumb_size;
         let view = self.viewport;
@@ -112,7 +125,6 @@ impl Widget for ScrollBar {
                         return;
                     }
                     captured.set(true);
-                    // 记录初始鼠标位置（视口内的本地坐标）
                     let pos = ctx
                         .current_rect()
                         .map(|r| if is_vertical { r.y as f32 } else { r.x as f32 });
@@ -136,11 +148,12 @@ impl Widget for ScrollBar {
                     let cur = if is_vertical { *y } else { *x };
                     let delta_px = cur - last_pos.get();
                     last_pos.set(cur);
-                    // 像素偏移 → 内容偏移
                     let max_scroll = (cont - view).max(1.0);
                     let scale = max_scroll / (len - ts).max(1.0);
-                    state.update(|v| {
-                        *v = (*v + delta_px * scale).clamp(0.0, max_scroll)
+                    state.update(|pair| {
+                        let v = if is_vertical { pair.1 } else { pair.0 };
+                        let nv = (v + delta_px * scale).clamp(0.0, max_scroll);
+                        if is_vertical { pair.1 = nv } else { pair.0 = nv };
                     });
                 }
             }
@@ -151,7 +164,6 @@ impl Widget for ScrollBar {
             let captured = captured.clone();
             let state = state.clone();
             move |ctx: &mut EventContext| {
-                // 如果正在拖拽，不处理跳转
                 if captured.get() {
                     return;
                 }
@@ -159,12 +171,13 @@ impl Widget for ScrollBar {
                     if *button != MouseButton::Left {
                         return;
                     }
-                    // 点击轨道空白处：跳转到对应比例
                     if let Some(r) = ctx.current_rect() {
                         let pos = if is_vertical { *y - r.y as f32 } else { *x - r.x as f32 };
                         let ratio = (pos / len).clamp(0.0, 1.0);
                         let max_scroll = (cont - view).max(1.0);
-                        state.set(ratio * max_scroll);
+                        state.update(|pair| {
+                            if is_vertical { pair.1 = ratio * max_scroll } else { pair.0 = ratio * max_scroll };
+                        });
                     }
                 }
             }

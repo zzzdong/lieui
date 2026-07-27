@@ -227,6 +227,15 @@ impl ElementTree {
             e.content_size.set(v);
         }
     }
+
+    /// 读取滚动容器绑定的 scroll_state（如果存在）。
+    /// 引擎在更新内部滚动偏移时会同步写入此 State。
+    pub fn scroll_state(&self, id: ElementId) -> Option<crate::state::State<(f32, f32)>> {
+        self.entries.get(id).and_then(|e| match &e.node {
+            crate::view::node::ViewNode::Div { layout, .. } => layout.scroll_state.clone(),
+            _ => None,
+        })
+    }
     pub fn update_node(&mut self, id: ElementId, new: &ViewNode) {
         if let Some(e) = self.entries.get_mut(id) {
             // 文本内容与样式未变时保留排版缓存（仅布局/监听器变化不影响排版）。

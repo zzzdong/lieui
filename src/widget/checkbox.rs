@@ -1,3 +1,4 @@
+use crate::event::EventContext;
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
 use crate::layout::types::{FlexAlign, FlexWrap};
@@ -7,6 +8,7 @@ use crate::view::paint::{PaintStyle, TextStyle};
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
+#[derive(Clone)]
 pub struct Checkbox {
     checked: bool,
     label: String,
@@ -35,6 +37,10 @@ impl Checkbox {
 
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
         self.listeners.push(Listener::on_click(Rc::new(f)));
+        self
+    }
+    pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
         self
     }
 
@@ -129,7 +135,7 @@ impl Widget for Checkbox {
             paint: check_paint,
             key: None,
             children: vec![],
-            listeners: Vec::new(),
+            listeners: vec![],
         };
 
         let mut children = vec![check_box];
@@ -161,7 +167,7 @@ impl Widget for Checkbox {
                 style: label_style,
                 layout: FlexStyle::default(),
                 key: None,
-                listeners: Vec::new(),
+                listeners: vec![],
             });
         }
         ViewNode::Div {

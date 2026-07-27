@@ -115,7 +115,29 @@ impl VelloRenderer {
                     }
                 }
             }
-            _ => self.draw(&el.element),
+            _ => {
+                // 视口剔除：元素完全在裁剪区外时不提交绘制。
+                if let Some(clip) = current_clip {
+                    if let Some(bbox) = el.element.bounding_rect() {
+                        if clip.x1 <= bbox.x0
+                            || clip.x0 >= bbox.x1
+                            || clip.y1 <= bbox.y0
+                            || clip.y0 >= bbox.y1
+                        {
+                            if crate::perf::enabled() {
+                                eprintln!(
+                                    "[clip] skip  bbox=({:.1},{:.1})-({:.1},{:.1}) \
+                                     clip=({:.1},{:.1})-({:.1},{:.1})",
+                                    bbox.x0, bbox.y0, bbox.x1, bbox.y1,
+                                    clip.x0, clip.y0, clip.x1, clip.y1,
+                                );
+                            }
+                            return; // 完全在裁剪区外，跳过
+                        }
+                    }
+                }
+                self.draw(&el.element)
+            }
         }
     }
 

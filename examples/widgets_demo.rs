@@ -51,7 +51,7 @@ fn main() {
     let slider_val = State::new(0.5f32);
     let checked = State::new(false);
     let radio_val = State::new(0usize);
-    let scroll_y = State::new(0f32);
+    let scroll_y = State::new((0f32, 0f32));
 
     // 注册一个自定义字体（若文件存在则可用 family 名 "Roboto"）。
     let _ = register_font_file("assets/Roboto-Regular.ttf");

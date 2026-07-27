@@ -1,12 +1,12 @@
 use std::rc::Rc;
 
-use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
 use crate::state::State;
 use crate::theme::current;
-use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{PaintStyle, TextStyle};
+use crate::view::FontWeight;
+use crate::view::node::{Listener, ViewNode};
 use crate::widget::{BuildContext, Widget};
 
 /// 选项卡（标签页）控件：顶部一排标签头，下方显示当前激活标签的内容。
@@ -43,6 +43,7 @@ impl Tab {
 
 impl Widget for Tab {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        let t = current();
         let active = *self.active.get();
         let hh = self.header_height;
         let value = self.active.clone();
@@ -55,40 +56,100 @@ impl Widget for Tab {
                 value_i.set(i);
             });
 
-            header_children.push(ViewNode::Div {
-                layout: FlexStyle::default()
-                    .height(hh)
-                    .padding_left(16.0)
-                    .padding_right(16.0)
-                    .align_items(FlexAlign::Center)
-                    .justify_content(FlexAlign::Center),
-                paint: PaintStyle::new().background(if is_active {
-                    current().background.brand_default
-                } else {
-                    Color::TRANSPARENT
-                }),
-                children: vec![ViewNode::Text {
-                    content: title.clone(),
-                    style: TextStyle {
-                        font_size: 14.0,
-                        color: if is_active {
-                            Color::WHITE
-                        } else {
-                            current().text.regular_default
-                        },
-                        ..Default::default()
+            // ── 选中指示器：底部品牌色圆角条 ──
+            let children = if is_active {
+                vec![
+                    // 顶部弹簧：将文字下压到居中
+                    ViewNode::Div {
+                        layout: FlexStyle::default().flex_grow(1.0),
+                        paint: PaintStyle::new(),
+                        children: vec![],
+                        listeners: vec![],
+                        key: None,
                     },
-                    layout: FlexStyle::default(),
-                    key: None,
-                    listeners: vec![],
-                }],
+                    ViewNode::Text {
+                        content: title.clone(),
+                        style: TextStyle {
+                            font_size: 13.0,
+                            color: t.text.brand_default,
+                            font_weight: FontWeight::Medium,
+                            ..Default::default()
+                        },
+                        layout: FlexStyle::default(),
+                        key: None,
+                        listeners: vec![],
+                    },
+                    // 底部弹簧：吸取文字下方空间后让指示条贴底
+                    ViewNode::Div {
+                        layout: FlexStyle::default().flex_grow(1.0),
+                        paint: PaintStyle::new(),
+                        children: vec![],
+                        listeners: vec![],
+                        key: None,
+                    },
+                    // 品牌色指示条（铺满 tab 宽度，底部横线）
+                    ViewNode::Div {
+                        layout: FlexStyle::default()
+                            .height(3.0)
+                            .flex_shrink(0.0)
+                            .align_self(FlexAlign::Stretch),
+                        paint: PaintStyle::new()
+                            .background(t.background.brand_default),
+                        children: vec![],
+                        listeners: vec![],
+                        key: Some("__accent__".into()),
+                    },
+                ]
+            } else {
+                vec![
+                    ViewNode::Div {
+                        layout: FlexStyle::default().flex_grow(1.0),
+                        paint: PaintStyle::new(),
+                        children: vec![],
+                        listeners: vec![],
+                        key: None,
+                    },
+                    ViewNode::Text {
+                        content: title.clone(),
+                        style: TextStyle {
+                            font_size: 13.0,
+                            color: t.text.regular_default,
+                            font_weight: FontWeight::Normal,
+                            ..Default::default()
+                        },
+                        layout: FlexStyle::default(),
+                        key: None,
+                        listeners: vec![],
+                    },
+                    ViewNode::Div {
+                        layout: FlexStyle::default().flex_grow(1.0),
+                        paint: PaintStyle::new(),
+                        children: vec![],
+                        listeners: vec![],
+                        key: None,
+                    },
+                ]
+            };
+
+            header_children.push(ViewNode::Div {
+                layout: FlexStyle::column()
+                    .height(hh)
+                    .padding_left(14.0)
+                    .padding_right(14.0)
+                    .align_items(FlexAlign::Center),
+                paint: PaintStyle::new(),
+                children,
                 listeners: vec![Listener::on_click(on_click)],
                 key: Some(format!("tab-{i}")),
             });
         }
 
         let header = ViewNode::Div {
-            layout: FlexStyle::row().align_items(FlexAlign::Center).height(hh),
+            layout: FlexStyle::row()
+                .flex_shrink(0.0)
+                .height(hh)
+                .padding_left(4.0)
+                .padding_right(4.0),
             paint: PaintStyle::new(),
             children: header_children,
             listeners: vec![],
@@ -97,7 +158,7 @@ impl Widget for Tab {
 
         let separator = ViewNode::Div {
             layout: FlexStyle::default().height(1.0),
-            paint: PaintStyle::new().background(current().border.default),
+            paint: PaintStyle::new().background(t.border.default),
             children: vec![],
             listeners: vec![],
             key: Some("sep".into()),
@@ -128,9 +189,10 @@ impl Widget for Tab {
         ViewNode::Div {
             layout: FlexStyle::column().flex_grow(1.0),
             paint: PaintStyle::new()
-                .background(current().background.primary_default)
-                .border(1.0, current().border.default)
-                .radius(current().radius.medium),
+                .background(t.background.primary_default)
+                .border(1.0, t.border.default)
+                .radius(t.radius.medium)
+                .clip(true),
             children: vec![header, separator, content_area],
             listeners: vec![],
             key: None,

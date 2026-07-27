@@ -12,6 +12,8 @@ pub struct Container {
     expand: bool,
     width: Option<f32>,
     height: Option<f32>,
+    max_width: Option<f32>,
+    max_height: Option<f32>,
     padding: f32,
     clip_content: bool,
     children: Vec<Box<dyn Widget>>,
@@ -25,6 +27,8 @@ impl Container {
             expand: false,
             width: None,
             height: None,
+            max_width: None,
+            max_height: None,
             padding: 0.0,
             clip_content: false,
             children: Vec::new(),
@@ -46,6 +50,14 @@ impl Container {
     }
     pub fn expand(mut self, v: bool) -> Self {
         self.expand = v;
+        self
+    }
+    pub fn max_width(mut self, v: f32) -> Self {
+        self.max_width = Some(v);
+        self
+    }
+    pub fn max_height(mut self, v: f32) -> Self {
+        self.max_height = Some(v);
         self
     }
     pub fn padding(mut self, v: f32) -> Self {
@@ -132,6 +144,12 @@ impl Widget for Container {
         }
         if let Some(h) = self.height {
             layout = layout.height(h);
+        }
+        if let Some(mw) = self.max_width {
+            layout = layout.max_width(mw);
+        }
+        if let Some(mh) = self.max_height {
+            layout = layout.max_height(mh);
         }
 
         let mut paint = PaintStyle::default();

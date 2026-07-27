@@ -155,6 +155,49 @@ pub enum VisualElement {
     },
 }
 
+impl VisualElement {
+    /// 获取元素的近似边界矩形（用于视口剔除）。
+    /// Group 返回 None（由内部子元素单独剔除）。
+    pub fn bounding_rect(&self) -> Option<KRect> {
+        match self {
+            Self::Rect { rect, .. } => Some(*rect),
+            Self::RoundedRect { rect, .. } => Some(*rect),
+            Self::ShadowRoundedRect { rect, .. } => Some(*rect),
+            Self::Circle { center, radius, .. } => {
+                Some(KRect::new(
+                    center.x - radius,
+                    center.y - radius,
+                    center.x + radius,
+                    center.y + radius,
+                ))
+            }
+            Self::Line { start, end, .. } => {
+                Some(KRect::new(
+                    start.x.min(end.x),
+                    start.y.min(end.y),
+                    start.x.max(end.x),
+                    start.y.max(end.y),
+                ))
+            }
+            Self::Path { .. } => None, // 无法简单计算
+            Self::TextRun {
+                position,
+                font_size,
+                ..
+            } => {
+                // 粗略估算边界用于视口剔除，不需要精确宽度
+                Some(KRect::new(
+                    position.x,
+                    position.y,
+                    position.x + 2000.0, // 横向不截断，由 clip 而不是 bounding 决定
+                    position.y + font_size,
+                ))
+            }
+            Self::Image { bounds, .. } => Some(*bounds),
+            Self::Group { .. } => None,
+        }
+    }
+}
 impl std::fmt::Debug for VisualElement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

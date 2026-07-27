@@ -186,75 +186,83 @@ fn page_basic(
     input_text: State<String>,
     multi_text: State<String>,
 ) -> impl Widget {
-    Column::new()
-        .spacing(16.0)
-        .align_items(FlexAlign::Stretch)
-        .child(section_button(count))
-        .child(section_checkbox(checked))
-        .child(section_input(input_text, multi_text))
-        .child(section_text_divider())
+    ScrollView::expand()
+        .scrollbar(true)
+        .child(
+            Column::new()
+                .spacing(16.0)
+                .align_items(FlexAlign::Stretch)
+                .child(section_button(count))
+                .child(section_checkbox(checked))
+                .child(section_input(input_text, multi_text))
+                .child(section_text_divider()),
+        )
 }
 
 // ───────────────────────────── 布局 ─────────────────────────────
 
 fn page_layout() -> impl Widget {
-    card(
-        Column::new()
-            .spacing(12.0)
-            .align_items(FlexAlign::Start)
-            .child(section_title("Flex Layout"))
-            .child(
-                Row::new()
-                    .spacing(8.0)
-                    .align_items(FlexAlign::Center)
-                    .child(
-                        Container::new()
-                            .width(60.0)
-                            .height(60.0)
-                            .background(Color::new(255, 100, 100))
-                            .border_radius(4.0),
-                    )
-                    .child(
-                        Container::new()
-                            .width(60.0)
-                            .height(60.0)
-                            .background(Color::new(100, 255, 100))
-                            .border_radius(4.0),
-                    )
-                    .child(
-                        Container::new()
-                            .width(60.0)
-                            .height(60.0)
-                            .background(Color::new(100, 100, 255))
-                            .border_radius(4.0),
-                    ),
-            )
-            .child(
-                Row::new()
-                    .spacing(8.0)
-                    .justify_content(FlexAlign::SpaceBetween)
-                    .child(
-                        Container::new()
-                            .width(80.0)
-                            .height(32.0)
-                            .background(theme::current().border.strong)
-                            .border_radius(4.0),
-                    )
-                    .child(
-                        Container::new()
-                            .width(80.0)
-                            .height(32.0)
-                            .background(theme::current().border.strong)
-                            .border_radius(4.0),
-                    )
-                    .child(
-                        Container::new()
-                            .width(80.0)
-                            .height(32.0)
-                            .background(theme::current().border.strong)
-                            .border_radius(4.0),
-                    ),
-            ),
+    ScrollView::expand()
+        .scrollbar(true)
+        .child(
+            card(
+                Column::new()
+                    .spacing(12.0)
+                    .align_items(FlexAlign::Start)
+                    .child(section_title("Flex Layout"))
+                .child(
+                    Row::new()
+                        .spacing(8.0)
+                        .align_items(FlexAlign::Center)
+                        .child(
+                            Container::new()
+                                .width(60.0)
+                                .height(60.0)
+                                .background(Color::new(255, 100, 100))
+                                .border_radius(4.0),
+                        )
+                        .child(
+                            Container::new()
+                                .width(60.0)
+                                .height(60.0)
+                                .background(Color::new(100, 255, 100))
+                                .border_radius(4.0),
+                        )
+                        .child(
+                            Container::new()
+                                .width(60.0)
+                                .height(60.0)
+                                .background(Color::new(100, 100, 255))
+                                .border_radius(4.0),
+                        ),
+                )
+                .child(
+                    Row::new()
+                        .spacing(8.0)
+                        .justify_content(FlexAlign::SpaceBetween)
+                        .child(
+                            Container::new()
+                                .width(80.0)
+                                .height(32.0)
+                                .background(theme::current().border.strong)
+                                .border_radius(4.0),
+                        )
+                        .child(
+                            Container::new()
+                                .width(80.0)
+                                .height(32.0)
+                                .background(theme::current().border.strong)
+                                .border_radius(4.0),
+                        )
+                        .child(
+                            Container::new()
+                                .width(80.0)
+                                .height(32.0)
+                                .background(theme::current().border.strong)
+                                .border_radius(4.0),
+                        ),
+                ),
+        ),
     )
 }
 
@@ -329,66 +337,74 @@ fn page_interactive(
     radio_val: State<usize>,
     nested: State<usize>,
 ) -> impl Widget {
-    Column::new()
-        .spacing(16.0)
-        .align_items(FlexAlign::Stretch)
-        .child(section_slider_progress(slider_val))
-        .child(section_switch_radio(switch_val, radio_val))
-        .child(section_tooltip())
-        .child(section_nested_tab(nested))
+    ScrollView::expand()
+        .scrollbar(true)
+        .child(
+        Column::new()
+            .spacing(16.0)
+            .align_items(FlexAlign::Stretch)
+            .child(section_slider_progress(slider_val))
+            .child(section_switch_radio(switch_val, radio_val))
+            .child(section_tooltip())
+            .child(section_nested_tab(nested)),
+    )
 }
 
 // ───────────────────────────── 容器组件 ─────────────────────────────
 
 fn page_containers(switch_val: State<bool>) -> impl Widget {
-    Column::new()
-        .spacing(16.0)
-        .align_items(FlexAlign::Stretch)
-        .child(Text::new(
-            "Card 容器：具名插槽 header / body / footer，等价于 Vue 的 slot。",
-        ))
+    ScrollView::expand()
+        .scrollbar(true)
         .child(
-            Card::new()
-                .title("用户信息")
-                .header(Text::new("副标题：header 插槽内的内容"))
-                .body(
-                    Column::new()
-                        .spacing(8.0)
-                        .align_items(FlexAlign::Start)
-                        .child(Text::new("body 插槽：卡片主体，可放任意 widget。"))
-                        .child(Switch::new(switch_val).label("卡片内开关")),
-                )
-                .footer(
-                    Row::new()
-                        .spacing(8.0)
-                        .align_items(FlexAlign::Center)
-                        .child(Button::new("确定"))
-                        .child(Button::new("取消").on_click(|| {})),
-                ),
-        )
-        .child(
-            Text::new("也可以省略插槽：仅给 title + body。")
-                .font_size(12.0)
-                .color(theme::current().text.subtle_default),
-        )
-        .child(Card::new().title("简洁卡片").body(Text::new("只有标题与主体。")))
-        .child(
-            Card::new()
-                .variant(CardVariant::Compact)
-                .title("紧凑卡片（Compact）")
-                .body(Text::new("内边距更小，适合在密集布局中复用。")),
-        )
-        .child(
-            Card::new()
-                .variant(CardVariant::Selectable)
-                .title("可选中卡片（Selectable）")
-                .body(Text::new("hover 时高亮背景，用于可选中的卡片式列表项。")),
-        )
+        Column::new()
+            .spacing(16.0)
+            .align_items(FlexAlign::Stretch)
+            .child(Text::new(
+                "Card 容器：具名插槽 header / body / footer，等价于 Vue 的 slot。",
+            ))
+            .child(
+                Card::new()
+                    .title("用户信息")
+                    .header(Text::new("副标题：header 插槽内的内容"))
+                    .body(
+                        Column::new()
+                            .spacing(8.0)
+                            .align_items(FlexAlign::Start)
+                            .child(Text::new("body 插槽：卡片主体，可放任意 widget。"))
+                            .child(Switch::new(switch_val).label("卡片内开关")),
+                    )
+                    .footer(
+                        Row::new()
+                            .spacing(8.0)
+                            .align_items(FlexAlign::Center)
+                            .child(Button::new("确定"))
+                            .child(Button::new("取消").on_click(|| {})),
+                    ),
+            )
+            .child(
+                Text::new("也可以省略插槽：仅给 title + body。")
+                    .font_size(12.0)
+                    .color(theme::current().text.subtle_default),
+            )
+            .child(Card::new().title("简洁卡片").body(Text::new("只有标题与主体。")))
+            .child(
+                Card::new()
+                    .variant(CardVariant::Compact)
+                    .title("紧凑卡片（Compact）")
+                    .body(Text::new("内边距更小，适合在密集布局中复用。")),
+            )
+            .child(
+                Card::new()
+                    .variant(CardVariant::Selectable)
+                    .title("可选中卡片（Selectable）")
+                    .body(Text::new("hover 时高亮背景，用于可选中的卡片式列表项。")),
+            ),
+    )
 }
 
 // ───────────────────────────── 虚拟列表 / 滚动 ─────────────────────────────
 
-fn section_virtual_list(scroll_y: State<f32>) -> impl Widget {
+fn section_virtual_list(scroll_y: State<(f32, f32)>) -> impl Widget {
     let total = 1000.0 * 34.0;
     card(
         Column::new()
@@ -467,34 +483,42 @@ fn section_scroll_view() -> impl Widget {
     )
 }
 
-fn page_lists(scroll_y: State<f32>) -> impl Widget {
-    Column::new()
-        .spacing(16.0)
-        .align_items(FlexAlign::Stretch)
-        .child(section_virtual_list(scroll_y))
-        .child(section_scroll_view())
+fn page_lists(scroll_y: State<(f32, f32)>) -> impl Widget {
+    ScrollView::expand()
+        .scrollbar(true)
+        .child(
+        Column::new()
+            .spacing(16.0)
+            .align_items(FlexAlign::Stretch)
+            .child(section_virtual_list(scroll_y))
+            .child(section_scroll_view()),
+    )
 }
 
 // ───────────────────────────── 关于 ─────────────────────────────
 
 fn page_about() -> impl Widget {
-    Column::new()
-        .spacing(16.0)
-        .align_items(FlexAlign::Start)
+    ScrollView::expand()
+        .scrollbar(true)
         .child(
-            card(
-                Column::new()
-                    .spacing(10.0)
-                    .align_items(FlexAlign::Start)
-                    .child(section_title("关于 LieUI"))
-                    .child(Text::new("LieUI v2 是一个声明式、响应式的 Rust UI 框架。"))
-                    .child(Text::new("当前 Gallery 即以顶层 Tab 展示各类内置控件。")),
-            ),
-        )
-        .child(
-            Text::new("Tip: 在输入框中试试 Ctrl+A/C/V/X，滚轮可在虚拟列表内滚动。")
-                .font_size(12.0)
-                .color(theme::current().text.subtle_default),
+            Column::new()
+                .spacing(16.0)
+                .align_items(FlexAlign::Start)
+                .child(
+                    card(
+                        Column::new()
+                            .spacing(10.0)
+                            .align_items(FlexAlign::Start)
+                            .child(section_title("关于 LieUI"))
+                            .child(Text::new("LieUI v2 是一个声明式、响应式的 Rust UI 框架。"))
+                            .child(Text::new("当前 Gallery 即以顶层 Tab 展示各类内置控件。")),
+                    ),
+                )
+                .child(
+                    Text::new("Tip: 在输入框中试试 Ctrl+A/C/V/X，滚轮可在虚拟列表内滚动。")
+                        .font_size(12.0)
+                        .color(theme::current().text.subtle_default),
+                ),
         )
 }
 
@@ -568,11 +592,15 @@ fn section_typography() -> impl Widget {
 }
 
 fn page_design() -> impl Widget {
-    Column::new()
-        .spacing(16.0)
-        .align_items(FlexAlign::Stretch)
-        .child(section_typography())
-        .child(section_status())
+    ScrollView::expand()
+        .scrollbar(true)
+        .child(
+        Column::new()
+            .spacing(16.0)
+            .align_items(FlexAlign::Stretch)
+            .child(section_typography())
+            .child(section_status()),
+    )
 }
 
 // ───────────────────────────── 应用入口 ─────────────────────────────
@@ -587,7 +615,7 @@ fn main() {
     let slider_val = State::new(0.4f32);
     let switch_val = State::new(true);
     let radio_val = State::new(1usize);
-    let scroll_y = State::new(0.0f32);
+    let scroll_y = State::new((0.0f32, 0.0f32));
 
     // 顶层分页 + 嵌套 Tab 演示状态
     let page = State::new(0usize);
@@ -629,18 +657,21 @@ fn main() {
                 Row::new()
                     .expand(true)
                     .justify_content(FlexAlign::Center)
-                    .align_items(FlexAlign::Start)
+                    .align_items(FlexAlign::Stretch)
                     .child(
                         Container::new()
-                            .width(640.0)
+                            .max_width(680.0)
+                            .expand(true)
                             .padding(24.0)
                             .child(
                                 Column::new()
+                                    .expand(true)
                                     .spacing(20.0)
                                     .align_items(FlexAlign::Stretch)
                                     // Header：标题 + 明暗切换按钮
                                     .child(
                                         Row::new()
+                                            .flex_shrink(0.0)
                                             .justify_content(FlexAlign::SpaceBetween)
                                             .align_items(FlexAlign::Center)
                                             .child(
@@ -685,7 +716,7 @@ fn main() {
                     ),
             )
         },
-        Size::new(680.0, 880.0),
+        Size::new(900.0, 720.0),
     );
 
     app.run();

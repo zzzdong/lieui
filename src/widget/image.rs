@@ -7,6 +7,7 @@ use crate::view::paint::{ImageFit, ImageStyle};
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
+#[derive(Clone)]
 pub struct Image {
     data: std::sync::Arc<Vec<u8>>,
     style: ImageStyle,

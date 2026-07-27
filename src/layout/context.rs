@@ -9,7 +9,7 @@ use crate::geometry::Size;
 use crate::layout::box_model::ComputedLayout;
 use crate::layout::flex_node::FlexNode;
 use crate::layout::types::{
-    Direction as LayoutDirection, NodeType as LayoutNodeType, VALUE_UNDEFINED,
+    Direction as LayoutDirection, FlexDirection, NodeType as LayoutNodeType, VALUE_UNDEFINED,
 };
 use crate::layout::LayoutConstraint;
 use crate::runtime::element::ElementTree;
@@ -120,11 +120,11 @@ impl LayoutContext {
             let cw = node
                 .style
                 .content_width
-                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_left() + c.get_width())));
+                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_left() + c.get_width() + c.get_layout_end_margin(FlexDirection::Row))));
             let ch = node
                 .style
                 .content_height
-                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_top() + c.get_height())));
+                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_top() + c.get_height() + c.get_layout_end_margin(FlexDirection::Column))));
             let vw = node.get_width();
             let vh = node.get_height();
             let max_x = (cw - vw).max(0.0);
