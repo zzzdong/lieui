@@ -128,8 +128,14 @@ impl VelloRenderer {
                                 eprintln!(
                                     "[clip] skip  bbox=({:.1},{:.1})-({:.1},{:.1}) \
                                      clip=({:.1},{:.1})-({:.1},{:.1})",
-                                    bbox.x0, bbox.y0, bbox.x1, bbox.y1,
-                                    clip.x0, clip.y0, clip.x1, clip.y1,
+                                    bbox.x0,
+                                    bbox.y0,
+                                    bbox.x1,
+                                    bbox.y1,
+                                    clip.x0,
+                                    clip.y0,
+                                    clip.x1,
+                                    clip.y1,
                                 );
                             }
                             return; // 完全在裁剪区外，跳过
@@ -175,13 +181,23 @@ impl VelloRenderer {
                     let s = (bw / img_w).min(bh / img_h);
                     let dw = img_w * s;
                     let dh = img_h * s;
-                    (dw, dh, bounds.x0 + (bw - dw) / 2.0, bounds.y0 + (bh - dh) / 2.0)
+                    (
+                        dw,
+                        dh,
+                        bounds.x0 + (bw - dw) / 2.0,
+                        bounds.y0 + (bh - dh) / 2.0,
+                    )
                 }
                 ImageFit::Cover => {
                     let s = (bw / img_w).max(bh / img_h);
                     let dw = img_w * s;
                     let dh = img_h * s;
-                    (dw, dh, bounds.x0 + (bw - dw) / 2.0, bounds.y0 + (bh - dh) / 2.0)
+                    (
+                        dw,
+                        dh,
+                        bounds.x0 + (bw - dw) / 2.0,
+                        bounds.y0 + (bh - dh) / 2.0,
+                    )
                 }
             };
 
@@ -232,8 +248,16 @@ impl VelloRenderer {
                         let in_corner_x = (dx as f64) < dx0 + r || (dx as f64) > dx0 + dw - r;
                         let in_corner_y = (dy as f64) < dy0 + r || (dy as f64) > dy0 + dh - r;
                         let inside = if in_corner_x && in_corner_y {
-                            let ccx = if (dx as f64) < dx0 + r { dx0 + r } else { dx0 + dw - r };
-                            let ccy = if (dy as f64) < dy0 + r { dy0 + r } else { dy0 + dh - r };
+                            let ccx = if (dx as f64) < dx0 + r {
+                                dx0 + r
+                            } else {
+                                dx0 + dw - r
+                            };
+                            let ccy = if (dy as f64) < dy0 + r {
+                                dy0 + r
+                            } else {
+                                dy0 + dh - r
+                            };
                             let ddx = dx as f64 - ccx;
                             let ddy = dy as f64 - ccy;
                             ddx * ddx + ddy * ddy <= r * r
@@ -300,7 +324,7 @@ impl VelloRenderer {
                         // 普通圆角矩形路径填充。
                         // 注意不要用 fill_blurred_rounded_rect(std_dev=0)：
                         // 那是高斯模糊专用路径，每像素代价比路径填充高一个量级。
-                        let rr = vello_cpu::kurbo::RoundedRect::from_rect(*rect, *r as f64);
+                        let rr = vello_cpu::kurbo::RoundedRect::from_rect(*rect, *r);
                         self.ctx.set_paint(Self::cv(f));
                         self.ctx.fill_path(&rr.to_path(0.1));
                     }
@@ -322,7 +346,8 @@ impl VelloRenderer {
                 color,
             } => {
                 self.ctx.set_paint(Self::cv(color));
-                self.ctx.fill_blurred_rounded_rect(rect, *radius as f32, *std_dev as f32);
+                self.ctx
+                    .fill_blurred_rounded_rect(rect, *radius as f32, *std_dev as f32);
             }
             VisualElement::Circle {
                 center,

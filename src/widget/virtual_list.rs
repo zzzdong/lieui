@@ -28,6 +28,7 @@ pub struct VirtualList {
     scroll_state: State<(f32, f32)>,
     item: Arc<dyn Fn(usize) -> Box<dyn Widget>>,
     overscan: usize,
+    flex_shrink: f32,
 }
 
 impl VirtualList {
@@ -45,6 +46,7 @@ impl VirtualList {
             scroll_state,
             item: Arc::new(|_| Box::new(Empty)),
             overscan: 3,
+            flex_shrink: 1.0,
         }
     }
     pub fn item(mut self, f: impl Fn(usize) -> Box<dyn Widget> + 'static) -> Self {
@@ -58,6 +60,12 @@ impl VirtualList {
     }
     pub fn overscan(mut self, n: usize) -> Self {
         self.overscan = n;
+        self
+    }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
 }
@@ -75,7 +83,6 @@ impl Widget for Empty {
             key: None,
         }
     }
-
 }
 
 impl Widget for VirtualList {
@@ -120,12 +127,16 @@ impl Widget for VirtualList {
 
         // 不再需要手动 wheel listener：引擎 scroll_by() 自动同步 scroll_state，
         // scroll_state 的变化触发 State::set() → request_rebuild() → 重新计算窗口。
+        let mut layout = FlexStyle::default()
+            .height(h)
+            .overflow_scroll()
+            .content_height(total)
+            .bind_scroll_state(&self.scroll_state);
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
+        }
         ViewNode::Div {
-            layout: FlexStyle::default()
-                .height(h)
-                .overflow_scroll()
-                .content_height(total)
-                .bind_scroll_state(&self.scroll_state),
+            layout,
             paint: PaintStyle::new()
                 .background(current().background.primary_default)
                 .clip(true),
@@ -134,5 +145,4 @@ impl Widget for VirtualList {
             key: None,
         }
     }
-
 }

@@ -70,6 +70,11 @@ impl EventManager {
         self.mouse_capture
     }
 
+    /// 由应用层显式设置/清除鼠标捕获（例如 ScrollView 开始/结束拖拽滚动）。
+    pub fn set_mouse_capture(&mut self, id: Option<ElementId>) {
+        self.mouse_capture = id;
+    }
+
     // ---- 树状态辅助 ----
 
     fn set_hovered_state(tree: &ElementTree, id: Option<ElementId>, hovered: bool) {
@@ -199,6 +204,9 @@ impl EventManager {
         // 回调可能请求鼠标捕获（拖拽选取等），释放时自动解除。
         if let Some(cap) = ctx.take_capture_request() {
             self.mouse_capture = Some(cap);
+        }
+        if ctx.is_stopped() {
+            effects.stop_propagation();
         }
         effects.merge(&ctx.take_effects());
 

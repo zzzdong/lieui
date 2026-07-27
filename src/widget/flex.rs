@@ -127,6 +127,9 @@ impl Widget for Column {
         if self.expand {
             layout = layout.flex_grow(1.0);
         }
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
+        }
         ViewNode::Div {
             layout,
             paint: self.paint.clone().unwrap_or_default(),

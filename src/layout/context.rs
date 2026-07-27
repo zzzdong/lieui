@@ -117,14 +117,22 @@ impl LayoutContext {
         // 滚动容器：读取滚动偏移，计算内容尺寸并钳制，子节点整体平移 -offset。
         let (child_origin_x, child_origin_y) = if node.style.overflow_scroll {
             let (ox, oy) = tree.scroll_offset(id);
-            let cw = node
-                .style
-                .content_width
-                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_left() + c.get_width() + c.get_layout_end_margin(FlexDirection::Row))));
-            let ch = node
-                .style
-                .content_height
-                .unwrap_or_else(|| node.children.iter().fold(0.0f32, |m, c| m.max(c.get_top() + c.get_height() + c.get_layout_end_margin(FlexDirection::Column))));
+            let cw = node.style.content_width.unwrap_or_else(|| {
+                node.children.iter().fold(0.0f32, |m, c| {
+                    m.max(
+                        c.get_left() + c.get_width() + c.get_layout_end_margin(FlexDirection::Row),
+                    )
+                })
+            });
+            let ch = node.style.content_height.unwrap_or_else(|| {
+                node.children.iter().fold(0.0f32, |m, c| {
+                    m.max(
+                        c.get_top()
+                            + c.get_height()
+                            + c.get_layout_end_margin(FlexDirection::Column),
+                    )
+                })
+            });
             let vw = node.get_width();
             let vh = node.get_height();
             let max_x = (cw - vw).max(0.0);

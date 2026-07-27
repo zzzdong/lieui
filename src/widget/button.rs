@@ -275,9 +275,7 @@ impl Button {
 
     /// 不透明度
     pub fn opacity(mut self, o: f32) -> Self {
-        self.paint
-            .get_or_insert_with(PaintStyle::new)
-            .opacity = o.clamp(0.0, 1.0);
+        self.paint.get_or_insert_with(PaintStyle::new).opacity = o.clamp(0.0, 1.0);
         self
     }
 

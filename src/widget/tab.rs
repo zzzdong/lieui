@@ -4,9 +4,9 @@ use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
 use crate::state::State;
 use crate::theme::current;
+use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{PaintStyle, TextStyle};
 use crate::view::FontWeight;
-use crate::view::node::{Listener, ViewNode};
 use crate::widget::{BuildContext, Widget};
 
 /// 选项卡（标签页）控件：顶部一排标签头，下方显示当前激活标签的内容。
@@ -16,6 +16,7 @@ pub struct Tab {
     active: State<usize>,
     tabs: Vec<(String, Box<dyn Widget>)>,
     header_height: f32,
+    flex_shrink: f32,
 }
 
 impl Tab {
@@ -25,6 +26,7 @@ impl Tab {
             active,
             tabs: Vec::new(),
             header_height: 36.0,
+            flex_shrink: 1.0,
         }
     }
 
@@ -37,6 +39,12 @@ impl Tab {
     /// 设置标签头高度（默认 36）。
     pub fn header_height(mut self, h: f32) -> Self {
         self.header_height = h;
+        self
+    }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
 }
@@ -93,8 +101,7 @@ impl Widget for Tab {
                             .height(3.0)
                             .flex_shrink(0.0)
                             .align_self(FlexAlign::Stretch),
-                        paint: PaintStyle::new()
-                            .background(t.background.brand_default),
+                        paint: PaintStyle::new().background(t.background.brand_default),
                         children: vec![],
                         listeners: vec![],
                         key: Some("__accent__".into()),
@@ -177,17 +184,19 @@ impl Widget for Tab {
         };
 
         let content_area = ViewNode::Div {
-            layout: FlexStyle::default()
-                .padding_all(12.0)
-                .flex_grow(1.0),
+            layout: FlexStyle::default().padding_all(12.0).flex_grow(1.0),
             paint: PaintStyle::new(),
             children: vec![content],
             listeners: vec![],
             key: Some("content".into()),
         };
 
+        let mut layout = FlexStyle::column().flex_grow(1.0);
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
+        }
         ViewNode::Div {
-            layout: FlexStyle::column().flex_grow(1.0),
+            layout,
             paint: PaintStyle::new()
                 .background(t.background.primary_default)
                 .border(1.0, t.border.default)

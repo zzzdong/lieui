@@ -17,6 +17,8 @@ pub struct Checkbox {
     check_paint: Option<PaintStyle>,
     /// 标签文本样式自定义。
     text_style: Option<TextStyle>,
+    /// flex 收缩因子（默认 1.0）。
+    flex_shrink: f32,
 }
 
 impl Checkbox {
@@ -27,6 +29,7 @@ impl Checkbox {
             listeners: Vec::new(),
             check_paint: None,
             text_style: None,
+            flex_shrink: 1.0,
         }
     }
 
@@ -90,6 +93,12 @@ impl Checkbox {
         self.text_style
             .get_or_insert_with(TextStyle::default)
             .font_size = v;
+        self
+    }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
 }
@@ -170,13 +179,16 @@ impl Widget for Checkbox {
                 listeners: vec![],
             });
         }
+        let mut layout = FlexStyle::row()
+            .justify_content(FlexAlign::Start)
+            .align_items(FlexAlign::Center)
+            .gap(t.spacer.sm)
+            .wrap(FlexWrap::NoWrap);
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
+        }
         ViewNode::Div {
-            layout: FlexStyle::row()
-                .justify_content(FlexAlign::Start)
-                .align_items(FlexAlign::Center)
-                .gap(t.spacer.sm)
-                .flex_shrink(1.0)
-                .wrap(FlexWrap::NoWrap),
+            layout,
             paint: PaintStyle::default(),
             key: None,
             children,

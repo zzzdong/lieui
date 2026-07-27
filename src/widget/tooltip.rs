@@ -84,7 +84,10 @@ impl Widget for Tooltip {
             layout: FlexStyle::default(),
             paint: PaintStyle::new(),
             children,
-            listeners: vec![Listener::on_mouse_enter(on_enter), Listener::on_mouse_leave(on_leave)],
+            listeners: vec![
+                Listener::on_mouse_enter(on_enter),
+                Listener::on_mouse_leave(on_leave),
+            ],
             key: None,
         }
     }

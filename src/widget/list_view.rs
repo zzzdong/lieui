@@ -30,6 +30,7 @@ pub struct ListView {
     item: Arc<dyn Fn(usize) -> Box<dyn Widget>>,
     overscan: usize,
     scrollbar_thickness: Option<f32>,
+    flex_shrink: f32,
 }
 
 impl ListView {
@@ -52,6 +53,7 @@ impl ListView {
             item: Arc::new(item),
             overscan: 3,
             scrollbar_thickness: Some(8.0),
+            flex_shrink: 1.0,
         }
     }
 
@@ -72,6 +74,12 @@ impl ListView {
         self.scrollbar_thickness = None;
         self
     }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
+        self
+    }
 }
 
 impl Widget for ListView {
@@ -90,20 +98,30 @@ impl Widget for ListView {
 
         let total = self.item_count as f32 * self.item_height;
 
-        let list_widget = VirtualList::new(self.height, self.item_count, self.item_height, scroll.clone())
-            .item_arc(self.item.clone())
-            .overscan(self.overscan);
+        let list_widget = VirtualList::new(
+            self.height,
+            self.item_count,
+            self.item_height,
+            scroll.clone(),
+        )
+        .item_arc(self.item.clone())
+        .overscan(self.overscan)
+        .flex_shrink(self.flex_shrink);
 
         match self.scrollbar_thickness {
             Some(t) if t > 0.0 => {
-                let bar_widget = ScrollBar::vertical(self.height, scroll, self.height, total)
-                    .thickness(t);
+                let bar_widget =
+                    ScrollBar::vertical(self.height, scroll, self.height, total).thickness(t);
 
                 let list_node = ctx.child(0, &list_widget);
                 let bar_node = ctx.child(1, &bar_widget);
 
+                let mut layout = FlexStyle::row().gap(0.0).align_items(FlexAlign::Stretch);
+                if self.flex_shrink != 1.0 {
+                    layout = layout.flex_shrink(self.flex_shrink);
+                }
                 ViewNode::Div {
-                    layout: FlexStyle::row().gap(0.0).align_items(FlexAlign::Stretch),
+                    layout,
                     paint: PaintStyle::new(),
                     children: vec![list_node, bar_node],
                     listeners: vec![],

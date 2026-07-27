@@ -38,6 +38,7 @@ pub struct Card {
     body: Vec<Box<dyn Widget>>,
     footer: Vec<Box<dyn Widget>>,
     padding: f32,
+    flex_shrink: f32,
     variant: CardVariant,
 }
 
@@ -49,6 +50,7 @@ impl Card {
             body: Vec::new(),
             footer: Vec::new(),
             padding: 16.0,
+            flex_shrink: 1.0,
             variant: CardVariant::Default,
         }
     }
@@ -86,6 +88,12 @@ impl Card {
     /// PatternFly 变体（Default / Compact / Selectable）。
     pub fn variant(mut self, v: CardVariant) -> Self {
         self.variant = v;
+        self
+    }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
 }
@@ -183,8 +191,12 @@ impl Widget for Card {
             card_paint = card_paint.hover_background(t.background.secondary_default);
         }
 
+        let mut layout = FlexStyle::column().padding_all(pad);
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
+        }
         ViewNode::Div {
-            layout: FlexStyle::column().padding_all(pad),
+            layout,
             paint: card_paint,
             children,
             listeners: vec![],

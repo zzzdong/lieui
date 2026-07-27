@@ -8,6 +8,7 @@ use crate::widget::{BuildContext, Widget};
 pub struct Divider {
     height: f32,
     background: Option<Color>,
+    flex_shrink: f32,
 }
 
 impl Default for Divider {
@@ -21,6 +22,7 @@ impl Divider {
         Self {
             height: 1.0,
             background: None,
+            flex_shrink: 1.0,
         }
     }
     pub fn height(mut self, h: f32) -> Self {
@@ -31,13 +33,23 @@ impl Divider {
         self.background = Some(c);
         self
     }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
+        self
+    }
 }
 
 impl Widget for Divider {
     fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
         let t = crate::theme::current();
+        let mut layout = FlexStyle::block().height(self.height).flex_grow(1.0);
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
+        }
         ViewNode::Div {
-            layout: FlexStyle::block().height(self.height).flex_grow(1.0),
+            layout,
             paint: PaintStyle::new().background(self.background.unwrap_or(t.border.default)),
             key: None,
             children: vec![],

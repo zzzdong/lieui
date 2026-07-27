@@ -40,7 +40,7 @@ pub mod prelude {
 
     // ── widgets ──
     pub use crate::widget::{
-        Button, Card, Checkbox, Column, Container, Divider, Image, Input, Progress, ScrollView,
-        Radio, Row, Slider, Switch, Tab, Text, Tooltip, VirtualList,
+        Button, Card, Checkbox, Column, Container, Divider, Image, Input, Progress, Radio, Row,
+        ScrollView, Slider, Switch, Tab, Text, Tooltip, VirtualList,
     };
 }

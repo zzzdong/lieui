@@ -163,22 +163,18 @@ impl VisualElement {
             Self::Rect { rect, .. } => Some(*rect),
             Self::RoundedRect { rect, .. } => Some(*rect),
             Self::ShadowRoundedRect { rect, .. } => Some(*rect),
-            Self::Circle { center, radius, .. } => {
-                Some(KRect::new(
-                    center.x - radius,
-                    center.y - radius,
-                    center.x + radius,
-                    center.y + radius,
-                ))
-            }
-            Self::Line { start, end, .. } => {
-                Some(KRect::new(
-                    start.x.min(end.x),
-                    start.y.min(end.y),
-                    start.x.max(end.x),
-                    start.y.max(end.y),
-                ))
-            }
+            Self::Circle { center, radius, .. } => Some(KRect::new(
+                center.x - radius,
+                center.y - radius,
+                center.x + radius,
+                center.y + radius,
+            )),
+            Self::Line { start, end, .. } => Some(KRect::new(
+                start.x.min(end.x),
+                start.y.min(end.y),
+                start.x.max(end.x),
+                start.y.max(end.y),
+            )),
             Self::Path { .. } => None, // 无法简单计算
             Self::TextRun {
                 position,

@@ -54,9 +54,7 @@ impl Widget for Progress {
         let h = self.height;
         let r = h / 2.0;
 
-        let track = FlexStyle::row()
-            .align_self(FlexAlign::Stretch)
-            .height(h);
+        let track = FlexStyle::row().align_self(FlexAlign::Stretch).height(h);
         let fill = FlexStyle::default().flex_grow(v.max(0.0)).height(h);
         let spacer = FlexStyle::default().flex_grow((1.0 - v).max(0.0)).height(h);
 

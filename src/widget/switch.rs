@@ -98,9 +98,7 @@ impl Widget for Switch {
 
         match &self.label {
             Some(text) => ViewNode::Div {
-                layout: FlexStyle::row()
-                    .align_items(FlexAlign::Center)
-                    .gap(8.0),
+                layout: FlexStyle::row().align_items(FlexAlign::Center).gap(8.0),
                 paint: PaintStyle::new(),
                 children: vec![
                     toggle,

@@ -18,7 +18,11 @@ use lieui::widget::{BuildContext, StateMap, Widget};
 
 const CLICKS: usize = 10;
 
-fn build_gallery_page(count: &State<i32>, checked: &State<bool>, text1: &State<String>) -> Box<dyn Widget> {
+fn build_gallery_page(
+    count: &State<i32>,
+    checked: &State<bool>,
+    text1: &State<String>,
+) -> Box<dyn Widget> {
     let t = lieui::theme::current();
     Box::new(
         ScrollView::expand()
@@ -131,29 +135,49 @@ fn handle_lie_event(tree: &ElementTree, id: ElementId, event: &Event, ctx: &mut 
         Event::MouseUp { .. } => ET::MouseUp,
         _ => return,
     };
-    let Some(node) = tree.get_node_ref(id) else { return };
+    let Some(node) = tree.get_node_ref(id) else {
+        return;
+    };
     for listener in node.listeners() {
-        if listener.event != event_type { continue; }
+        if listener.event != event_type {
+            continue;
+        }
         match ctx.phase() {
             EventPhase::Capture => {
-                if let Callback::WithCtx(cb) = &listener.callback { cb(ctx); }
+                if let Callback::WithCtx(cb) = &listener.callback {
+                    cb(ctx);
+                }
             }
             EventPhase::Target => match &listener.callback {
-                Callback::Simple(cb) => { cb(); ctx.stop_propagation(); }
+                Callback::Simple(cb) => {
+                    cb();
+                    ctx.stop_propagation();
+                }
                 Callback::WithCtx(cb) => cb(ctx),
             },
             EventPhase::Bubble => {
-                if let Callback::Simple(cb) = &listener.callback { cb(); }
+                if let Callback::Simple(cb) = &listener.callback {
+                    cb();
+                }
             }
         }
-        if ctx.is_stopped() { break; }
+        if ctx.is_stopped() {
+            break;
+        }
     }
 }
 
 fn find_first_clickable(tree: &ElementTree, id: ElementId) -> Option<ElementId> {
-    if tree.get_node_ref(id).is_some_and(|n| !n.click_listeners().is_empty()) { return Some(id); }
+    if tree
+        .get_node_ref(id)
+        .is_some_and(|n| !n.click_listeners().is_empty())
+    {
+        return Some(id);
+    }
     for cid in tree.children_ref(id) {
-        if let Some(found) = find_first_clickable(tree, *cid) { return Some(found); }
+        if let Some(found) = find_first_clickable(tree, *cid) {
+            return Some(found);
+        }
     }
     None
 }
@@ -204,24 +228,43 @@ fn main() {
         {
             let tree = &runtime.layers.tree;
             let mut em = runtime.layers.event_manager.borrow_mut();
-            em.handle_mouse_down(click_pos, MouseButton::Left, Modifiers::default(), &hit, tree,
-                |id, ev, c| handle_lie_event(tree, id, ev, c));
-            em.handle_mouse_up(click_pos, MouseButton::Left, &hit, tree,
-                |id, ev, c| handle_lie_event(tree, id, ev, c));
+            em.handle_mouse_down(
+                click_pos,
+                MouseButton::Left,
+                Modifiers::default(),
+                &hit,
+                tree,
+                |id, ev, c| handle_lie_event(tree, id, ev, c),
+            );
+            em.handle_mouse_up(click_pos, MouseButton::Left, &hit, tree, |id, ev, c| {
+                handle_lie_event(tree, id, ev, c)
+            });
         }
-        eprintln!("[perf] hit+dispatch    {:>8.1}us", t_ev.elapsed().as_secs_f64() * 1e6);
+        eprintln!(
+            "[perf] hit+dispatch    {:>8.1}us",
+            t_ev.elapsed().as_secs_f64() * 1e6
+        );
 
         // Builder
-        assert!(lieui::state::take_rebuild_requested_pub(), "click should trigger rebuild");
+        assert!(
+            lieui::state::take_rebuild_requested_pub(),
+            "click should trigger rebuild"
+        );
         let t_b = Instant::now();
         let mut ctx = BuildContext::new(Rc::clone(&state));
         let view_tree = build_gallery_page(&count, &checked, &text1).build(&mut ctx);
-        eprintln!("[perf] builder         {:>8.1}us", t_b.elapsed().as_secs_f64() * 1e6);
+        eprintln!(
+            "[perf] builder         {:>8.1}us",
+            t_b.elapsed().as_secs_f64() * 1e6
+        );
 
         // Submit
         let t_s = Instant::now();
         runtime.submit_view_tree(view_tree, true);
-        eprintln!("[perf] submit          {:>8.1}us", t_s.elapsed().as_secs_f64() * 1e6);
+        eprintln!(
+            "[perf] submit          {:>8.1}us",
+            t_s.elapsed().as_secs_f64() * 1e6
+        );
 
         // Frame (reconcile + layout + render-tree)
         let elements = runtime.frame();
@@ -229,7 +272,10 @@ fn main() {
         // Raster
         let t_r = Instant::now();
         let pix = renderer.render(&elements);
-        eprintln!("[perf] raster          {:>8.1}us", t_r.elapsed().as_secs_f64() * 1e6);
+        eprintln!(
+            "[perf] raster          {:>8.1}us",
+            t_r.elapsed().as_secs_f64() * 1e6
+        );
         std::hint::black_box(pix.data());
 
         let total_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -241,6 +287,9 @@ fn main() {
     let avg: f64 = totals.iter().sum::<f64>() / totals.len() as f64;
     eprintln!(
         "==== {} clicks: avg={:.2}ms min={:.2}ms max={:.2}ms ====",
-        CLICKS, avg, totals[0], totals[totals.len() - 1]
+        CLICKS,
+        avg,
+        totals[0],
+        totals[totals.len() - 1]
     );
 }

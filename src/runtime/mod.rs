@@ -284,12 +284,7 @@ impl Runtime {
     }
 
     /// 滚轮事件：从命中目标向上查找最近的 overflow_scroll 容器并滚动它。
-    pub fn handle_wheel_scroll(
-        &mut self,
-        hit: &crate::event::HitTestResult,
-        dx: f32,
-        dy: f32,
-    ) {
+    pub fn handle_wheel_scroll(&mut self, hit: &crate::event::HitTestResult, dx: f32, dy: f32) {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
@@ -438,12 +433,7 @@ impl Runtime {
                 elements.push(
                     crate::render::visual::LayeredElement::new(
                         crate::render::visual::VisualElement::ShadowRoundedRect {
-                            rect: crate::render::visual::KRect::new(
-                                sx,
-                                sy,
-                                sx + sw,
-                                sy + shh,
-                            ),
+                            rect: crate::render::visual::KRect::new(sx, sy, sx + sw, sy + shh),
                             radius: (paint.border_radius + sh.spread) as f64,
                             std_dev: sh.blur as f64,
                             color: sh.color,
@@ -541,8 +531,10 @@ impl Runtime {
                             crate::render::visual::LayeredElement::new(
                                 crate::render::visual::VisualElement::RoundedRect {
                                     rect: crate::render::visual::KRect::new(
-                                        track_x as f64, track_y as f64,
-                                        (track_x + sw) as f64, (track_y + track_h) as f64,
+                                        track_x as f64,
+                                        track_y as f64,
+                                        (track_x + sw) as f64,
+                                        (track_y + track_h) as f64,
                                     ),
                                     radius,
                                     style: crate::render::visual::FillStrokeStyle::new()
@@ -557,8 +549,10 @@ impl Runtime {
                             crate::render::visual::LayeredElement::new(
                                 crate::render::visual::VisualElement::RoundedRect {
                                     rect: crate::render::visual::KRect::new(
-                                        track_x as f64, (track_y + thumb_off) as f64,
-                                        (track_x + sw) as f64, (track_y + thumb_off + thumb_size) as f64,
+                                        track_x as f64,
+                                        (track_y + thumb_off) as f64,
+                                        (track_x + sw) as f64,
+                                        (track_y + thumb_off + thumb_size) as f64,
                                     ),
                                     radius,
                                     style: crate::render::visual::FillStrokeStyle::new()

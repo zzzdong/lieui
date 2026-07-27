@@ -110,9 +110,13 @@ impl Widget for ScrollBar {
 
         // 轨道布局
         let track_layout = if is_vertical {
-            FlexStyle::default().width(self.thickness).height(self.length)
+            FlexStyle::default()
+                .width(self.thickness)
+                .height(self.length)
         } else {
-            FlexStyle::default().height(self.thickness).width(self.length)
+            FlexStyle::default()
+                .height(self.thickness)
+                .width(self.length)
         };
 
         // ---------- 拖拽开始 ----------
@@ -127,7 +131,7 @@ impl Widget for ScrollBar {
                     captured.set(true);
                     let pos = ctx
                         .current_rect()
-                        .map(|r| if is_vertical { r.y as f32 } else { r.x as f32 });
+                        .map(|r| if is_vertical { r.y } else { r.x });
                     if let Some(p) = pos {
                         last_pos.set(p);
                     }
@@ -153,7 +157,11 @@ impl Widget for ScrollBar {
                     state.update(|pair| {
                         let v = if is_vertical { pair.1 } else { pair.0 };
                         let nv = (v + delta_px * scale).clamp(0.0, max_scroll);
-                        if is_vertical { pair.1 = nv } else { pair.0 = nv };
+                        if is_vertical {
+                            pair.1 = nv
+                        } else {
+                            pair.0 = nv
+                        };
                     });
                 }
             }
@@ -172,11 +180,15 @@ impl Widget for ScrollBar {
                         return;
                     }
                     if let Some(r) = ctx.current_rect() {
-                        let pos = if is_vertical { *y - r.y as f32 } else { *x - r.x as f32 };
+                        let pos = if is_vertical { *y - r.y } else { *x - r.x };
                         let ratio = (pos / len).clamp(0.0, 1.0);
                         let max_scroll = (cont - view).max(1.0);
                         state.update(|pair| {
-                            if is_vertical { pair.1 = ratio * max_scroll } else { pair.0 = ratio * max_scroll };
+                            if is_vertical {
+                                pair.1 = ratio * max_scroll
+                            } else {
+                                pair.0 = ratio * max_scroll
+                            };
                         });
                     }
                 }

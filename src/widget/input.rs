@@ -584,9 +584,7 @@ impl Widget for Input {
         // 单行内容高度以实际文本行高（含 ascent/descent/行距）为准，而非仅 font_size；
         // 否则盒子比文本矮，文本会溢出并贴底。
         let line_h = TextEngine::measure_text("Mg", &text_style).1 as f32;
-        let inner_height = self
-            .height
-            .unwrap_or(line_h + pv * 2.0);
+        let inner_height = self.height.unwrap_or(line_h + pv * 2.0);
 
         // 同步样式/宽度，并计算光标与选区几何。
         let (text_content, caret, sel_rects, focused) = {
@@ -609,7 +607,7 @@ impl Widget for Input {
                         true
                     } else {
                         let half = BLINK_HALF.as_millis();
-                        ((elapsed - BLINK_SOLID).as_millis() / half) % 2 == 0
+                        ((elapsed - BLINK_SOLID).as_millis() / half).is_multiple_of(2)
                     }
                 }
                 None => true,

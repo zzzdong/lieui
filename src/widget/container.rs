@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 pub struct Container {
     expand: bool,
+    flex_shrink: f32,
     width: Option<f32>,
     height: Option<f32>,
     max_width: Option<f32>,
@@ -25,6 +26,7 @@ impl Container {
     pub fn new() -> Self {
         Self {
             expand: false,
+            flex_shrink: 1.0,
             width: None,
             height: None,
             max_width: None,
@@ -50,6 +52,10 @@ impl Container {
     }
     pub fn expand(mut self, v: bool) -> Self {
         self.expand = v;
+        self
+    }
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
         self
     }
     pub fn max_width(mut self, v: f32) -> Self {
@@ -138,6 +144,9 @@ impl Widget for Container {
         let mut layout = FlexStyle::block().padding_all(self.padding);
         if self.expand {
             layout = layout.flex_grow(1.0);
+        }
+        if self.flex_shrink != 1.0 {
+            layout = layout.flex_shrink(self.flex_shrink);
         }
         if let Some(w) = self.width {
             layout = layout.width(w);

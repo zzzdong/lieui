@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::event::Event;
+use crate::event::EventContext;
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
@@ -8,7 +9,6 @@ use crate::state::State;
 use crate::theme::current;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::PaintStyle;
-use crate::event::EventContext;
 use crate::widget::{BuildContext, Widget};
 
 /// 滑块。value 为 [0, 1] 的比例，由外部 `State<f32>` 持有。
@@ -125,9 +125,7 @@ impl Widget for Slider {
 
         ViewNode::Div {
             layout: track,
-            paint: PaintStyle::new()
-                .background(self.track_color)
-                .radius(r),
+            paint: PaintStyle::new().background(self.track_color).radius(r),
             children: vec![
                 ViewNode::Div {
                     layout: fill,

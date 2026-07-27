@@ -56,17 +56,15 @@ fn main() {
     // 注册一个自定义字体（若文件存在则可用 family 名 "Roboto"）。
     let _ = register_font_file("assets/Roboto-Regular.ttf");
 
-    let app = Application::new(move |_ctx| {
-        Box::new(
-            Row::new()
-                .expand(true)
-                .justify_content(FlexAlign::Center)
-                .align_items(FlexAlign::Start)
-                .child(
-                    Container::new()
-                        .width(560.0)
-                        .padding(24.0)
-                        .child(
+    let app = Application::new(
+        move |_ctx| {
+            Box::new(
+                Row::new()
+                    .expand(true)
+                    .justify_content(FlexAlign::Center)
+                    .align_items(FlexAlign::Start)
+                    .child(
+                        Container::new().width(560.0).padding(24.0).child(
                             Column::new()
                                 .spacing(24.0)
                                 .align_items(FlexAlign::Stretch)
@@ -102,11 +100,8 @@ fn main() {
                                         .child(Progress::new(*slider_val.get() as f64))
                                         .child(Slider::new(slider_val.clone()).track_height(8.0))
                                         .child(
-                                            Text::new(format!(
-                                                "Value: {:.2}",
-                                                *slider_val.get()
-                                            ))
-                                            .font_size(14.0),
+                                            Text::new(format!("Value: {:.2}", *slider_val.get()))
+                                                .font_size(14.0),
                                         ),
                                 ))
                                 // Switch + Radio
@@ -130,11 +125,8 @@ fn main() {
                                                 .option("Cherry"),
                                         )
                                         .child(
-                                            Text::new(format!(
-                                                "Selected: {}",
-                                                *radio_val.get()
-                                            ))
-                                            .font_size(14.0),
+                                            Text::new(format!("Selected: {}", *radio_val.get()))
+                                                .font_size(14.0),
                                         ),
                                 ))
                                 // Tooltip
@@ -183,19 +175,19 @@ fn main() {
                                                 .overscan(4)
                                                 .item(|i| {
                                                     Box::new(
-                                                        Container::new()
-                                                            .padding(8.0)
-                                                            .child(Text::new(format!(
-                                                                "Row item #{i}"
-                                                            ))),
+                                                        Container::new().padding(8.0).child(
+                                                            Text::new(format!("Row item #{i}")),
+                                                        ),
                                                     )
                                                 }),
                                         ),
                                 )),
                         ),
-                ),
-        )
-    }, Size::new(900.0, 700.0))
+                    ),
+            )
+        },
+        Size::new(900.0, 700.0),
+    )
     .with_font("assets/Roboto-Regular.ttf");
 
     app.run();

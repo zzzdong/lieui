@@ -105,7 +105,9 @@ impl<T> State<T> {
 
 impl<T: std::fmt::Debug> std::fmt::Debug for State<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("State").field("value", &*self.get()).finish()
+        f.debug_struct("State")
+            .field("value", &*self.get())
+            .finish()
     }
 }
 

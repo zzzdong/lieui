@@ -3,9 +3,9 @@
 use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::time::Instant;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -21,6 +21,27 @@ use crate::render::VelloRenderer;
 use crate::runtime::Runtime;
 use crate::state;
 use crate::widget::{BuildContext, StateMap, Widget};
+
+/// 当前正在进行的 ScrollView 拖拽滚动状态。
+#[derive(Debug, Clone, Copy)]
+struct ScrollDragState {
+    container_id: crate::core::ElementId,
+    mode: ScrollDragMode,
+    last_pos: Point,
+    /// 滚动条模式下的几何参数
+    track_length: f32,
+    thumb_size: f32,
+    content_length: f32,
+    viewport_length: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ScrollDragMode {
+    /// 按住内容区域拖拽（内容跟随手指/光标移动）。
+    Content,
+    /// 按住滚动条 thumb 拖拽。
+    ScrollbarThumb,
+}
 
 pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
     builder: B,
@@ -38,6 +59,8 @@ pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
     last_ime_cursor: Option<crate::geometry::Rect>,
     /// 启动时需注册到排版引擎的自定义字体文件。
     fonts: Vec<PathBuf>,
+    /// ScrollView 拖拽滚动状态。按住左键在可滚动容器内拖拽时生效。
+    scroll_drag: Option<ScrollDragState>,
 }
 
 static WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
@@ -121,6 +144,7 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             last_ime_allowed: false,
             last_ime_cursor: None,
             fonts: Vec::new(),
+            scroll_drag: None,
         }
     }
 
@@ -314,6 +338,229 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         self.window = Some(window);
     }
 
+    // ========== ScrollView 拖拽/滚动条辅助 ==========
+
+    /// 在命中路径中向上查找最近的 overflow_scroll 容器。
+    fn find_scroll_container(&self, hit: &HitTestResult) -> Option<crate::core::ElementId> {
+        for &id in hit.path.iter().rev() {
+            if let Some(node) = self.runtime.layers.tree.get_node_ref(id) {
+                if node.layout().overflow_scroll {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
+    /// 节点是否注册了 MouseDown 监听器。
+    fn has_mouse_down_listener(
+        tree: &crate::runtime::element::ElementTree,
+        id: crate::core::ElementId,
+    ) -> bool {
+        tree.listeners(id)
+            .iter()
+            .any(|l| l.event == crate::event::EventType::MouseDown)
+    }
+
+    /// 节点是否注册了 Click 监听器。
+    fn has_click_listener(
+        tree: &crate::runtime::element::ElementTree,
+        id: crate::core::ElementId,
+    ) -> bool {
+        tree.listeners(id)
+            .iter()
+            .any(|l| l.event == crate::event::EventType::Click)
+    }
+
+    /// 计算垂直滚动条轨道矩形（窗口坐标）。当前引擎只渲染垂直滚动条。
+    fn scrollbar_track_rect(
+        tree: &crate::runtime::element::ElementTree,
+        id: crate::core::ElementId,
+    ) -> Option<crate::geometry::Rect> {
+        let node = tree.get_node_ref(id)?;
+        if !node.layout().show_scrollbar {
+            return None;
+        }
+        let layout = tree.layout(id);
+        if !layout.overflow_scroll {
+            return None;
+        }
+        let sw = 8.0f32;
+        if layout.width < sw || layout.height <= 0.0 {
+            return None;
+        }
+        Some(crate::geometry::Rect::new(
+            layout.x + layout.width - sw,
+            layout.y,
+            sw,
+            layout.height,
+        ))
+    }
+
+    /// 计算垂直滚动条 thumb 的 y 偏移与高度。
+    fn scrollbar_thumb_info(
+        tree: &crate::runtime::element::ElementTree,
+        id: crate::core::ElementId,
+    ) -> Option<(f32, f32)> {
+        let track = Self::scrollbar_track_rect(tree, id)?;
+        let (_, content_h) = tree.content_size(id);
+        let viewport_h = tree.layout(id).height;
+        if content_h <= viewport_h || viewport_h <= 0.0 {
+            return None;
+        }
+        let (_, scroll_y) = tree.scroll_offset(id);
+        let max_scroll = (content_h - viewport_h).max(0.0);
+        let thumb_ratio = (viewport_h / content_h).clamp(0.02, 1.0);
+        let thumb_size = (track.height * thumb_ratio).max(8.0);
+        let thumb_offset = if max_scroll > 0.0 {
+            (scroll_y / max_scroll) * (track.height - thumb_size)
+        } else {
+            0.0
+        };
+        Some((track.y + thumb_offset, thumb_size))
+    }
+
+    /// 在鼠标按下时尝试启动 ScrollView 拖拽滚动或滚动条交互。
+    fn try_start_scroll_drag(
+        &mut self,
+        hit: &HitTestResult,
+        button: MouseButton,
+        effects: &crate::event::EventEffects,
+    ) {
+        if button != MouseButton::Left {
+            return;
+        }
+        if effects.propagation_stopped() {
+            return;
+        }
+        let Some(container_id) = self.find_scroll_container(hit) else {
+            return;
+        };
+
+        let tree = &self.runtime.layers.tree;
+        let point = self.mouse_pos;
+
+        // 优先判断是否在引擎渲染的垂直滚动条上。
+        if let Some(track) = Self::scrollbar_track_rect(tree, container_id) {
+            if track.contains(point) {
+                if let Some((thumb_y, thumb_size)) = Self::scrollbar_thumb_info(tree, container_id)
+                {
+                    let on_thumb = point.y >= thumb_y && point.y < thumb_y + thumb_size;
+                    if on_thumb {
+                        self.scroll_drag = Some(ScrollDragState {
+                            container_id,
+                            mode: ScrollDragMode::ScrollbarThumb,
+                            last_pos: point,
+                            track_length: track.height,
+                            thumb_size,
+                            content_length: tree.content_size(container_id).1,
+                            viewport_length: tree.layout(container_id).height,
+                        });
+                        self.runtime
+                            .layers
+                            .event_manager
+                            .borrow_mut()
+                            .set_mouse_capture(Some(container_id));
+                    } else {
+                        // 点击轨道空白处：按点击比例跳转。
+                        let ratio = ((point.y - track.y) / track.height).clamp(0.0, 1.0);
+                        let viewport_h = tree.layout(container_id).height;
+                        let content_h = tree.content_size(container_id).1;
+                        let max_scroll = (content_h - viewport_h).max(0.0);
+                        let new_y = ratio * max_scroll;
+                        let (ox, _) = tree.scroll_offset(container_id);
+                        self.runtime.scroll_to(container_id, ox, new_y);
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
+
+        // 内容区拖拽：路径上滚动容器之后的后代节点若注册了 MouseDown 或 Click，
+        // 说明子控件需要接管鼠标（Input 选取、Slider 拖柄、Checkbox/Button 等），
+        // 此时不启动滚动拖拽，避免捕获导致子控件的 Click 事件无法生成。
+        let container_idx = hit
+            .path
+            .iter()
+            .position(|&id| id == container_id)
+            .unwrap_or(hit.path.len());
+        let descendant_interactive = hit.path.iter().skip(container_idx + 1).any(|&id| {
+            Self::has_mouse_down_listener(tree, id) || Self::has_click_listener(tree, id)
+        });
+        if descendant_interactive {
+            return;
+        }
+
+        self.scroll_drag = Some(ScrollDragState {
+            container_id,
+            mode: ScrollDragMode::Content,
+            last_pos: point,
+            track_length: 0.0,
+            thumb_size: 0.0,
+            content_length: 0.0,
+            viewport_length: 0.0,
+        });
+        self.runtime
+            .layers
+            .event_manager
+            .borrow_mut()
+            .set_mouse_capture(Some(container_id));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 处理拖拽滚动中的鼠标移动。
+    fn handle_scroll_drag_move(&mut self, point: Point) {
+        let Some(mut drag) = self.scroll_drag else {
+            return;
+        };
+        let delta_x = point.x - drag.last_pos.x;
+        let delta_y = point.y - drag.last_pos.y;
+        if delta_x == 0.0 && delta_y == 0.0 {
+            return;
+        }
+        drag.last_pos = point;
+        match drag.mode {
+            ScrollDragMode::Content => {
+                // 自然滚动：手指/光标向下拖，内容向上滚动。
+                self.runtime
+                    .scroll_by(drag.container_id, -delta_x, -delta_y);
+            }
+            ScrollDragMode::ScrollbarThumb => {
+                let max_scroll = (drag.content_length - drag.viewport_length).max(0.0);
+                let available = (drag.track_length - drag.thumb_size).max(1.0);
+                if max_scroll > 0.0 {
+                    let scale = max_scroll / available;
+                    self.runtime
+                        .scroll_by(drag.container_id, 0.0, delta_y * scale);
+                }
+            }
+        }
+        self.scroll_drag = Some(drag);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 结束拖拽滚动。
+    fn end_scroll_drag(&mut self) {
+        if self.scroll_drag.is_some() {
+            self.scroll_drag = None;
+            self.runtime
+                .layers
+                .event_manager
+                .borrow_mut()
+                .set_mouse_capture(None);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     // ========== 事件处理 ==========
 
     fn build_hit_result(&self) -> Option<HitTestResult> {
@@ -421,6 +668,13 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = Point::new(position.x as f32, position.y as f32);
+
+                // ScrollView 拖拽滚动优先：捕获期间不再走普通 hover 路径。
+                if self.scroll_drag.is_some() {
+                    self.handle_scroll_drag_move(self.mouse_pos);
+                    return;
+                }
+
                 let hit = self.build_hit_result();
                 let effects = {
                     let tree = &self.runtime.layers.tree;
@@ -466,6 +720,10 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
                         )
                     };
                     self.apply_event_effects(effects);
+
+                    // 在普通 widget 处理之后尝试启动 ScrollView 拖拽滚动/滚动条交互。
+                    // 若子控件已截断事件或注册了 MouseDown，则让子控件优先处理。
+                    self.try_start_scroll_drag(&hit, btn, &effects);
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -490,6 +748,11 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler f
                         })
                     };
                     self.apply_event_effects(effects);
+                }
+                // 左键释放时结束 ScrollView 拖拽滚动。注意保持捕获直到 handle_mouse_up
+                // 完成，以抑制拖拽期间子控件被误触发的 Click 事件。
+                if button == winit::event::MouseButton::Left {
+                    self.end_scroll_drag();
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();

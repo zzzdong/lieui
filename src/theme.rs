@@ -209,9 +209,18 @@ impl Theme {
         t.border.strong = Color::from_hex("#6a6a6a");
         // 暗色下阴影更重
         let dk = Color::rgba(0, 0, 0, 70);
-        t.shadow.sm = ShadowSpec { color: dk, ..t.shadow.sm };
-        t.shadow.md = ShadowSpec { color: dk, ..t.shadow.md };
-        t.shadow.lg = ShadowSpec { color: dk, ..t.shadow.lg };
+        t.shadow.sm = ShadowSpec {
+            color: dk,
+            ..t.shadow.sm
+        };
+        t.shadow.md = ShadowSpec {
+            color: dk,
+            ..t.shadow.md
+        };
+        t.shadow.lg = ShadowSpec {
+            color: dk,
+            ..t.shadow.lg
+        };
         t
     }
 }
@@ -228,7 +237,7 @@ pub enum Mode {
 
 thread_local! {
     static THEME: RefCell<Theme> = RefCell::new(Theme::light());
-    static MODE: RefCell<Mode> = RefCell::new(Mode::Light);
+    static MODE: RefCell<Mode> = const { RefCell::new(Mode::Light) };
 }
 
 /// 取得当前主题快照。

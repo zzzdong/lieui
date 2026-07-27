@@ -7,9 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use lieui::core::ElementId;
-use lieui::event::{
-    Event, EventContext, EventPhase, HitTestResult, Key, Modifiers, MouseButton,
-};
+use lieui::event::{Event, EventContext, EventPhase, HitTestResult, Key, Modifiers, MouseButton};
 use lieui::geometry::{Point, Size};
 use lieui::runtime::{ElementTree, Runtime};
 use lieui::view::node::Callback;

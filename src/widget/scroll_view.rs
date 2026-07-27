@@ -36,6 +36,7 @@ use crate::widget::{BuildContext, Widget};
 /// ```
 pub struct ScrollView {
     height: Option<f32>,
+    flex_shrink: f32,
     child: Option<Box<dyn Widget>>,
     /// 是否显示引擎层自绘滚动条（默认不显示）。
     show_scrollbar: bool,
@@ -52,6 +53,7 @@ impl ScrollView {
     pub fn new(height: f32) -> Self {
         Self {
             height: Some(height),
+            flex_shrink: 1.0,
             child: None,
             content_width: None,
             content_height: None,
@@ -64,12 +66,19 @@ impl ScrollView {
     pub fn expand() -> Self {
         Self {
             height: None,
+            flex_shrink: 1.0,
             child: None,
             content_width: None,
             content_height: None,
             scroll_state: None,
             show_scrollbar: false,
         }
+    }
+
+    /// 设置 flex 收缩因子（默认 1.0）。
+    pub fn flex_shrink(mut self, v: f32) -> Self {
+        self.flex_shrink = v;
+        self
     }
 
     /// 显示/隐藏引擎层自绘滚动条（默认隐藏）。
@@ -123,7 +132,9 @@ impl Widget for ScrollView {
 
         let mut viewport = match self.height {
             Some(h) => FlexStyle::block().height(h),
-            None => FlexStyle::block().flex_grow(1.0).flex_shrink(1.0),
+            None => FlexStyle::block()
+                .flex_grow(1.0)
+                .flex_shrink(self.flex_shrink),
         }
         .overflow_scroll()
         .scrollbar(self.show_scrollbar);

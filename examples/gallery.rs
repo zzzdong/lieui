@@ -65,19 +65,35 @@ fn section_button(count: State<i32>) -> impl Widget {
                 Row::new()
                     .spacing(12.0)
                     .align_items(FlexAlign::Center)
-                    .child(Button::new("Small").variant(ButtonVariant::Secondary).size(ButtonSize::Sm))
-                    .child(Button::new("Medium").variant(ButtonVariant::Secondary).size(ButtonSize::Md))
-                    .child(Button::new("Large").variant(ButtonVariant::Secondary).size(ButtonSize::Lg)),
+                    .child(
+                        Button::new("Small")
+                            .variant(ButtonVariant::Secondary)
+                            .size(ButtonSize::Sm),
+                    )
+                    .child(
+                        Button::new("Medium")
+                            .variant(ButtonVariant::Secondary)
+                            .size(ButtonSize::Md),
+                    )
+                    .child(
+                        Button::new("Large")
+                            .variant(ButtonVariant::Secondary)
+                            .size(ButtonSize::Lg),
+                    ),
             )
             .child(section_title("Button · 交互"))
             .child(
                 Row::new()
                     .spacing(12.0)
                     .align_items(FlexAlign::Center)
-                    .child(Button::new("Counter").variant(ButtonVariant::Primary).on_click({
-                        let c = count.clone();
-                        move || c.update(|v| *v += 1)
-                    }))
+                    .child(
+                        Button::new("Counter")
+                            .variant(ButtonVariant::Primary)
+                            .on_click({
+                                let c = count.clone();
+                                move || c.update(|v| *v += 1)
+                            }),
+                    )
                     .child(Text::new(format!("Clicked: {}", count.get())).font_size(14.0)),
             ),
     )
@@ -93,14 +109,22 @@ fn section_checkbox(checked: State<bool>) -> impl Widget {
                 Checkbox::new(*checked.get())
                     .label(format!(
                         "Agree to terms ({})",
-                        if *checked.get() { "checked" } else { "unchecked" }
+                        if *checked.get() {
+                            "checked"
+                        } else {
+                            "unchecked"
+                        }
                     ))
                     .on_click({
                         let c = checked.clone();
                         move || c.update(|v| *v = !*v)
                     }),
             )
-            .child(Checkbox::new(true).label("Disabled-like checked box").on_click(|| {})),
+            .child(
+                Checkbox::new(true)
+                    .label("Disabled-like checked box")
+                    .on_click(|| {}),
+            ),
     )
 }
 
@@ -143,9 +167,21 @@ fn section_input(input_text: State<String>, multi_text: State<String>) -> impl W
                 Row::new()
                     .spacing(12.0)
                     .align_items(FlexAlign::Center)
-                    .child(Input::new("错误示例").width(180.0).status(InputStatus::Danger))
-                    .child(Input::new("成功示例").width(180.0).status(InputStatus::Success))
-                    .child(Input::new("警告示例").width(180.0).status(InputStatus::Warning)),
+                    .child(
+                        Input::new("错误示例")
+                            .width(180.0)
+                            .status(InputStatus::Danger),
+                    )
+                    .child(
+                        Input::new("成功示例")
+                            .width(180.0)
+                            .status(InputStatus::Success),
+                    )
+                    .child(
+                        Input::new("警告示例")
+                            .width(180.0)
+                            .status(InputStatus::Warning),
+                    ),
             )
             .child(section_title("Input · 尺寸（size）"))
             .child(
@@ -176,7 +212,11 @@ fn section_text_divider() -> impl Widget {
                 .max_width(480.0),
             )
             .child(Divider::new())
-            .child(Text::new("Colored & aligned text").color(Color::new(0, 128, 0)).font_size(14.0)),
+            .child(
+                Text::new("Colored & aligned text")
+                    .color(Color::new(0, 128, 0))
+                    .font_size(14.0),
+            ),
     )
 }
 
@@ -186,84 +226,78 @@ fn page_basic(
     input_text: State<String>,
     multi_text: State<String>,
 ) -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
-            Column::new()
-                .spacing(16.0)
-                .align_items(FlexAlign::Stretch)
-                .child(section_button(count))
-                .child(section_checkbox(checked))
-                .child(section_input(input_text, multi_text))
-                .child(section_text_divider()),
-        )
+    ScrollView::expand().scrollbar(true).child(
+        Column::new()
+            .spacing(16.0)
+            .align_items(FlexAlign::Stretch)
+            .child(section_button(count))
+            .child(section_checkbox(checked))
+            .child(section_input(input_text, multi_text))
+            .child(section_text_divider()),
+    )
 }
 
 // ───────────────────────────── 布局 ─────────────────────────────
 
 fn page_layout() -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
-            card(
-                Column::new()
-                    .spacing(12.0)
-                    .align_items(FlexAlign::Start)
-                    .child(section_title("Flex Layout"))
-                .child(
-                    Row::new()
-                        .spacing(8.0)
-                        .align_items(FlexAlign::Center)
-                        .child(
-                            Container::new()
-                                .width(60.0)
-                                .height(60.0)
-                                .background(Color::new(255, 100, 100))
-                                .border_radius(4.0),
-                        )
-                        .child(
-                            Container::new()
-                                .width(60.0)
-                                .height(60.0)
-                                .background(Color::new(100, 255, 100))
-                                .border_radius(4.0),
-                        )
-                        .child(
-                            Container::new()
-                                .width(60.0)
-                                .height(60.0)
-                                .background(Color::new(100, 100, 255))
-                                .border_radius(4.0),
-                        ),
-                )
-                .child(
-                    Row::new()
-                        .spacing(8.0)
-                        .justify_content(FlexAlign::SpaceBetween)
-                        .child(
-                            Container::new()
-                                .width(80.0)
-                                .height(32.0)
-                                .background(theme::current().border.strong)
-                                .border_radius(4.0),
-                        )
-                        .child(
-                            Container::new()
-                                .width(80.0)
-                                .height(32.0)
-                                .background(theme::current().border.strong)
-                                .border_radius(4.0),
-                        )
-                        .child(
-                            Container::new()
-                                .width(80.0)
-                                .height(32.0)
-                                .background(theme::current().border.strong)
-                                .border_radius(4.0),
-                        ),
-                ),
-        ),
-    )
+    ScrollView::expand().scrollbar(true).child(card(
+        Column::new()
+            .spacing(12.0)
+            .align_items(FlexAlign::Start)
+            .child(section_title("Flex Layout"))
+            .child(
+                Row::new()
+                    .spacing(8.0)
+                    .align_items(FlexAlign::Center)
+                    .child(
+                        Container::new()
+                            .width(60.0)
+                            .height(60.0)
+                            .background(Color::new(255, 100, 100))
+                            .border_radius(4.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(60.0)
+                            .height(60.0)
+                            .background(Color::new(100, 255, 100))
+                            .border_radius(4.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(60.0)
+                            .height(60.0)
+                            .background(Color::new(100, 100, 255))
+                            .border_radius(4.0),
+                    ),
+            )
+            .child(
+                Row::new()
+                    .spacing(8.0)
+                    .justify_content(FlexAlign::SpaceBetween)
+                    .child(
+                        Container::new()
+                            .width(80.0)
+                            .height(32.0)
+                            .background(theme::current().border.strong)
+                            .border_radius(4.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(80.0)
+                            .height(32.0)
+                            .background(theme::current().border.strong)
+                            .border_radius(4.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(80.0)
+                            .height(32.0)
+                            .background(theme::current().border.strong)
+                            .border_radius(4.0),
+                    ),
+            ),
+    ))
 }
 
 // ───────────────────────────── 交互控件 ─────────────────────────────
@@ -291,7 +325,11 @@ fn section_switch_radio(switch_val: State<bool>, radio_val: State<usize>) -> imp
                     .spacing(16.0)
                     .align_items(FlexAlign::Center)
                     .child(Switch::new(switch_val.clone()).label("启用通知"))
-                    .child(Text::new(if *switch_val.get() { "已开启" } else { "已关闭" })),
+                    .child(Text::new(if *switch_val.get() {
+                        "已开启"
+                    } else {
+                        "已关闭"
+                    })),
             )
             .child(
                 Radio::new(radio_val.clone())
@@ -337,9 +375,7 @@ fn page_interactive(
     radio_val: State<usize>,
     nested: State<usize>,
 ) -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
+    ScrollView::expand().scrollbar(true).child(
         Column::new()
             .spacing(16.0)
             .align_items(FlexAlign::Stretch)
@@ -353,9 +389,7 @@ fn page_interactive(
 // ───────────────────────────── 容器组件 ─────────────────────────────
 
 fn page_containers(switch_val: State<bool>) -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
+    ScrollView::expand().scrollbar(true).child(
         Column::new()
             .spacing(16.0)
             .align_items(FlexAlign::Stretch)
@@ -386,7 +420,11 @@ fn page_containers(switch_val: State<bool>) -> impl Widget {
                     .font_size(12.0)
                     .color(theme::current().text.subtle_default),
             )
-            .child(Card::new().title("简洁卡片").body(Text::new("只有标题与主体。")))
+            .child(
+                Card::new()
+                    .title("简洁卡片")
+                    .body(Text::new("只有标题与主体。")),
+            )
             .child(
                 Card::new()
                     .variant(CardVariant::Compact)
@@ -432,8 +470,7 @@ fn section_virtual_list(scroll_y: State<(f32, f32)>) -> impl Widget {
                         }),
                     )
                     .child(
-                        ScrollBar::vertical(360.0, scroll_y.clone(), 360.0, total)
-                            .thickness(10.0),
+                        ScrollBar::vertical(360.0, scroll_y.clone(), 360.0, total).thickness(10.0),
                     ),
             ),
     )
@@ -441,9 +478,7 @@ fn section_virtual_list(scroll_y: State<(f32, f32)>) -> impl Widget {
 
 /// 构造 ScrollView 内的 30 行演示内容。
 fn build_scroll_rows() -> Column {
-    let mut col = Column::new()
-        .spacing(4.0)
-        .align_items(FlexAlign::Stretch);
+    let mut col = Column::new().spacing(4.0).align_items(FlexAlign::Stretch);
     for i in 0..30 {
         col = col.child(
             Container::new()
@@ -476,17 +511,12 @@ fn section_scroll_view() -> impl Widget {
                     .font_size(12.0)
                     .color(theme::current().text.subtle_default),
             )
-            .child(
-                ScrollView::new(200.0)
-                    .child(build_scroll_rows()),
-            ),
+            .child(ScrollView::new(200.0).child(build_scroll_rows())),
     )
 }
 
 fn page_lists(scroll_y: State<(f32, f32)>) -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
+    ScrollView::expand().scrollbar(true).child(
         Column::new()
             .spacing(16.0)
             .align_items(FlexAlign::Stretch)
@@ -498,28 +528,24 @@ fn page_lists(scroll_y: State<(f32, f32)>) -> impl Widget {
 // ───────────────────────────── 关于 ─────────────────────────────
 
 fn page_about() -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
-            Column::new()
-                .spacing(16.0)
-                .align_items(FlexAlign::Start)
-                .child(
-                    card(
-                        Column::new()
-                            .spacing(10.0)
-                            .align_items(FlexAlign::Start)
-                            .child(section_title("关于 LieUI"))
-                            .child(Text::new("LieUI v2 是一个声明式、响应式的 Rust UI 框架。"))
-                            .child(Text::new("当前 Gallery 即以顶层 Tab 展示各类内置控件。")),
-                    ),
-                )
-                .child(
-                    Text::new("Tip: 在输入框中试试 Ctrl+A/C/V/X，滚轮可在虚拟列表内滚动。")
-                        .font_size(12.0)
-                        .color(theme::current().text.subtle_default),
-                ),
-        )
+    ScrollView::expand().scrollbar(true).child(
+        Column::new()
+            .spacing(16.0)
+            .align_items(FlexAlign::Start)
+            .child(card(
+                Column::new()
+                    .spacing(10.0)
+                    .align_items(FlexAlign::Start)
+                    .child(section_title("关于 LieUI"))
+                    .child(Text::new("LieUI v2 是一个声明式、响应式的 Rust UI 框架。"))
+                    .child(Text::new("当前 Gallery 即以顶层 Tab 展示各类内置控件。")),
+            ))
+            .child(
+                Text::new("Tip: 在输入框中试试 Ctrl+A/C/V/X，滚轮可在虚拟列表内滚动。")
+                    .font_size(12.0)
+                    .color(theme::current().text.subtle_default),
+            ),
+    )
 }
 
 // ───────────────────────────── 设计系统（PatternFly 令牌展示） ─────────────────────────────
@@ -544,18 +570,50 @@ fn section_status() -> impl Widget {
                     .spacing(8.0)
                     .align_items(FlexAlign::Center)
                     .child(status_badge("Danger", t.status.danger, t.status.danger_bg))
-                    .child(status_badge("Success", t.status.success, t.status.success_bg))
-                    .child(status_badge("Warning", t.status.warning, t.status.warning_bg))
+                    .child(status_badge(
+                        "Success",
+                        t.status.success,
+                        t.status.success_bg,
+                    ))
+                    .child(status_badge(
+                        "Warning",
+                        t.status.warning,
+                        t.status.warning_bg,
+                    ))
                     .child(status_badge("Info", t.status.info, t.status.info_bg)),
             )
             .child(
                 Row::new()
                     .spacing(8.0)
                     .align_items(FlexAlign::Center)
-                    .child(Container::new().width(16.0).height(16.0).background(t.status.danger).border_radius(8.0))
-                    .child(Container::new().width(16.0).height(16.0).background(t.status.success).border_radius(8.0))
-                    .child(Container::new().width(16.0).height(16.0).background(t.status.warning).border_radius(8.0))
-                    .child(Container::new().width(16.0).height(16.0).background(t.status.info).border_radius(8.0)),
+                    .child(
+                        Container::new()
+                            .width(16.0)
+                            .height(16.0)
+                            .background(t.status.danger)
+                            .border_radius(8.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(16.0)
+                            .height(16.0)
+                            .background(t.status.success)
+                            .border_radius(8.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(16.0)
+                            .height(16.0)
+                            .background(t.status.warning)
+                            .border_radius(8.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(16.0)
+                            .height(16.0)
+                            .background(t.status.info)
+                            .border_radius(8.0),
+                    ),
             ),
     )
 }
@@ -581,9 +639,11 @@ fn section_typography() -> impl Widget {
                 .spacing(12.0)
                 .align_items(FlexAlign::Center)
                 .child(
-                    Container::new()
-                        .width(64.0)
-                        .child(Text::new(label.to_string()).font_size(12.0).color(t.text.subtle_default)),
+                    Container::new().width(64.0).child(
+                        Text::new(label.to_string())
+                            .font_size(12.0)
+                            .color(t.text.subtle_default),
+                    ),
                 )
                 .child(Text::new("LieUI 排版 Aa").font_size(size)),
         );
@@ -592,9 +652,7 @@ fn section_typography() -> impl Widget {
 }
 
 fn page_design() -> impl Widget {
-    ScrollView::expand()
-        .scrollbar(true)
-        .child(
+    ScrollView::expand().scrollbar(true).child(
         Column::new()
             .spacing(16.0)
             .align_items(FlexAlign::Stretch)
