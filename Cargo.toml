@@ -3,6 +3,13 @@ name = "lieui"
 version = "0.2.0-beta.1"
 edition = "2024"
 description = "A Rust GUI library with C/S architecture and builder-driven UI"
+author = "zzzdong <kuwater@163.com>"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zzzdong/lieui"
+homepage = "https://github.com/zzzdong/lieui"
+documentation = "https://docs.rs/lieui"
+keywords = ["gui", "ui", "vello", "winit", "cross-platform"]
+categories = ["gui"]
 
 [dependencies]
 log = "0.4"
