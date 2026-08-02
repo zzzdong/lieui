@@ -122,6 +122,8 @@ pub struct LayerOptions {
     pub visible: bool,
     pub dismiss_on_outside: bool,
     pub backdrop: Option<crate::geometry::Color>,
+    /// 锚定防溢出：超出视口时自动翻转到对侧（弹出菜单等浮层用）
+    pub flip: bool,
 }
 
 impl Default for LayerOptions {
@@ -130,6 +132,19 @@ impl Default for LayerOptions {
             visible: true,
             dismiss_on_outside: false,
             backdrop: None,
+            flip: false,
+        }
+    }
+}
+
+impl LayerOptions {
+    /// 弹出浮层常用预设：可见、点击外部自动消失、启用防溢出翻转。
+    pub fn popup() -> Self {
+        Self {
+            visible: true,
+            dismiss_on_outside: true,
+            backdrop: None,
+            flip: true,
         }
     }
 }
@@ -157,6 +172,9 @@ pub struct LayerEntry {
     pub dismiss_on_outside_click: bool,
     /// Modal 专属：在本条目下方绘制半透明遮罩矩形，颜色可配置
     pub backdrop: Option<crate::geometry::Color>,
+    /// 锚定防溢出：当按首选方向定位会超出视口时，自动翻转到对侧
+    /// （如 `Below` 超出底部则翻转为 `Above`）。用于弹出菜单等浮层。
+    pub flip: bool,
 }
 
 impl LayerEntry {
@@ -245,6 +263,39 @@ impl LayerStack {
             seq,
             dismiss_on_outside_click: opts.dismiss_on_outside,
             backdrop: opts.backdrop,
+            flip: opts.flip,
+        };
+        self.entries.borrow_mut().push(entry);
+        handle
+    }
+
+    /// 与 `push` 相同，但使用调用方预先生成的 `LayerHandle`（窗口间句柄由全局命令携带）。
+    /// 若传入的句柄序号不小于当前 `next_handle`，则同步推进，避免后续自增冲突。
+    pub fn push_with_handle(
+        &mut self,
+        kind: LayerKind,
+        view: ViewNode,
+        anchor: Anchor,
+        focus: FocusPolicy,
+        opts: LayerOptions,
+        handle: LayerHandle,
+    ) -> LayerHandle {
+        let id = self.tree.create_subtree_from_node(&view);
+        if handle.0 >= self.next_handle.get() {
+            self.next_handle.set(handle.0 + 1);
+        }
+        let seq = self.alloc_seq(kind);
+        let entry = LayerEntry {
+            handle,
+            kind,
+            root_id: id,
+            anchor,
+            visible: Cell::new(opts.visible),
+            focus,
+            seq,
+            dismiss_on_outside_click: opts.dismiss_on_outside,
+            backdrop: opts.backdrop,
+            flip: opts.flip,
         };
         self.entries.borrow_mut().push(entry);
         handle
@@ -380,6 +431,7 @@ impl LayerStack {
                 seq,
                 dismiss_on_outside_click: false,
                 backdrop: None,
+                flip: false,
             };
             self.entries.borrow_mut().push(entry);
             self.content_handle.set(Some(handle));
@@ -405,6 +457,7 @@ impl LayerStack {
             seq,
             dismiss_on_outside_click: false,
             backdrop: None,
+            flip: false,
         };
         self.entries.borrow_mut().push(entry);
         self.default_overlay_handle.set(Some(handle));
@@ -437,6 +490,7 @@ impl LayerStack {
             seq,
             dismiss_on_outside_click: false,
             backdrop: Some(crate::geometry::Color::rgba(0, 0, 0, 80)), // 半透明遮罩
+            flip: false,
         };
         self.entries.borrow_mut().push(entry);
         self.default_modal_handle.set(Some(handle));

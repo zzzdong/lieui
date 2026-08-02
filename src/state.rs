@@ -3,7 +3,7 @@
 //! 本模块只负责在单线程内协调“是否需要 rebuild/redraw”。
 //! Widget state 的持久化由 `widget::BuildContext` 负责。
 
-use crate::core::layers::{Anchor, FocusPolicy, LayerKind, LayerOptions};
+use crate::core::layers::{Anchor, FocusPolicy, LayerHandle, LayerKind, LayerOptions};
 use crate::view::node::ViewNode;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -102,6 +102,12 @@ impl LayerSpec {
         self.opts.backdrop = Some(color);
         self
     }
+
+    /// 直接指定完整层选项（如 `LayerOptions::popup()` 启用防溢出翻转）。
+    pub fn with_opts(mut self, opts: LayerOptions) -> Self {
+        self.opts = opts;
+        self
+    }
 }
 
 /// 待处理的层命令：显示（含已构建的 widget tree）或隐藏（单实例层，如 Modal/Overlay）。
@@ -110,6 +116,7 @@ pub(crate) enum LayerCmd {
         kind: LayerKind,
         spec: LayerSpec,
         view: Box<ViewNode>,
+        handle: LayerHandle,
     },
     /// 移除指定单实例层（Modal / Overlay）。
     Hide { kind: LayerKind },
@@ -167,17 +174,33 @@ pub fn show_layer(
     kind: LayerKind,
     spec: LayerSpec,
     builder: impl FnOnce(&mut crate::widget::BuildContext) -> Box<dyn crate::widget::Widget> + 'static,
-) {
+) -> LayerHandle {
     let mut ctx =
         crate::widget::BuildContext::new(Rc::new(RefCell::new(crate::widget::StateMap::new())));
     let widget = builder(&mut ctx);
     let view = widget.build(&mut ctx);
+    // 预先生成句柄，经由全局命令携带到目标窗口的 LayerStack。
+    let handle = NEXT_POPUP_HANDLE.with(|c| {
+        let h = LayerHandle(c.get());
+        c.set(h.0 + 1);
+        h
+    });
     PENDING_LAYER.with(|c| {
         c.borrow_mut().push(LayerCmd::Show {
             kind,
             spec,
             view: Box::new(view),
+            handle,
         });
+    });
+    request_rebuild();
+    handle
+}
+
+/// 隐藏指定单实例层（Modal / Overlay），按 `LayerKind` 查找当前存在该 kind 的默认条目。
+pub fn hide_layer(kind: LayerKind) {
+    PENDING_LAYER.with(|c| {
+        c.borrow_mut().push(LayerCmd::Hide { kind });
     });
     request_rebuild();
 }
@@ -196,12 +219,7 @@ pub fn show_modal(
 
 /// 隐藏默认 Modal 层。
 pub fn hide_modal() {
-    PENDING_LAYER.with(|c| {
-        c.borrow_mut().push(LayerCmd::Hide {
-            kind: LayerKind::Modal,
-        });
-    });
-    request_rebuild();
+    hide_layer(LayerKind::Modal);
 }
 
 /// 以 widget tree 显示 Overlay 层（不阻塞下层）。
@@ -217,17 +235,138 @@ pub fn show_overlay(
 
 /// 隐藏默认 Overlay 层。
 pub fn hide_overlay() {
+    hide_layer(LayerKind::Overlay);
+}
+
+/// 弹出浮层相对触发区域的首选方向。
+#[derive(Debug, Clone, Copy)]
+pub enum PopupPlacement {
+    /// 触发器下方展开（默认，若底部空间不足则自动翻转到上方）
+    Below,
+    /// 触发器上方展开（若顶部空间不足则翻转到下方）
+    Above,
+    /// 触发器右侧展开（若右侧空间不足则翻转到左侧）
+    RightOf,
+    /// 触发器左侧展开（若左侧空间不足则翻转到右侧）
+    LeftOf,
+    /// 固定在屏幕坐标 (x, y)，不相对触发器
+    Fixed { x: f32, y: f32 },
+}
+
+impl PopupPlacement {
+    /// 转换为 `Anchor`，`trigger` 为触发区域，`gap` 为浮层与触发器的间距。
+    fn to_anchor(self, trigger: crate::geometry::Rect, gap: f32) -> Anchor {
+        match self {
+            PopupPlacement::Below => Anchor::Below {
+                anchor: trigger,
+                gap,
+            },
+            PopupPlacement::Above => Anchor::Above {
+                anchor: trigger,
+                gap,
+            },
+            PopupPlacement::RightOf => Anchor::RightOf {
+                anchor: trigger,
+                gap,
+            },
+            PopupPlacement::LeftOf => Anchor::LeftOf {
+                anchor: trigger,
+                gap,
+            },
+            PopupPlacement::Fixed { x, y } => Anchor::Fixed { x, y },
+        }
+    }
+}
+
+/// 弹出浮层句柄：用于 `hide_popup` 精确关闭该浮层实例。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PopupHandle(pub LayerHandle);
+
+// 全局自增句柄源，保证跨窗口 Popup 句柄唯一（句柄仅在创建窗口内消费）。
+thread_local! {
+    static NEXT_POPUP_HANDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// 以 widget tree 显示一个 Popup 浮层（如右键菜单、下拉菜单）。
+///
+/// 浮层会落在 `LayerKind::Popup` 层，自动设置 `FocusPolicy::Dismissable`
+/// （点击浮层外部自动关闭），并启用防溢出翻转：当按首选方向定位会超出窗口
+/// 视口时自动翻转到对侧，保证菜单始终完整可见（方案 A：纯自绘、不超出窗口）。
+///
+/// 返回 `PopupHandle`，可传给 `hide_popup` 精确关闭（菜单项点击后通常需手动关闭）。
+pub fn show_popup(
+    trigger: crate::geometry::Rect,
+    placement: PopupPlacement,
+    builder: impl FnOnce(&mut crate::widget::BuildContext) -> Box<dyn crate::widget::Widget> + 'static,
+) -> PopupHandle {
+    show_popup_with(trigger, placement, move |_handle, ctx| builder(ctx))
+}
+
+/// `show_popup` 的变体：builder 可拿到本 Popup 的 `PopupHandle`，
+/// 便于在菜单项点击回调里调用 `hide_popup(handle)` 精确关闭。例如：
+/// ```ignore
+/// let h = show_popup_with(rect, PopupPlacement::Below, |handle, ctx| {
+///     Box::new(Menu::new().item(MenuItem::new("项").close_with(handle)))
+/// });
+/// ```
+pub fn show_popup_with(
+    trigger: crate::geometry::Rect,
+    placement: PopupPlacement,
+    builder: impl FnOnce(
+        PopupHandle,
+        &mut crate::widget::BuildContext,
+    ) -> Box<dyn crate::widget::Widget>
+    + 'static,
+) -> PopupHandle {
+    let mut ctx =
+        crate::widget::BuildContext::new(Rc::new(RefCell::new(crate::widget::StateMap::new())));
+    let handle = NEXT_POPUP_HANDLE.with(|c| {
+        let h = LayerHandle(c.get());
+        c.set(h.0 + 1);
+        h
+    });
+    let widget = builder(PopupHandle(handle), &mut ctx);
+    let view = widget.build(&mut ctx);
+    let spec = LayerSpec::new(placement.to_anchor(trigger, 4.0), FocusPolicy::Dismissable)
+        .with_opts(LayerOptions::popup());
+    PENDING_LAYER.with(|c| {
+        c.borrow_mut().push(LayerCmd::Show {
+            kind: LayerKind::Popup,
+            spec,
+            view: Box::new(view),
+            handle,
+        });
+    });
+    request_rebuild();
+    PopupHandle(handle)
+}
+
+/// 关闭指定 Popup 浮层。
+pub fn hide_popup(handle: PopupHandle) {
+    PENDING_POPUP_HIDE.with(|c| {
+        c.borrow_mut().push(handle.0.0);
+    });
     PENDING_LAYER.with(|c| {
         c.borrow_mut().push(LayerCmd::Hide {
-            kind: LayerKind::Overlay,
+            kind: LayerKind::Popup,
         });
     });
     request_rebuild();
 }
 
+// 待关闭的 Popup 句柄队列（与 PENDING_LAYER 同帧消费，用于按 handle 精确移除）。
+thread_local! {
+    static PENDING_POPUP_HIDE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
 /// 取走待处理的层命令（Runtime 内部使用）。
 pub(crate) fn take_pending_layers() -> Vec<LayerCmd> {
     PENDING_LAYER.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// 取走待关闭的 Popup 句柄队列（Runtime 内部使用）。
+pub(crate) fn take_popup_hides() -> Vec<u64> {
+    PENDING_POPUP_HIDE.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// 请求真正关闭当前窗口。

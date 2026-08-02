@@ -130,7 +130,12 @@ impl Runtime {
                         }
                         _ => {}
                     },
-                    state::LayerCmd::Show { kind, spec, view } => match kind {
+                    state::LayerCmd::Show {
+                        kind,
+                        spec,
+                        view,
+                        handle,
+                    } => match kind {
                         LayerKind::Modal => {
                             let id = self.layers.tree.create_subtree_from_node(&view);
                             self.layers.push_default_modal(id);
@@ -140,11 +145,21 @@ impl Runtime {
                             self.layers.push_default_overlay(id);
                         }
                         _ => {
-                            self.layers
-                                .push(kind, *view, spec.anchor, spec.focus, spec.opts);
+                            self.layers.push_with_handle(
+                                kind,
+                                *view,
+                                spec.anchor,
+                                spec.focus,
+                                spec.opts,
+                                handle,
+                            );
                         }
                     },
                 }
+            }
+            // 同帧处理 Popup 关闭队列：按句柄精确移除（多实例 Popup 需要）。
+            for h in state::take_popup_hides() {
+                self.layers.remove(crate::core::layers::LayerHandle(h));
             }
             self.needs_layout = true;
         }
@@ -237,7 +252,7 @@ impl Runtime {
                 // 其他 LayerKind（Modal/Popup/Overlay/Tooltip）：按内容自然尺寸布局，
                 // 避免根节点被撑满整个视口（如 modal 高度占满窗口），再按 Anchor 定位。
                 LayoutContext::compute(rid, &self.layers.tree, self.viewport, false);
-                Self::apply_anchor(&mut self.layers, entry.anchor, rid, self.viewport);
+                Self::apply_anchor(&mut self.layers, &entry, rid, self.viewport);
             }
         }
         self.layers.tree.clear_dirty();
@@ -245,15 +260,60 @@ impl Runtime {
 
     /// 依据 Anchor 将层根子树平移到目标位置。
     /// 布局阶段先按 viewport 约束在 (0,0) 计算子树尺寸，这里再按锚点计算平移量。
+    /// 若 `entry.flip` 为真，则当首选方向定位会超出视口时自动翻转到对侧，
+    /// 保证弹出浮层（菜单/Tooltip）始终完整落在窗口内。
     fn apply_anchor(
         layers: &mut LayerStack,
-        anchor: Anchor,
+        entry: &crate::core::layers::LayerEntry,
         root: crate::core::ElementId,
         viewport: crate::geometry::Size,
     ) {
         let l = layers.tree.layout(root);
         let (w, h) = (l.width, l.height);
-        let (dx, dy) = match anchor {
+        // 计算某锚点在「首选方向」下的目标矩形（左上角 x,y），用于溢出检测。
+        let resolve = |a: Anchor| -> (f32, f32) {
+            match a {
+                Anchor::Fixed { x, y } => (x, y),
+                Anchor::Above { anchor, gap } => {
+                    let r = anchor;
+                    (r.x + (r.width - w) / 2.0, r.y - gap - h)
+                }
+                Anchor::Below { anchor, gap } => {
+                    let r = anchor;
+                    (r.x + (r.width - w) / 2.0, r.y + r.height + gap)
+                }
+                Anchor::LeftOf { anchor, gap } => {
+                    let r = anchor;
+                    (r.x - gap - w, r.y + (r.height - h) / 2.0)
+                }
+                Anchor::RightOf { anchor, gap } => {
+                    let r = anchor;
+                    (r.x + r.width + gap, r.y + (r.height - h) / 2.0)
+                }
+                _ => (0.0, 0.0),
+            }
+        };
+        // 优先使用首选方向；若启用 flip 且首选会超出视口，则翻转到对侧。
+        let chosen = if entry.flip {
+            let primary = entry.anchor;
+            let (px, py) = resolve(primary);
+            let overflows =
+                px < 0.0 || py < 0.0 || px + w > viewport.width || py + h > viewport.height;
+            if overflows {
+                match primary {
+                    Anchor::Above { anchor, gap } => Anchor::Below { anchor, gap },
+                    Anchor::Below { anchor, gap } => Anchor::Above { anchor, gap },
+                    Anchor::LeftOf { anchor, gap } => Anchor::RightOf { anchor, gap },
+                    Anchor::RightOf { anchor, gap } => Anchor::LeftOf { anchor, gap },
+                    other => other,
+                }
+            } else {
+                primary
+            }
+        } else {
+            entry.anchor
+        };
+        let (dx, dy) = match chosen {
             Anchor::None => (0.0, 0.0),
             Anchor::Fixed { x, y } => (x - l.x, y - l.y),
             Anchor::ScreenCenter => {

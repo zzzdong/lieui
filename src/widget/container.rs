@@ -51,6 +51,21 @@ impl Container {
         self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
         self
     }
+    /// 鼠标按下（可按 `EventContext::event()` 判断按键）。
+    pub fn on_mouse_down<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_mouse_down(Rc::new(f)));
+        self
+    }
+    /// 鼠标释放（可按 `EventContext::event()` 判断按键）。
+    pub fn on_mouse_up<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_mouse_up(Rc::new(f)));
+        self
+    }
+    /// 鼠标进入节点区域。
+    pub fn on_mouse_enter<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_mouse_enter(Rc::new(f)));
+        self
+    }
 
     // ── 视觉样式 ──
 

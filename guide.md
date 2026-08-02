@@ -231,6 +231,41 @@ hide_modal();
 
 命中测试按 `Modal → Overlay → Base` 优先级返回最顶层节点，因此 modal 会拦截其范围内的点击。亦可用底层 `show_layer(LayerKind, LayerSpec, builder)` 自定义层类型、锚点与焦点策略（`Anchor`/`FocusPolicy`/`LayerSpec` 见 `core::layers`）。
 
+### 2.8.1 菜单（Menu / MenuItem / ContextMenu / Submenu）
+
+菜单采用**方案 A：纯自绘 + 防溢出翻转**，不依赖系统原生菜单控件：
+
+- 菜单、菜单项、分隔线、子菜单都是普通 `Widget`（`src/widget/menu.rs`），外观由主题/圆角/图标字体统一控制；
+- 弹出时落在 `LayerKind::Popup` 层（每窗口独立 `LayerStack`），自动设置 `FocusPolicy::Dismissable`——点击浮层外部自动关闭；
+- **防溢出**：`apply_anchor` 在 `LayerOptions::flip` 为真时，若按首选方向定位会超出窗口视口，自动翻转到对侧（如 `Below` 超出底部则翻为 `Above`），保证菜单始终完整落在窗口内、不会被窗口边界裁掉（也因此本方案菜单不会跨出窗口矩形之外）；
+- 右键菜单由 `ContextMenu` 组件监听 `MouseButton::Right` 触发；下拉菜单则在按钮点击回调里手动 `show_popup`。
+
+```rust
+use lieui::widget::{ContextMenu, Menu, MenuItem, Submenu};
+use lieui::state::{show_popup_with, PopupPlacement};
+
+// 右键菜单：包裹任意触发 widget，内部监听右键弹出，点击项后自动关闭。
+ContextMenu::new(trigger_widget)
+    .menu(|_handle, ctx| {
+        Menu::new()
+            .item(MenuItem::new("复制").on_click(|_| copy()))
+            .item(MenuItem::new("粘贴").on_click(|_| paste()))
+            .separator()
+            .submenu(Submenu::new("更多")
+                .item(MenuItem::new("重命名").on_click(|_| rename())))
+    });
+
+// 下拉/弹出菜单：在按钮点击回调里手动弹出（以按钮矩形为锚点向下展开）。
+let btn = Button::new("菜单").on_click_with_ctx(|ctx| {
+    let r = ctx.current_rect().unwrap_or_default();
+    show_popup_with(r, PopupPlacement::Below, |handle, ctx| {
+        Box::new(Menu::new().item(MenuItem::new("项").close_with(handle)))
+    });
+});
+```
+
+> 设计权衡：纯自绘意味着菜单最大只能延伸到窗口边界（自动翻转避让），若要求菜单溢出到窗口之外，需要额外用一个无边框的"popup 窗口"（winit 第二个 `Window`，复用已完成的 per-window 隔离能力）——这属于后续增强，不在当前 `Popup` 层之内。
+
 ### 2.9 Reconciler 与 key
 
 每次重建产生新 `ViewNode` 树，reconciler 与旧树 diff：
@@ -256,7 +291,8 @@ Column::new().child(item_widget.key(format!("row-{i}")))
 | 窗口配置 | `WindowConfig::new().title().size().min_size().max_size().resizable().decorations().icon().always_on_top().position()` |
 | 构建上下文 | `BuildContext`（配合 `use lieui::widget::Widget` 实现自定义组件） |
 | 状态 | `State::new/get/set/update/clone`、`request_rebuild()`、`request_redraw()`、`request_window_close()` |
-| 图层 | `show_overlay(builder)`、`show_modal(builder)`、`hide_overlay()`、`hide_modal()`、`show_layer(LayerKind, LayerSpec, builder)`、`LayerSpec` |
+| 图层 | `show_overlay` / `show_modal` / `show_popup` / `show_popup_with` / `hide_popup` / `hide_overlay` / `hide_modal` / `show_layer(LayerKind, LayerSpec, builder)`、`PopupPlacement`、`PopupHandle`、`LayerSpec` |
+| 菜单 | `Menu`、`MenuItem`、`MenuSeparator`、`Submenu`、`ContextMenu`（见 §2.8.1） |
 | 原语 | `Text::new(s)`、`Image::from_rgba(data,w,h)`、`Container::new()`、`Column::new()`、`Row::new()` |
 | 组件 | `Button`、`Checkbox`、`Radio`、`Switch`、`Slider`、`Progress`、`Tab`、`Card`、`Divider`、`ListView`、`VirtualList`、`ScrollView`、`ScrollBar`、`Draggable`、`Tooltip`、`Icon`、`IconButton`、`Input` |
 | 通用方法 | `.child(v)`、`.expand(bool)`、`.spacing(f32)`、`.justify_content(FlexAlign)`、`.align_items(FlexAlign)`、`.center()`、`.background(Color)`、`.padding(f32)`、`.border_radius(f32)`、`.width(f32)`、`.height(f32)`、`.on_click(fn)`、`.on_click_with_ctx(fn)`、`.on_drag_start(fn)`、`.on_drag_move(fn)`、`.on_drag_end(fn)`、`.font_size(f32)`、`.color(Color)`、`.key(s)` |
@@ -341,6 +377,7 @@ LieUI 采用「声明式 Widget 树 → 纯数据 ViewNode → 布局 → 渲染
 - **每窗口完全隔离**：`Application` 持有 `HashMap<WindowId, WindowContext>`；每个 `WindowContext` 拥有独立的 `Runtime`、`VelloRenderer`、`StateMap` 与重建/重绘/关闭标志。所有 `request_*` 通过「当前窗口」路由（`state::set_current_window` 在进入 `window_event` 时设置），多窗口信号互不吞噬；`StateMap` 不再跨窗口共享，状态不串味。
 - **单线程 + thread-local 路由**：winit 事件循环单线程驱动，重建/重绘/关闭标志以 `thread_local CURRENT_WID` + `HashMap<WindowId, Flags>` 实现 per-window 路由；在窗口上下文外调用（后台 controller、动画 tick）时广播到所有窗口，保证单窗口语义不变。
 - **每窗口图层栈（Base/Overlay/Modal/…）**：`LayerStack` 是 `Runtime` 的独立字段，浮层命令经全局 `show_*` 入口压入 per-window 待处理队列（`PENDING_LAYER` thread-local），由 `request_rebuild` 路由到当前窗口，下一帧重建时合并进该窗口的 `LayerStack`——多窗口浮层互不串扰。`EventManager` 命中测试按 `Modal → Overlay → Base` 优先级返回最顶层节点，Modal 自动拦截其范围内点击。
+- **纯自绘菜单 + 防溢出翻转**：菜单（含右键菜单/下拉菜单/子菜单）全部由普通 `Widget` 构成，弹出时落在 `Popup` 层并启用 `LayerOptions::flip`——`apply_anchor` 在定位超出视口时自动翻转到对侧，保证菜单始终完整落在窗口内；不引入系统原生菜单控件以保持视觉统一与跨平台简单性。
 - **裁剪**：`vello_cpu` 的 `RenderContext::push_clip_path` / `pop_clip_path` 非隔离路径裁剪实现 Group 级精确裁剪；Image 因走自定义 blit 而单独做矩形+圆角相交裁剪。
 - **Inspector（feature `inspector`）**：每个窗口独立起一个非阻塞轮询的 WebSocket/CPD server，把 `Widget` 树（含 `inspect_name` 真实类型名）推给 Chrome DevTools；server 线程用 `set_nonblocking` + 短轮询，Drop 时仅置 stop 标志后 join，避免阻塞主线程退出。
 
