@@ -1,11 +1,18 @@
+use crate::event::EventContext;
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
+use crate::layout_methods;
 use crate::theme;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{FontWeight, PaintStyle, TextStyle};
+use crate::widget::icon::{Icon, IconName};
+use crate::widget::tooltip::Tooltip;
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
+
+/// hover 回调类型。
+type HoverCallback = Rc<dyn Fn(&mut EventContext)>;
 
 /// PatternFly Button 变体（variant）。决定默认配色与边框。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,17 +126,35 @@ fn button_size_metrics(t: theme::Theme, s: ButtonSize) -> (f32, f32, f64) {
     }
 }
 
-#[derive(Clone)]
+/// 按钮内部内容。Button 是通用容器，可承载文本、图标或任意 widget。
+pub enum ButtonContent {
+    /// 文本内容（`Button::new` / `Button::with_text`）。
+    Text {
+        label: String,
+        /// 文本样式自定义（字号、颜色、字重等）。未设置的属性从主题默认值回退。
+        style: Option<TextStyle>,
+        /// 是否允许文本换行。默认 false。
+        wrap: bool,
+    },
+    /// 图标内容（`Button::icon`）。
+    Icon {
+        name: IconName,
+        size: f64,
+        color: Option<Color>,
+        hover_color: Option<Color>,
+        pressed_color: Option<Color>,
+    },
+    /// 任意 widget 内容（`Button::child`）。视觉由 widget 自身控制。
+    Widget(Box<dyn Widget>),
+}
+
 pub struct Button {
-    label: String,
+    content: ButtonContent,
     listeners: Vec<Listener>,
-    width: Option<f32>,
-    height: Option<f32>,
-    min_width: Option<f32>,
-    /// 文本样式自定义（字号、颜色、字重等）。未设置的属性从主题默认值回退。
-    text_style: Option<TextStyle>,
-    /// 是否允许文本换行。默认 false（按钮文本保持单行）。
-    wrap: bool,
+    /// 通用布局属性（width/height/min_width/flex_shrink 等）。
+    layout: crate::widget::layout::LayoutAttr,
+    /// 固定边长（图标按钮等正方形外壳用）。设置后忽略 size 的 padding。
+    fixed_size: Option<f32>,
     /// 视觉样式自定义（背景色、悬停色、按下色、圆角、边框等）。
     paint: Option<PaintStyle>,
     padding_h: Option<f32>,
@@ -138,28 +163,158 @@ pub struct Button {
     variant: ButtonVariant,
     /// PatternFly 尺寸，决定 padding 与字号。
     size: ButtonSize,
+    /// 工具提示文本（鼠标悬停时显示）。
+    tooltip: Option<String>,
+    /// 鼠标进入回调。
+    on_enter: Option<HoverCallback>,
+    /// 鼠标离开回调。
+    on_leave: Option<HoverCallback>,
+    /// 是否禁用。禁用时不响应点击/悬停，视觉灰显。
+    disabled: bool,
 }
 
 impl Button {
+    /// 创建一个文本按钮。
     pub fn new(l: impl Into<String>) -> Self {
         Self {
-            label: l.into(),
+            content: ButtonContent::Text {
+                label: l.into(),
+                style: None,
+                wrap: false,
+            },
             listeners: Vec::new(),
-            width: None,
-            height: None,
-            min_width: None,
-            text_style: None,
-            wrap: false,
+            // Button 默认不被 flex 压缩（flex_shrink 0）。
+            layout: crate::widget::layout::LayoutAttr::new().flex_shrink(0.0),
+            fixed_size: None,
             paint: None,
             padding_h: None,
             padding_v: None,
             variant: ButtonVariant::Primary,
             size: ButtonSize::Md,
+            tooltip: None,
+            on_enter: None,
+            on_leave: None,
+            disabled: false,
         }
+    }
+
+    /// 创建一个图标按钮。图标默认随变体着色，hover 时变品牌色（Primary 为白色）。
+    pub fn icon(name: IconName, size: f64) -> Self {
+        Self {
+            content: ButtonContent::Icon {
+                name,
+                size,
+                color: None,
+                hover_color: None,
+                pressed_color: None,
+            },
+            listeners: Vec::new(),
+            layout: crate::widget::layout::LayoutAttr::new().flex_shrink(0.0),
+            fixed_size: None,
+            paint: None,
+            padding_h: None,
+            padding_v: None,
+            variant: ButtonVariant::Plain,
+            size: ButtonSize::Md,
+            tooltip: None,
+            on_enter: None,
+            on_leave: None,
+            disabled: false,
+        }
+    }
+
+    /// 创建一个内容为任意 widget 的按钮。
+    pub fn child<W: Widget + 'static>(w: W) -> Self {
+        Self {
+            content: ButtonContent::Widget(Box::new(w)),
+            listeners: Vec::new(),
+            layout: crate::widget::layout::LayoutAttr::new().flex_shrink(0.0),
+            fixed_size: None,
+            paint: None,
+            padding_h: None,
+            padding_v: None,
+            variant: ButtonVariant::Plain,
+            size: ButtonSize::Md,
+            tooltip: None,
+            on_enter: None,
+            on_leave: None,
+            disabled: false,
+        }
+    }
+
+    /// 设置固定边长（正方形外壳）。主要用于图标按钮；设置后忽略 size 的 padding。
+    pub fn fixed_size(mut self, v: f32) -> Self {
+        self.fixed_size = Some(v);
+        self
+    }
+
+    layout_methods!(for Button);
+
+    /// 仅当内容是文本时设置文本样式。非文本内容时忽略。
+    pub fn set_text_style(&mut self, s: TextStyle) {
+        if let ButtonContent::Text { style, .. } = &mut self.content {
+            *style = Some(s);
+        }
+    }
+
+    /// 图标按钮：显式指定图标颜色（覆盖变体默认）。
+    pub fn icon_color(mut self, c: Color) -> Self {
+        if let ButtonContent::Icon { color, .. } = &mut self.content {
+            *color = Some(c);
+        }
+        self
+    }
+
+    /// 图标按钮：显式指定 hover 时图标颜色。
+    pub fn icon_hover_color(mut self, c: Color) -> Self {
+        if let ButtonContent::Icon { hover_color, .. } = &mut self.content {
+            *hover_color = Some(c);
+        }
+        self
+    }
+
+    /// 图标按钮：显式指定按下时图标颜色。
+    pub fn icon_pressed_color(mut self, c: Color) -> Self {
+        if let ButtonContent::Icon { pressed_color, .. } = &mut self.content {
+            *pressed_color = Some(c);
+        }
+        self
+    }
+
+    /// 设置按钮是否禁用。禁用后不响应点击与悬停，视觉灰显。
+    pub fn disabled(mut self, v: bool) -> Self {
+        self.disabled = v;
+        self
     }
 
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
         self.listeners.push(Listener::on_click(Rc::new(f)));
+        self
+    }
+
+    /// 带上下文参数的点击回调。
+    pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
+        self
+    }
+
+    /// 图标按钮：设置图标字号（像素）。仅对图标内容生效。
+    pub fn icon_size(mut self, v: f64) -> Self {
+        if let ButtonContent::Icon { size, .. } = &mut self.content {
+            *size = v;
+        }
+        self
+    }
+
+    /// 鼠标进入回调（指针移入按钮区域时触发）。
+    pub fn on_mouse_enter<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.on_enter = Some(Rc::new(f));
+        self
+    }
+
+    /// 鼠标离开回调（指针移出按钮区域时触发）。
+    pub fn on_mouse_leave<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.on_leave = Some(Rc::new(f));
         self
     }
 
@@ -175,55 +330,42 @@ impl Button {
         self
     }
 
-    /// 固定宽度
-    pub fn width(mut self, v: f32) -> Self {
-        self.width = Some(v);
-        self
-    }
-
-    /// 固定高度
-    pub fn height(mut self, v: f32) -> Self {
-        self.height = Some(v);
-        self
-    }
-
-    /// 最小宽度（不会被 flex 压缩到低于此值）
-    pub fn min_width(mut self, v: f32) -> Self {
-        self.min_width = Some(v);
-        self
-    }
-
     /// 完整指定文本样式。会覆盖通过 `.font_size()` / `.color()` 等快捷方式设置的属性。
+    /// 仅对文本内容生效。
     pub fn text_style(mut self, s: TextStyle) -> Self {
-        self.text_style = Some(s);
+        self.set_text_style(s);
         self
     }
 
-    /// 文本字号
+    /// 文本字号。仅对文本内容生效。
     pub fn font_size(mut self, v: f64) -> Self {
-        self.text_style
-            .get_or_insert_with(TextStyle::default)
-            .font_size = v;
+        if let ButtonContent::Text { style, .. } = &mut self.content {
+            style.get_or_insert_with(TextStyle::default).font_size = v;
+        }
         self
     }
 
-    /// 文本颜色
+    /// 文本颜色。仅对文本内容生效。
     pub fn color(mut self, c: Color) -> Self {
-        self.text_style.get_or_insert_with(TextStyle::default).color = c;
+        if let ButtonContent::Text { style, .. } = &mut self.content {
+            style.get_or_insert_with(TextStyle::default).color = c;
+        }
         self
     }
 
-    /// 是否允许文本换行。默认 false（按钮文本保持单行）。
+    /// 是否允许文本换行。默认 false（按钮文本保持单行）。仅对文本内容生效。
     pub fn wrap(mut self, v: bool) -> Self {
-        self.wrap = v;
+        if let ButtonContent::Text { wrap, .. } = &mut self.content {
+            *wrap = v;
+        }
         self
     }
 
-    /// 字重
+    /// 字重。仅对文本内容生效。
     pub fn font_weight(mut self, w: impl Into<FontWeight>) -> Self {
-        self.text_style
-            .get_or_insert_with(TextStyle::default)
-            .font_weight = w.into();
+        if let ButtonContent::Text { style, .. } = &mut self.content {
+            style.get_or_insert_with(TextStyle::default).font_weight = w.into();
+        }
         self
     }
 
@@ -292,54 +434,43 @@ impl Button {
         self.padding_v = Some(v);
         self
     }
+
+    /// 设置工具提示文本（鼠标悬停时显示）。
+    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+}
+
+/// 内部包装：将构建好的 Button ViewNode 数据封装为 Widget，供 Tooltip 包裹。
+struct ButtonNode {
+    layout: FlexStyle,
+    paint: PaintStyle,
+    children: Vec<ViewNode>,
+    listeners: Vec<Listener>,
+}
+
+impl Widget for ButtonNode {
+    fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
+        ViewNode::Div {
+            layout: self.layout.clone(),
+            paint: self.paint.clone(),
+            key: None,
+            children: self.children.clone(),
+            listeners: self.listeners.clone(),
+        }
+    }
 }
 
 impl Widget for Button {
-    fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
         let t = theme::current();
         let (base_paint, base_text) = resolve_variant(t, self.variant);
         let (def_pv, def_ph, def_font) = button_size_metrics(t, self.size);
 
-        // ── 文本样式：变体打底 + 用户自定义覆盖 ──
-        let label_style = {
-            let mut s = TextStyle {
-                font_size: def_font,
-                color: base_text,
-                ..TextStyle::default()
-            };
-            if let Some(custom) = &self.text_style {
-                if custom.font_size != TextStyle::default().font_size {
-                    s.font_size = custom.font_size;
-                }
-                if custom.color != TextStyle::default().color {
-                    s.color = custom.color;
-                }
-                if custom.font_family != TextStyle::default().font_family {
-                    s.font_family = custom.font_family.clone();
-                }
-                if custom.font_weight != TextStyle::default().font_weight {
-                    s.font_weight = custom.font_weight.clone();
-                }
-                if custom.line_height != TextStyle::default().line_height {
-                    s.line_height = custom.line_height;
-                }
-                if custom.max_width != TextStyle::default().max_width {
-                    s.max_width = custom.max_width;
-                }
-                if custom.text_align != TextStyle::default().text_align {
-                    s.text_align = custom.text_align;
-                }
-            }
-            s.wrap = self.wrap;
-            s
-        };
-        let label_node = ViewNode::Text {
-            content: self.label.clone(),
-            style: label_style,
-            layout: FlexStyle::default(),
-            key: None,
-            listeners: vec![],
-        };
+        // ── 生成内容节点（文本 / 图标 / 任意 widget）──
+        let content_node = self.build_content(ctx, base_text, def_font, t);
+
         let content = ViewNode::Div {
             layout: FlexStyle::row()
                 .justify_content(FlexAlign::Center)
@@ -347,7 +478,7 @@ impl Widget for Button {
                 .flex_grow(1.0),
             paint: PaintStyle::default(),
             key: None,
-            children: vec![label_node],
+            children: vec![content_node],
             listeners: vec![],
         };
 
@@ -355,24 +486,27 @@ impl Widget for Button {
         let mut layout = FlexStyle::block();
         let ph = self.padding_h.unwrap_or(def_ph);
         let pv = self.padding_v.unwrap_or(def_pv);
-        layout = layout
-            .padding_left(ph)
-            .padding_right(ph)
-            .padding_top(pv)
-            .padding_bottom(pv);
-        if let Some(w) = self.width {
-            layout = layout.width(w);
+        if let Some(px) = self.fixed_size {
+            // 固定边长：忽略 padding，正方形外壳。
+            layout = layout.width(px).height(px);
+        } else {
+            layout = layout
+                .padding_left(ph)
+                .padding_right(ph)
+                .padding_top(pv)
+                .padding_bottom(pv);
         }
-        if let Some(h) = self.height {
-            layout = layout.height(h);
-        }
-        if let Some(mw) = self.min_width {
-            layout = layout.min_width(mw);
-        }
+        // 应用通用布局属性（width/height/min_width/flex_shrink/margin/align 等）。
+        layout = self.layout.apply(layout);
 
         // ── 视觉样式：变体打底 + 用户自定义覆盖 ──
         let mut paint = base_paint;
-        if let Some(custom) = &self.paint {
+        if self.disabled {
+            // 禁用：背景统一为禁用灰，忽略 hover/pressed，且不挂监听器。
+            paint = PaintStyle::new()
+                .background(t.background.disabled_default)
+                .radius(t.radius.small);
+        } else if let Some(custom) = &self.paint {
             if custom.background_color.is_some() {
                 paint.background_color = custom.background_color;
             }
@@ -395,12 +529,134 @@ impl Widget for Button {
             paint.clip_content = custom.clip_content;
         }
 
-        ViewNode::Div {
-            layout,
-            paint,
+        let btn_layout = layout;
+        let btn_paint = paint;
+        let btn_children = vec![content];
+        let btn_listeners = if self.disabled {
+            Vec::new()
+        } else {
+            let mut l = self.listeners.clone();
+            if let Some(cb) = &self.on_enter {
+                l.push(Listener::on_mouse_enter(Rc::clone(cb)));
+            }
+            if let Some(cb) = &self.on_leave {
+                l.push(Listener::on_mouse_leave(Rc::clone(cb)));
+            }
+            l
+        };
+
+        let btn_node = ViewNode::Div {
+            layout: btn_layout.clone(),
+            paint: btn_paint.clone(),
             key: None,
-            children: vec![content],
-            listeners: self.listeners.clone(),
+            children: btn_children.clone(),
+            listeners: btn_listeners.clone(),
+        };
+
+        if let Some(tip) = &self.tooltip {
+            let wrapper = ButtonNode {
+                layout: btn_layout,
+                paint: btn_paint,
+                children: btn_children,
+                listeners: btn_listeners,
+            };
+            return ctx.child(0, &Tooltip::new(Box::new(wrapper), tip.clone()));
+        }
+
+        btn_node
+    }
+}
+
+impl Button {
+    /// 依据内容类型生成对应的内容 ViewNode。
+    fn build_content(
+        &self,
+        ctx: &mut BuildContext,
+        base_text: Color,
+        def_font: f64,
+        t: theme::Theme,
+    ) -> ViewNode {
+        match &self.content {
+            ButtonContent::Text { label, style, wrap } => {
+                let label_style = {
+                    let mut s = TextStyle {
+                        font_size: def_font,
+                        color: if self.disabled {
+                            t.text.subtle_default
+                        } else {
+                            base_text
+                        },
+                        ..TextStyle::default()
+                    };
+                    if let Some(custom) = style {
+                        if custom.font_size != TextStyle::default().font_size {
+                            s.font_size = custom.font_size;
+                        }
+                        if custom.color != TextStyle::default().color {
+                            s.color = custom.color;
+                        }
+                        if custom.font_family != TextStyle::default().font_family {
+                            s.font_family = custom.font_family.clone();
+                        }
+                        if custom.font_weight != TextStyle::default().font_weight {
+                            s.font_weight = custom.font_weight.clone();
+                        }
+                        if custom.line_height != TextStyle::default().line_height {
+                            s.line_height = custom.line_height;
+                        }
+                        if custom.max_width != TextStyle::default().max_width {
+                            s.max_width = custom.max_width;
+                        }
+                        if custom.text_align != TextStyle::default().text_align {
+                            s.text_align = custom.text_align;
+                        }
+                    }
+                    s.wrap = *wrap;
+                    s
+                };
+                ViewNode::Text {
+                    content: label.clone(),
+                    style: label_style,
+                    layout: FlexStyle::default(),
+                    key: None,
+                    listeners: vec![],
+                }
+            }
+            ButtonContent::Icon {
+                name,
+                size,
+                color,
+                hover_color,
+                pressed_color,
+            } => {
+                // 默认图标色随变体；Plain/Outline hover 变品牌色，Primary 保持白色。
+                let is_primary = self.variant == ButtonVariant::Primary;
+                let icon_color = color.unwrap_or(base_text);
+                let icon_hover = hover_color.unwrap_or(if self.disabled {
+                    t.text.subtle_default
+                } else if is_primary {
+                    Color::WHITE
+                } else {
+                    t.background.brand_default
+                });
+                let icon_pressed = pressed_color.unwrap_or(if self.disabled {
+                    t.text.subtle_default
+                } else if is_primary {
+                    Color::WHITE
+                } else {
+                    t.background.brand_clicked
+                });
+                let icon = Icon::new(*name, *size)
+                    .color(if self.disabled {
+                        t.text.subtle_default
+                    } else {
+                        icon_color
+                    })
+                    .hover_color(icon_hover)
+                    .pressed_color(icon_pressed);
+                ctx.child(0, &icon)
+            }
+            ButtonContent::Widget(w) => ctx.child(0, w.as_ref()),
         }
     }
 }

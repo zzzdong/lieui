@@ -5,6 +5,7 @@ use crate::layout::types::{FlexAlign, FlexWrap};
 use crate::theme;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{PaintStyle, TextStyle};
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
@@ -17,8 +18,7 @@ pub struct Checkbox {
     check_paint: Option<PaintStyle>,
     /// 标签文本样式自定义。
     text_style: Option<TextStyle>,
-    /// flex 收缩因子（默认 1.0）。
-    flex_shrink: f32,
+    layout: LayoutAttr,
 }
 
 impl Checkbox {
@@ -29,7 +29,7 @@ impl Checkbox {
             listeners: Vec::new(),
             check_paint: None,
             text_style: None,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new(),
         }
     }
 
@@ -98,7 +98,12 @@ impl Checkbox {
 
     /// 设置 flex 收缩因子（默认 1.0）。
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本复选框的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 }
@@ -184,9 +189,7 @@ impl Widget for Checkbox {
             .align_items(FlexAlign::Center)
             .gap(t.spacer.sm)
             .wrap(FlexWrap::NoWrap);
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
-        }
+        layout = self.layout.apply(layout);
         ViewNode::Div {
             layout,
             paint: PaintStyle::default(),

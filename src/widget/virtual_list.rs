@@ -3,6 +3,7 @@ use crate::state::State;
 use crate::theme::current;
 use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ pub struct VirtualList {
     scroll_state: State<(f32, f32)>,
     item: Arc<dyn Fn(usize) -> Box<dyn Widget>>,
     overscan: usize,
-    flex_shrink: f32,
+    layout: LayoutAttr,
 }
 
 impl VirtualList {
@@ -46,7 +47,7 @@ impl VirtualList {
             scroll_state,
             item: Arc::new(|_| Box::new(Empty)),
             overscan: 3,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new(),
         }
     }
     pub fn item(mut self, f: impl Fn(usize) -> Box<dyn Widget> + 'static) -> Self {
@@ -65,7 +66,12 @@ impl VirtualList {
 
     /// 设置 flex 收缩因子（默认 1.0）。
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本列表的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 }
@@ -132,9 +138,7 @@ impl Widget for VirtualList {
             .overflow_scroll()
             .content_height(total)
             .bind_scroll_state(&self.scroll_state);
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
-        }
+        layout = self.layout.apply(layout);
         ViewNode::Div {
             layout,
             paint: PaintStyle::new()

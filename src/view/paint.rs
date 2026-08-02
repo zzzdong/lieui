@@ -141,6 +141,11 @@ pub enum ImageFit {
 pub struct TextStyle {
     pub font_size: f64,
     pub color: Color,
+    /// 悬停时颜色（None 表示保持 `color`）。
+    /// 用于图标/文本随按钮 hover 状态变色。
+    pub hover_color: Option<Color>,
+    /// 按下时颜色（None 表示保持 `color`）。
+    pub pressed_color: Option<Color>,
     pub font_family: String,
     pub font_weight: FontWeight,
     pub line_height: Option<f64>,
@@ -156,6 +161,8 @@ impl Default for TextStyle {
         Self {
             font_size: 14.0,
             color: Color::BLACK,
+            hover_color: None,
+            pressed_color: None,
             font_family: "sans-serif".to_string(),
             font_weight: FontWeight::Normal,
             line_height: None,
@@ -178,6 +185,16 @@ impl TextStyle {
 
     pub fn color(mut self, c: Color) -> Self {
         self.color = c;
+        self
+    }
+
+    pub fn hover_color(mut self, c: Color) -> Self {
+        self.hover_color = Some(c);
+        self
+    }
+
+    pub fn pressed_color(mut self, c: Color) -> Self {
+        self.pressed_color = Some(c);
         self
     }
 

@@ -6,12 +6,12 @@
 
 use crate::core::ElementId;
 use crate::geometry::Size;
+use crate::layout::LayoutConstraint;
 use crate::layout::box_model::ComputedLayout;
 use crate::layout::flex_node::FlexNode;
 use crate::layout::types::{
     Direction as LayoutDirection, FlexDirection, NodeType as LayoutNodeType, VALUE_UNDEFINED,
 };
-use crate::layout::LayoutConstraint;
 use crate::runtime::element::ElementTree;
 use crate::view::node::{NodeType, ViewNode};
 
@@ -20,21 +20,30 @@ pub struct LayoutContext;
 
 impl LayoutContext {
     /// 直接对 ElementTree 中的指定子树执行 Flexbox 布局，并将全局坐标写回各 ElementEntry。
-    pub fn compute(root_id: ElementId, tree: &ElementTree, viewport: Size) {
+    ///
+    /// `fill_parent` 控制根节点是否被强制撑满父级可用尺寸：
+    /// - `true`（Content 层）：根节点无显式尺寸时填充整个 viewport；
+    /// - `false`（Modal / Popup / Overlay / Tooltip 层）：根节点按内容自然尺寸布局，
+    ///   避免弹层根节点被撑满整个窗口（如 modal 高度占满全屏）。
+    pub fn compute(root_id: ElementId, tree: &ElementTree, viewport: Size, fill_parent: bool) {
+        let (pw, ph) = if fill_parent {
+            (
+                if viewport.width > 0.0 {
+                    viewport.width
+                } else {
+                    VALUE_UNDEFINED
+                },
+                if viewport.height > 0.0 {
+                    viewport.height
+                } else {
+                    VALUE_UNDEFINED
+                },
+            )
+        } else {
+            (VALUE_UNDEFINED, VALUE_UNDEFINED)
+        };
         let mut flex_root = Self::build_flex(root_id, tree);
-        flex_root.layout(
-            if viewport.width > 0.0 {
-                viewport.width
-            } else {
-                VALUE_UNDEFINED
-            },
-            if viewport.height > 0.0 {
-                viewport.height
-            } else {
-                VALUE_UNDEFINED
-            },
-            LayoutDirection::Ltr,
-        );
+        flex_root.layout(pw, ph, LayoutDirection::Ltr);
         Self::write_layout(&flex_root, tree, root_id, 0.0, 0.0);
     }
 

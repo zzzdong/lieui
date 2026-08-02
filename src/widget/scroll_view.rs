@@ -3,6 +3,7 @@ use crate::state::State;
 use crate::theme;
 use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 
 /// 通用滚动容器（ScrollView）。
@@ -36,7 +37,7 @@ use crate::widget::{BuildContext, Widget};
 /// ```
 pub struct ScrollView {
     height: Option<f32>,
-    flex_shrink: f32,
+    layout: LayoutAttr,
     child: Option<Box<dyn Widget>>,
     /// 是否显示引擎层自绘滚动条（默认不显示）。
     show_scrollbar: bool,
@@ -53,7 +54,7 @@ impl ScrollView {
     pub fn new(height: f32) -> Self {
         Self {
             height: Some(height),
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new(),
             child: None,
             content_width: None,
             content_height: None,
@@ -66,7 +67,7 @@ impl ScrollView {
     pub fn expand() -> Self {
         Self {
             height: None,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new(),
             child: None,
             content_width: None,
             content_height: None,
@@ -77,7 +78,13 @@ impl ScrollView {
 
     /// 设置 flex 收缩因子（默认 1.0）。
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+
+    /// 用完整布局属性（builder 式）设置本滚动容器的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 
@@ -134,10 +141,15 @@ impl Widget for ScrollView {
             Some(h) => FlexStyle::block().height(h),
             None => FlexStyle::block()
                 .flex_grow(1.0)
-                .flex_shrink(self.flex_shrink),
+                .flex_shrink(self.layout.flex_shrink.unwrap_or(1.0)),
         }
         .overflow_scroll()
         .scrollbar(self.show_scrollbar);
+
+        // 应用通用布局属性（width/margin/align 等）。flex_shrink 在 expand 模式已设置。
+        if self.height.is_some() {
+            viewport = self.layout.apply(viewport);
+        }
 
         // 引擎层滚动条占 8px 宽度，预留空间避免遮挡内容右侧
         if self.show_scrollbar {

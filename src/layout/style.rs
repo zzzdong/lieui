@@ -416,6 +416,13 @@ impl FlexStyle {
         }
     }
 
+    /// 设置 flex-basis。常用 `flex_basis(0.0)` 让 flex-grow 节点纯粹按可用空间分配尺寸，
+    /// 避免其内容固有尺寸（如图片像素高度）撑大父容器导致布局抖动。
+    pub fn flex_basis(mut self, b: f32) -> Self {
+        self.flex_basis = b;
+        self
+    }
+
     // ---- Overflow ----
 
     pub fn is_overflow_scroll(&self) -> bool {

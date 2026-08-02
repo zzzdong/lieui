@@ -18,6 +18,7 @@ pub struct Radio {
     options: Vec<String>,
     selected_color: Color,
     text_color: Color,
+    on_change: Option<Rc<dyn Fn(usize)>>,
 }
 
 impl Radio {
@@ -27,6 +28,7 @@ impl Radio {
             options: Vec::new(),
             selected_color: current().background.brand_default,
             text_color: current().text.regular_default,
+            on_change: None,
         }
     }
     pub fn option(mut self, label: impl Into<String>) -> Self {
@@ -41,19 +43,29 @@ impl Radio {
         self.text_color = c;
         self
     }
+    /// 选中变化回调（点击选项切换时触发，参数为选中索引）。
+    pub fn on_change<F: Fn(usize) + 'static>(mut self, f: F) -> Self {
+        self.on_change = Some(Rc::new(f));
+        self
+    }
 }
 
 impl Widget for Radio {
     fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
         let selected = *self.value.get();
         let value = self.value.clone();
+        let on_change = self.on_change.clone();
 
         let mut children = Vec::with_capacity(self.options.len());
         for (i, opt) in self.options.iter().enumerate() {
             let is_sel = i == selected;
             let value_i = value.clone();
+            let on_change = on_change.clone();
             let on_click = Rc::new(move || {
                 value_i.set(i);
+                if let Some(cb) = &on_change {
+                    cb(i);
+                }
             });
 
             let dot = ViewNode::Div {
@@ -92,7 +104,7 @@ impl Widget for Radio {
                 layout: row,
                 paint: PaintStyle::new().hover_background(current().background.secondary_default),
                 children: vec![dot, label],
-                listeners: vec![Listener::on_click(on_click)],
+                listeners: vec![Listener::on_click(on_click).builtin()],
                 key: Some(format!("opt-{i}")),
             });
         }

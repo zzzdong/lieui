@@ -24,6 +24,7 @@ pub struct Slider {
     fill_color: Color,
     handle_color: Color,
     track_color: Color,
+    on_change: Option<Rc<dyn Fn(f32)>>,
 }
 
 impl Slider {
@@ -34,6 +35,7 @@ impl Slider {
             fill_color: current().background.brand_default,
             handle_color: Color::WHITE,
             track_color: current().background.secondary_default,
+            on_change: None,
         }
     }
     pub fn track_height(mut self, h: f32) -> Self {
@@ -52,6 +54,11 @@ impl Slider {
         self.track_color = c;
         self
     }
+    /// 值变化回调（拖拽过程中实时触发）。
+    pub fn on_change<F: Fn(f32) + 'static>(mut self, f: F) -> Self {
+        self.on_change = Some(Rc::new(f));
+        self
+    }
 }
 
 impl Widget for Slider {
@@ -66,6 +73,9 @@ impl Widget for Slider {
         let dragging_c = dragging.clone();
         let dragging_m = dragging.clone();
         let value_m = self.value.clone();
+        let on_change = self.on_change.clone();
+        let on_change_down = on_change.clone();
+        let on_change_move = on_change;
 
         let on_down = Rc::new(move |ctx: &mut EventContext| {
             if let Some(Event::MouseDown { x, .. }) = ctx.event() {
@@ -79,6 +89,9 @@ impl Widget for Slider {
                 }
                 let ratio = ((x - rect.x) / w).clamp(0.0, 1.0);
                 value.set(ratio);
+                if let Some(cb) = &on_change_down {
+                    cb(ratio);
+                }
                 dragging_c.set(true);
                 ctx.capture_mouse();
             }
@@ -98,6 +111,9 @@ impl Widget for Slider {
                 }
                 let ratio = ((x - rect.x) / w).clamp(0.0, 1.0);
                 value_m.set(ratio);
+                if let Some(cb) = &on_change_move {
+                    cb(ratio);
+                }
             }
         });
         let on_up = Rc::new(move |_ctx: &mut EventContext| {
@@ -105,9 +121,9 @@ impl Widget for Slider {
         });
 
         let listeners = vec![
-            Listener::on_mouse_down(on_down),
-            Listener::on_mouse_move(on_move),
-            Listener::on_mouse_up(on_up),
+            Listener::on_mouse_down(on_down).builtin(),
+            Listener::on_mouse_move(on_move).builtin(),
+            Listener::on_mouse_up(on_up).builtin(),
         ];
 
         // Row 轨道：在 Column 中可能不被拉伸，显式 align_self(Stretch)

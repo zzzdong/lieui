@@ -5,7 +5,7 @@
 
 use vello_cpu::kurbo::{Affine, BezPath, Circle, Rect, Shape, Stroke as KurboStroke};
 use vello_cpu::peniko::color::AlphaColor;
-use vello_cpu::{Pixmap, RenderContext, Resources};
+use vello_cpu::{CompositeMode, Pixmap, RasterizerSettings, RenderContext, Resources};
 
 use crate::render::renderer::Renderer;
 use crate::render::visual::{LayeredElement, Stroke, VisualElement};
@@ -56,25 +56,52 @@ impl VelloRenderer {
 
 impl Renderer for VelloRenderer {
     fn render(&mut self, elements: &[LayeredElement]) -> Pixmap {
+        let w = self.width;
+        let h = self.height;
+        let mut pix = Pixmap::new(w, h);
+
+        // 背景填充（最低层，之后每层都以 SrcOver 合成到其上）。
         self.ctx
             .set_paint(AlphaColor::from_rgba8(240, 240, 240, 255));
-        self.ctx
-            .fill_rect(&Rect::new(0.0, 0.0, self.width as f64, self.height as f64));
-
-        // 递归绘制非 Image 元素，并收集 Image 及其当前裁剪区域。
-        // Image 在 vello_cpu 渲染完成后通过 pixmap 后处理 blit，因此需要单独记录 clip。
-        let mut images: Vec<(LayeredElement, Option<Rect>)> = Vec::new();
-        for e in elements {
-            self.render_element(e, &mut images, None);
-        }
-
+        self.ctx.fill_rect(&Rect::new(0.0, 0.0, w as f64, h as f64));
         self.ctx.flush();
-        let mut pix = Pixmap::new(self.width, self.height);
-        self.ctx.render_to_pixmap(&mut self.resources, &mut pix);
+        self.ctx.render(&mut pix, &mut self.resources);
+        // 清空命令列表，避免后续层级重复绘制背景。
+        self.ctx.reset();
 
-        // 后处理：在 pixmap 上直接 blit 图像
-        for (img, clip) in &images {
-            Self::blit_image(&mut pix, img, *clip);
+        // 关键：Image 与矢量元素必须按真实 z 顺序合成。
+        // 若把所有 Image 后处理 blit 到最顶层，会遮挡 Content 之上更高 z 的
+        // Modal / Overlay 等内容（例如 pdfkit 预览图盖住退出确认弹窗）。
+        // 因此按 z 升序分组：每一层先绘制矢量元素，再 blit 该层图像，逐层叠加。
+        let mut sorted: Vec<&LayeredElement> = elements.iter().collect();
+        sorted.sort_by_key(|e| e.z_index());
+
+        // 同 z 层内的 Image 及其裁剪区域。
+        let mut images: Vec<(LayeredElement, Option<Rect>)> = Vec::new();
+        let mut idx = 0;
+        while idx < sorted.len() {
+            let z = sorted[idx].z_index();
+            images.clear();
+            // 收集并绘制当前 z 层级的全部元素（矢量元素直接入 ctx，Image 记录待 blit）。
+            while idx < sorted.len() && sorted[idx].z_index() == z {
+                self.render_element(sorted[idx], &mut images, None);
+                idx += 1;
+            }
+            // 将该层矢量元素以 SrcOver 合成到 pix，再 blit 该层图像。
+            self.ctx.flush();
+            self.ctx.render_with(
+                &mut pix,
+                &mut self.resources,
+                RasterizerSettings {
+                    composite_mode: CompositeMode::SrcOver,
+                    ..Default::default()
+                },
+            );
+            for (img, clip) in &images {
+                Self::blit_image(&mut pix, img, *clip);
+            }
+            // 清空命令列表，下一 z 层只携带自身的绘制命令。
+            self.ctx.reset();
         }
         pix
     }
@@ -117,30 +144,21 @@ impl VelloRenderer {
             }
             _ => {
                 // 视口剔除：元素完全在裁剪区外时不提交绘制。
-                if let Some(clip) = current_clip {
-                    if let Some(bbox) = el.element.bounding_rect() {
-                        if clip.x1 <= bbox.x0
-                            || clip.x0 >= bbox.x1
-                            || clip.y1 <= bbox.y0
-                            || clip.y0 >= bbox.y1
-                        {
-                            if crate::perf::enabled() {
-                                eprintln!(
-                                    "[clip] skip  bbox=({:.1},{:.1})-({:.1},{:.1}) \
+                if let Some(clip) = current_clip
+                    && let Some(bbox) = el.element.bounding_rect()
+                    && (clip.x1 <= bbox.x0
+                        || clip.x0 >= bbox.x1
+                        || clip.y1 <= bbox.y0
+                        || clip.y0 >= bbox.y1)
+                {
+                    if crate::perf::enabled() {
+                        eprintln!(
+                            "[clip] skip  bbox=({:.1},{:.1})-({:.1},{:.1}) \
                                      clip=({:.1},{:.1})-({:.1},{:.1})",
-                                    bbox.x0,
-                                    bbox.y0,
-                                    bbox.x1,
-                                    bbox.y1,
-                                    clip.x0,
-                                    clip.y0,
-                                    clip.x1,
-                                    clip.y1,
-                                );
-                            }
-                            return; // 完全在裁剪区外，跳过
-                        }
+                            bbox.x0, bbox.y0, bbox.x1, bbox.y1, clip.x0, clip.y0, clip.x1, clip.y1,
+                        );
                     }
+                    return; // 完全在裁剪区外，跳过
                 }
                 self.draw(&el.element)
             }
@@ -347,7 +365,7 @@ impl VelloRenderer {
             } => {
                 self.ctx.set_paint(Self::cv(color));
                 self.ctx
-                    .fill_blurred_rounded_rect(rect, *radius as f32, *std_dev as f32);
+                    .fill_blurred_rounded_rect(rect, *radius as f32, *std_dev as f32, false);
             }
             VisualElement::Circle {
                 center,

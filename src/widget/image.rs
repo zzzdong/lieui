@@ -2,8 +2,10 @@
 
 use crate::event::EventContext;
 use crate::layout::style::FlexStyle;
+use crate::layout::types::FlexAlign;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{ImageFit, ImageStyle};
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
@@ -11,7 +13,9 @@ use std::rc::Rc;
 pub struct Image {
     data: std::sync::Arc<Vec<u8>>,
     style: ImageStyle,
-    layout: FlexStyle,
+    layout: LayoutAttr,
+    /// 是否撑满可用空间（等价于 expand(true)）。因涉及 flex_basis/min 等特殊处理，独立存放。
+    expand: bool,
     listeners: Vec<Listener>,
 }
 impl Image {
@@ -23,7 +27,8 @@ impl Image {
                 height: h,
                 ..ImageStyle::default()
             },
-            layout: FlexStyle::default(),
+            layout: LayoutAttr::new(),
+            expand: false,
             listeners: Vec::new(),
         }
     }
@@ -35,7 +40,8 @@ impl Image {
                 height: h,
                 ..ImageStyle::default()
             },
-            layout: FlexStyle::default(),
+            layout: LayoutAttr::new(),
+            expand: false,
             listeners: Vec::new(),
         }
     }
@@ -47,6 +53,12 @@ impl Image {
     }
     pub fn height(mut self, h: f32) -> Self {
         self.layout = self.layout.height(h);
+        self
+    }
+
+    /// 用完整布局属性（builder 式）设置本图片的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 
@@ -79,6 +91,16 @@ impl Image {
         self.style.fit = f;
         self
     }
+    /// 让图片在 flex 容器中撑满可用空间（等价于 expand(true)），
+    /// 配合 `fit(Contain)` 即可实现等比自适应缩放。
+    ///
+    /// 同时把 flex-basis 置为 0、min-width/min-height 置为 0：图片的尺寸完全由
+    /// flex-grow 按可用空间分配，而不受其固有像素尺寸影响，避免图片宽高变化
+    /// （如旋转 PDF 页面）时撑大父容器导致布局抖动。
+    pub fn expand(mut self, v: bool) -> Self {
+        self.expand = v;
+        self
+    }
     pub fn radius(mut self, r: f32) -> Self {
         self.style.border_radius = r;
         self
@@ -94,10 +116,21 @@ impl Image {
 }
 impl Widget for Image {
     fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
+        let mut layout = self.layout.apply(FlexStyle::default());
+        if self.expand {
+            // flex-grow 撑满可用空间；flex_basis 置 0、min 置 0，使图片尺寸完全由
+            // flex-grow 按可用空间分配，不受其固有像素尺寸影响（避免布局抖动）。
+            layout = layout
+                .flex_grow(1.0)
+                .flex_basis(0.0)
+                .align_self(FlexAlign::Stretch)
+                .min_width(0.0)
+                .min_height(0.0);
+        }
         ViewNode::Image {
             data: std::sync::Arc::clone(&self.data),
             style: self.style,
-            layout: self.layout.clone(),
+            layout,
             key: None,
             listeners: self.listeners.clone(),
         }

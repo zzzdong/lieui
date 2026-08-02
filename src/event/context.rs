@@ -6,6 +6,9 @@ use crate::core::ElementId;
 use crate::event::{Event, EventEffects, EventPhase, Propagation};
 use crate::geometry::Rect;
 
+/// 触发 `DragStart` 的默认移动阈值（像素）。
+pub const DEFAULT_DRAG_THRESHOLD: f32 = 3.0;
+
 /// 事件处理上下文
 ///
 /// 在事件冒泡/捕获期间传递给 Element 的事件处理器。
@@ -28,6 +31,8 @@ pub struct EventContext {
     current_rect: Option<Rect>,
     /// 鼠标捕获请求：分发结束后由 EventManager 处理
     capture_request: Option<ElementId>,
+    /// 拖拽请求：(发起节点, 移动阈值)。分发结束后由 EventManager 处理。
+    drag_request: Option<(ElementId, f32)>,
 }
 
 impl EventContext {
@@ -143,5 +148,28 @@ impl EventContext {
     /// 取走捕获请求（EventManager 在分发结束后调用）。
     pub fn take_capture_request(&mut self) -> Option<ElementId> {
         self.capture_request.take()
+    }
+
+    // ---- Drag ----
+
+    /// 请求拖拽跟踪：按下后移动超过 [`DEFAULT_DRAG_THRESHOLD`] 即合成
+    /// `DragStart` / `DragMove` / `DragEnd` 事件，并自动捕获鼠标
+    /// （指针移出当前节点后移动/释放事件仍投递给当前节点）。
+    pub fn begin_drag(&mut self) {
+        if let Some(id) = self.current_id {
+            self.drag_request = Some((id, DEFAULT_DRAG_THRESHOLD));
+        }
+    }
+
+    /// 带自定义移动阈值的拖拽请求（px >= 0）。
+    pub fn begin_drag_with_threshold(&mut self, px: f32) {
+        if let Some(id) = self.current_id {
+            self.drag_request = Some((id, px.max(0.0)));
+        }
+    }
+
+    /// 取走拖拽请求（EventManager 在分发结束后调用）。
+    pub fn take_drag_request(&mut self) -> Option<(ElementId, f32)> {
+        self.drag_request.take()
     }
 }

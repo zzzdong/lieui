@@ -1,6 +1,5 @@
 //! 事件系统与 ViewNode 原语集成测试
 
-use lieui::core::layers::LayerType;
 use lieui::geometry::Size;
 use lieui::prelude::*;
 use lieui::runtime::Runtime;
@@ -24,7 +23,7 @@ fn button_hit_test_returns_clickable() {
 
     // Button 大致位于 (4,4) ~ (80,40) 区域
     // 从根节点向下找到第一个附带点击回调的节点
-    let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
+    let root_id = runtime.layers.content_root_id().unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");
     let listener = runtime.layers.tree.listeners(clickable_id);
     assert!(
@@ -34,10 +33,10 @@ fn button_hit_test_returns_clickable() {
 
     // 触发回调
     for l in &listener {
-        if l.event == lieui::event::EventType::Click {
-            if let Callback::Simple(cb) = &l.callback {
-                cb();
-            }
+        if l.event == lieui::event::EventType::Click
+            && let Callback::Simple(cb) = &l.callback
+        {
+            cb();
         }
     }
     assert!(*clicked.get(), "callback should have been invoked");
@@ -54,7 +53,7 @@ fn button_hover_state_affects_background_render() {
     runtime.submit_view_tree(vt, false);
     let _ = runtime.frame();
 
-    let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
+    let root_id = runtime.layers.content_root_id().unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");
 
     // 未 hover 时按钮有默认背景色
@@ -104,7 +103,7 @@ fn checkbox_hit_test_returns_clickable() {
     runtime.submit_view_tree(vt, false);
     let _ = runtime.frame();
 
-    let root_id = runtime.layers.layer_root(LayerType::Base).unwrap();
+    let root_id = runtime.layers.content_root_id().unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");
     let node = runtime.layers.tree.get_node(clickable_id);
     eprintln!("checkbox clickable node = {:?}", node.type_name());
@@ -112,10 +111,10 @@ fn checkbox_hit_test_returns_clickable() {
     assert!(!listener.is_empty(), "checkbox should have on_click");
 
     for l in &listener {
-        if l.event == lieui::event::EventType::Click {
-            if let Callback::Simple(cb) = &l.callback {
-                cb();
-            }
+        if l.event == lieui::event::EventType::Click
+            && let Callback::Simple(cb) = &l.callback
+        {
+            cb();
         }
     }
     assert!(*checked.get(), "checkbox callback should toggle state");

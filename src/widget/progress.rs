@@ -6,6 +6,7 @@ use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
 use crate::widget::BuildContext;
 use crate::widget::Widget;
+use crate::widget::layout::LayoutAttr;
 
 /// 进度条（确定型，value ∈ [0, 1]）。
 ///
@@ -16,7 +17,7 @@ use crate::widget::Widget;
 #[derive(Clone)]
 pub struct Progress {
     value: f64,
-    height: f32,
+    layout: LayoutAttr,
     track_color: Color,
     fill_color: Color,
 }
@@ -25,7 +26,7 @@ impl Progress {
     pub fn new(value: f64) -> Self {
         Self {
             value: value.clamp(0.0, 1.0),
-            height: 8.0,
+            layout: LayoutAttr::new().height(8.0),
             track_color: current().background.secondary_default,
             fill_color: current().background.brand_default,
         }
@@ -35,7 +36,12 @@ impl Progress {
         self
     }
     pub fn height(mut self, h: f32) -> Self {
-        self.height = h;
+        self.layout = self.layout.height(h);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本进度条的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
     pub fn track_color(mut self, c: Color) -> Self {
@@ -51,7 +57,7 @@ impl Progress {
 impl Widget for Progress {
     fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
         let v = self.value.clamp(0.0, 1.0) as f32;
-        let h = self.height;
+        let h = self.layout.height.unwrap_or(8.0);
         let r = h / 2.0;
 
         let track = FlexStyle::row().align_self(FlexAlign::Stretch).height(h);

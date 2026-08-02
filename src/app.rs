@@ -1,10 +1,9 @@
-//! Application — 基于 winit 的窗口化 GUI 应用
+//! Application — 基于 winit 的多窗口 GUI 应用
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
@@ -12,15 +11,41 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::event::{EventEffects, HitTestResult, MouseButton};
 use crate::geometry::{Point, Size};
-use crate::render::renderer::Renderer as _;
 use crate::render::VelloRenderer;
+use crate::render::renderer::Renderer as _;
 use crate::runtime::Runtime;
 use crate::state;
 use crate::widget::{BuildContext, StateMap, Widget};
+use crate::window::WindowConfig;
+
+// ============================================================================
+// 关闭守卫
+// ============================================================================
+
+/// 关闭守卫的返回结果，只表达"是否允许现在关闭"，不含任何 UI 语义。
+///
+/// 关闭守卫是「关闭前的一个操作钩子」，由 `Application` 在窗口收到关闭请求时调用。
+/// 它**只应做判定**，绝不应该决定 UI：弹窗、保存对话框等交互完全由集成方自己实现。
+///
+/// - 返回 [`CloseAction::Allow`]：窗口立即关闭。
+/// - 返回 [`CloseAction::Cancel`]：本次关闭被拦截。集成方通常会在此自行弹出一个
+///   确认对话框；当用户最终确认退出时，调用守卫回调中提供的「请求真正关闭」函数
+///   （见 [`Application::close_guard`]）即可触发真实关闭，而该调用不会再经过守卫。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseAction {
+    /// 允许立即关闭窗口。
+    Allow,
+    /// 取消本次关闭。窗口保持打开，由集成方自行处理后续交互。
+    Cancel,
+}
+
+// ============================================================================
+// 内部类型
+// ============================================================================
 
 /// 当前正在进行的 ScrollView 拖拽滚动状态。
 #[derive(Debug, Clone, Copy)]
@@ -43,10 +68,26 @@ enum ScrollDragMode {
     ScrollbarThumb,
 }
 
-pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
-    builder: B,
+/// 窗口 widget 构建函数类型。
+type WidgetBuilder = Box<dyn Fn(&mut BuildContext) -> Box<dyn Widget>>;
+
+/// 关闭守卫类型。
+///
+/// 第一参数为当前窗口的 `Runtime`，集成方可用它做任何关闭前操作（如弹窗）。
+/// 第二参数是一个「请求真正关闭」的回调：集成方在自行弹出的确认对话框被用户
+/// 确认后调用它即可关闭窗口；该调用绕过守卫，不会再次触发 `CloseAction::Cancel`。
+type CloseGuard = Box<dyn Fn(&Runtime, &dyn Fn()) -> CloseAction>;
+
+/// 窗口规格：配置 + 构建函数 + 关闭守卫，在 `Application::new` / `.window()` 时收集。
+struct WindowSpec {
+    config: WindowConfig,
+    builder: WidgetBuilder,
+    close_guard: Option<CloseGuard>,
+}
+
+/// 每个窗口的运行时上下文。
+struct WindowContext {
     runtime: Runtime,
-    state: Rc<RefCell<StateMap>>,
     renderer: VelloRenderer,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -57,21 +98,17 @@ pub struct Application<B: Fn(&mut BuildContext) -> Box<dyn Widget>> {
     /// 上一次设置给窗口的 IME 状态，用于避免每帧重复调用。
     last_ime_allowed: bool,
     last_ime_cursor: Option<crate::geometry::Rect>,
-    /// 启动时需注册到排版引擎的自定义字体文件。
-    fonts: Vec<PathBuf>,
     /// ScrollView 拖拽滚动状态。按住左键在可滚动容器内拖拽时生效。
     scroll_drag: Option<ScrollDragState>,
+    /// 该窗口的 widget 构建函数。
+    builder: WidgetBuilder,
+    /// 关闭守卫：窗口关闭请求时调用，决定是允许关闭还是由集成方自行处理。
+    close_guard: Option<CloseGuard>,
 }
 
-static WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
-
-fn pack_size(w: u32, h: u32) -> u64 {
-    ((w as u64) << 32) | (h as u64)
-}
-
-fn unpack_size(v: u64) -> (u32, u32) {
-    ((v >> 32) as u32, v as u32)
-}
+// ============================================================================
+// 工具函数
+// ============================================================================
 
 fn map_winit_key(key: &WinitKey) -> crate::event::Key {
     use crate::event::Key;
@@ -117,103 +154,509 @@ pub(crate) fn pack_softbuffer_pixel(p: vello_cpu::color::PremulRgba8) -> u32 {
     (p.b as u32) | ((p.g as u32) << 8) | ((p.r as u32) << 16)
 }
 
-pub fn set_window_size(w: u32, h: u32) {
-    WINDOW_SIZE.store(pack_size(w, h), Ordering::Relaxed);
+// ============================================================================
+// Application
+// ============================================================================
+
+pub struct Application {
+    specs: Vec<WindowSpec>,
+    windows: HashMap<WindowId, WindowContext>,
+    state: Rc<RefCell<StateMap>>,
 }
 
-/// 获取当前窗口大小。如果尚未初始化，返回 Size::zero()。
-pub fn window_size() -> Size {
-    let (w, h) = unpack_size(WINDOW_SIZE.load(Ordering::Relaxed));
-    Size::new(w as f32, h as f32)
-}
-
-impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
-    pub fn new(builder: B, viewport: Size) -> Self {
-        set_window_size(viewport.width as u32, viewport.height as u32);
+impl Application {
+    /// 创建一个单窗口 / 多窗口应用。
+    ///
+    /// 第一个窗口通过 `new` 指定，后续窗口通过 `.window()` 追加。
+    ///
+    /// ```ignore
+    /// Application::new(
+    ///     WindowConfig::new().title("主窗口").size(900, 720),
+    ///     |ctx| Box::new(my_widget()),
+    /// )
+    /// .window(
+    ///     WindowConfig::new().title("工具窗口").size(300, 400),
+    ///     |ctx| Box::new(tools_widget()),
+    /// )
+    /// .run();
+    /// ```
+    pub fn new(
+        config: WindowConfig,
+        builder: impl Fn(&mut BuildContext) -> Box<dyn Widget> + 'static,
+    ) -> Self {
         Self {
-            builder,
-            runtime: Runtime::new(viewport),
+            specs: vec![WindowSpec {
+                config,
+                builder: Box::new(builder),
+                close_guard: None,
+            }],
+            windows: HashMap::new(),
             state: Rc::new(RefCell::new(StateMap::new())),
-            renderer: VelloRenderer::new(viewport.width as u16, viewport.height as u16),
-            window: None,
-            surface: None,
-            window_size: (viewport.width as u32, viewport.height as u32),
-            mouse_pos: Point::zero(),
-            modifiers: winit::keyboard::ModifiersState::empty(),
-            rendered_once: false,
-            last_ime_allowed: false,
-            last_ime_cursor: None,
-            fonts: Vec::new(),
-            scroll_drag: None,
         }
     }
 
-    /// 注册一个自定义字体文件，应用启动（`run`）时加载到排版引擎，
-    /// 之后即可在 `TextStyle::font_family` 中使用该字体的 family 名。
-    pub fn with_font<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
-        self.fonts.push(path.as_ref().to_path_buf());
+    /// 追加一个窗口（多窗口支持）。返回 `self` 以便链式调用。
+    pub fn window(
+        mut self,
+        config: WindowConfig,
+        builder: impl Fn(&mut BuildContext) -> Box<dyn Widget> + 'static,
+    ) -> Self {
+        self.specs.push(WindowSpec {
+            config,
+            builder: Box::new(builder),
+            close_guard: None,
+        });
+        self
+    }
+
+    /// 为最近添加的窗口设置关闭守卫。
+    ///
+    /// 关闭守卫是一个「关闭前的操作钩子」，在窗口收到关闭请求时被调用。它只应做
+    /// *判定*，绝不应该决定 UI——弹窗、保存对话框等交互完全由集成方自己实现。
+    ///
+    /// 守卫回调接收两个参数：
+    /// - `&Runtime`：当前窗口运行时，集成方可用它读取状态、自行 `push` 一个确认
+    ///   对话框（Modal 层）等。
+    /// - `&dyn Fn()`：一个「请求真正关闭」的回调。当集成方自行弹出的对话框被用户
+    ///   确认退出时，调用它即可真正关闭窗口；该调用**绕过守卫**，不会再触发
+    ///   `CloseAction::Cancel`，因此不会造成重复弹窗。
+    ///
+    /// 守卫返回一个 [`CloseAction`]：
+    /// - [`CloseAction::Allow`]：立即关闭窗口（集成方无需做任何事）。
+    /// - [`CloseAction::Cancel`]：本次关闭被拦截，窗口保持打开。集成方通常会在此时
+    ///   自行弹出一个确认对话框，并在用户确认后调用上述「请求真正关闭」回调。
+    ///
+    /// ```ignore
+    /// Application::new(config, builder)
+    ///     .close_guard(|rt, request_close| {
+    ///         if has_unsaved_changes(rt) {
+    ///             // 集成方自己实现弹窗，确认按钮的 on_click 中调用 request_close()
+    ///             show_my_confirm_dialog(rt, request_close);
+    ///             CloseAction::Cancel
+    ///         } else {
+    ///             CloseAction::Allow
+    ///         }
+    ///     })
+    ///     .run();
+    /// ```
+    pub fn close_guard(
+        mut self,
+        guard: impl Fn(&Runtime, &dyn Fn()) -> CloseAction + 'static,
+    ) -> Self {
+        if let Some(spec) = self.specs.last_mut() {
+            spec.close_guard = Some(Box::new(guard));
+        }
         self
     }
 
     pub fn run(mut self) {
-        // 在事件循环启动前把自定义字体注册进 parley，确保首次排版即可用。
-        for f in &self.fonts {
-            let families = crate::text::register_font_file(f);
-            if !families.is_empty() {
-                eprintln!("[lieui] 已注册字体 {:?} -> {:?}", f, families);
-            }
-        }
         let el = EventLoop::new().unwrap();
         el.set_control_flow(ControlFlow::Wait);
         let _ = el.run_app(&mut self);
     }
 
-    // ========== 构建/渲染管线 ==========
+    /// 真正关闭一个窗口（绕过关闭守卫），并清理事件循环状态。
+    fn close_window(&mut self, wid: &WindowId, el: &ActiveEventLoop) {
+        self.windows.remove(wid);
+        // 清理该窗口在 EventManager 中的焦点/捕获状态
+        if self.windows.is_empty() {
+            el.exit();
+        }
+    }
 
-    fn build_and_render(&mut self, viewport_changed: bool, rebuild_requested: bool) {
+    /// 调用关闭守卫，决定是否允许关闭当前窗口。
+    ///
+    /// 返回 `true` 表示允许立即关闭（守卫返回 [`CloseAction::Allow`] 或没有守卫）；
+    /// 返回 `false` 表示本次关闭被守卫拦截，窗口保持打开，由集成方自行处理后续
+    /// 交互（如弹出确认对话框），并在合适时机调用 [`Runtime::request_close`] 真正关闭。
+    ///
+    /// 守卫回调的第二个参数为「请求真正关闭」回调：集成方在自行弹出的确认对话框被
+    /// 用户确认后调用它即可关闭窗口，该调用绕过守卫，不会再次触发拦截。
+    fn handle_close_request(&mut self, wid: &WindowId) -> bool {
+        let ctx = self.windows.get_mut(wid).expect("window exists");
+        // 构造「请求真正关闭」回调： bypass 关闭守卫直接关闭窗口。
+        let request_close = || state::request_window_close();
+        let action = ctx
+            .close_guard
+            .as_ref()
+            .map_or(CloseAction::Allow, |guard| {
+                guard(&ctx.runtime, &request_close)
+            });
+        let allow = matches!(action, CloseAction::Allow);
+        let _ = request_close;
+        // `ctx` 在此函数结束时自动释放借用，调用方即可安全地关闭窗口。
+        allow
+    }
+}
+
+// ============================================================================
+// ApplicationHandler 实现（winit 事件循环驱动）
+// ============================================================================
+
+impl ApplicationHandler for Application {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.windows.is_empty() {
+            let specs: Vec<WindowSpec> = std::mem::take(&mut self.specs);
+            for spec in specs {
+                self.create_window(el, spec);
+            }
+        }
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
+        // 关闭请求单独处理：调用守卫并（在允许时）关闭窗口，均不持有 `ctx` 借用，
+        // 因此不会与下方 `self.windows.get_mut` 的借用冲突。
+        if matches!(event, WindowEvent::CloseRequested) {
+            if self.handle_close_request(&wid) {
+                self.close_window(&wid, el);
+            }
+            return;
+        }
+        let Some(ctx) = self.windows.get_mut(&wid) else {
+            return;
+        };
+        match event {
+            WindowEvent::Resized(s) => {
+                if s.width > 0 && s.height > 0 && (s.width, s.height) != ctx.window_size {
+                    ctx.window_size = (s.width, s.height);
+                    ctx.renderer.resize(s.width as u16, s.height as u16);
+                    if let Some(w) = &ctx.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                ctx.mouse_pos = Point::new(position.x as f32, position.y as f32);
+
+                // ScrollView 拖拽滚动优先：捕获期间不再走普通 hover 路径。
+                if ctx.scroll_drag.is_some() {
+                    ctx.handle_scroll_drag_move(ctx.mouse_pos);
+                    return;
+                }
+
+                let hit = ctx.build_hit_result();
+                let effects = {
+                    let tree = &ctx.runtime.layers.tree;
+                    let mut em = ctx.runtime.layers.event_manager.borrow_mut();
+                    em.handle_mouse_move(ctx.mouse_pos, hit.as_ref(), tree, |id, event, ctx| {
+                        WindowContext::handle_lie_event(tree, id, event, ctx)
+                    })
+                };
+                let needs_redraw = effects.needs_render();
+                WindowContext::apply_event_effects(&mut ctx.runtime, &effects);
+                if needs_redraw && let Some(w) = &ctx.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                if let Some(hit) = ctx.build_hit_result() {
+                    let btn = if button == winit::event::MouseButton::Left {
+                        MouseButton::Left
+                    } else if button == winit::event::MouseButton::Right {
+                        MouseButton::Right
+                    } else {
+                        MouseButton::Middle
+                    };
+                    let effects = {
+                        let tree = &ctx.runtime.layers.tree;
+                        let modifiers = map_winit_modifiers(ctx.modifiers);
+                        let mut em = ctx.runtime.layers.event_manager.borrow_mut();
+                        em.handle_mouse_down(
+                            ctx.mouse_pos,
+                            btn,
+                            modifiers,
+                            &hit,
+                            tree,
+                            |id, event, ctx| WindowContext::handle_lie_event(tree, id, event, ctx),
+                        )
+                    };
+                    WindowContext::apply_event_effects(&mut ctx.runtime, &effects);
+
+                    // 在普通 widget 处理之后尝试启动 ScrollView 拖拽滚动/滚动条交互。
+                    ctx.try_start_scroll_drag(&hit, btn, &effects);
+                }
+
+                if let Some(w) = &ctx.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+                ..
+            } => {
+                let hit = ctx.build_hit_result().or_else(|| {
+                    let cap = ctx.runtime.layers.event_manager.borrow().mouse_capture();
+                    cap.map(|id| HitTestResult {
+                        target: id,
+                        path: vec![id],
+                    })
+                });
+                if let Some(hit) = hit {
+                    let btn = if button == winit::event::MouseButton::Left {
+                        MouseButton::Left
+                    } else {
+                        MouseButton::Right
+                    };
+                    let effects = {
+                        let tree = &ctx.runtime.layers.tree;
+                        let mut em = ctx.runtime.layers.event_manager.borrow_mut();
+                        em.handle_mouse_up(ctx.mouse_pos, btn, &hit, tree, |id, event, ctx| {
+                            WindowContext::handle_lie_event(tree, id, event, ctx)
+                        })
+                    };
+                    WindowContext::apply_event_effects(&mut ctx.runtime, &effects);
+                }
+                if button == winit::event::MouseButton::Left {
+                    ctx.end_scroll_drag();
+                }
+                if let Some(w) = &ctx.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 16.0, y * 16.0),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                };
+                let dy = if cfg!(target_os = "macos") { dy } else { -dy };
+                let hit = ctx.build_hit_result();
+                if let Some(hit) = &hit {
+                    let point = ctx.mouse_pos;
+                    let effects = {
+                        let tree = &ctx.runtime.layers.tree;
+                        let mut em = ctx.runtime.layers.event_manager.borrow_mut();
+                        em.handle_wheel(point, dx, dy, hit, |id, event, ctx| {
+                            WindowContext::handle_lie_event(tree, id, event, ctx)
+                        })
+                    };
+                    WindowContext::apply_event_effects(&mut ctx.runtime, &effects);
+                    ctx.runtime.handle_wheel_scroll(hit, dx, dy);
+                }
+                if let Some(w) = &ctx.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                ctx.modifiers = m.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let key = map_winit_key(&event.logical_key);
+                let modifiers = map_winit_modifiers(ctx.modifiers);
+                let effects = {
+                    let tree = &ctx.runtime.layers.tree;
+                    let mut em = ctx.runtime.layers.event_manager.borrow_mut();
+                    match event.state {
+                        ElementState::Pressed => {
+                            em.handle_key_down(key, modifiers, |id, ev, ctx| {
+                                WindowContext::handle_lie_event(tree, id, ev, ctx)
+                            })
+                        }
+                        ElementState::Released => {
+                            em.handle_key_up(key, modifiers, |id, ev, ctx| {
+                                WindowContext::handle_lie_event(tree, id, ev, ctx)
+                            })
+                        }
+                    }
+                };
+                WindowContext::apply_event_effects(&mut ctx.runtime, &effects);
+                if (effects.needs_render() || effects.needs_rebuild())
+                    && let Some(w) = &ctx.window
+                {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                let effects = {
+                    let tree = &ctx.runtime.layers.tree;
+                    let mut em = ctx.runtime.layers.event_manager.borrow_mut();
+                    match ime {
+                        Ime::Preedit(text, cursor) => {
+                            let (start, end) =
+                                cursor.map_or((None, None), |(s, e)| (Some(s), Some(e)));
+                            em.handle_ime_preedit(text, start, end, |id, ev, ctx| {
+                                WindowContext::handle_lie_event(tree, id, ev, ctx)
+                            })
+                        }
+                        Ime::Commit(text) => em.handle_ime_commit(text, |id, ev, ctx| {
+                            WindowContext::handle_lie_event(tree, id, ev, ctx)
+                        }),
+                        Ime::Disabled => em.handle_ime_disabled(|id, ev, ctx| {
+                            WindowContext::handle_lie_event(tree, id, ev, ctx)
+                        }),
+                        Ime::Enabled => EventEffects::default(),
+                    }
+                };
+                WindowContext::apply_event_effects(&mut ctx.runtime, &effects);
+                if (effects.needs_render() || effects.needs_rebuild())
+                    && let Some(w) = &ctx.window
+                {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let viewport = (
+                    ctx.runtime.viewport.width as u32,
+                    ctx.runtime.viewport.height as u32,
+                );
+                let size_mismatch = ctx.window_size != viewport;
+                let rebuild_requested = state::take_rebuild_requested();
+                if !ctx.rendered_once || ctx.surface.is_none() || rebuild_requested || size_mismatch
+                {
+                    ctx.build_and_render(&self.state, size_mismatch, rebuild_requested);
+                } else {
+                    ctx.render_visuals();
+                }
+            }
+            _ => {}
+        }
+
+        // 集成方可能通过 `state::request_window_close` 请求真正关闭窗口（通常在自行实现的
+        // 确认弹窗被用户确认后）。该标志绕过关闭守卫，此处统一消费并关闭窗口。
+        let _ = ctx;
+        if state::take_window_close_requested() {
+            self.close_window(&wid, el);
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let (fired, next) = crate::animation::tick(Instant::now());
+        if fired {
+            state::request_redraw();
+        }
+        match next {
+            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
+            None => el.set_control_flow(ControlFlow::Wait),
+        }
+        if state::take_redraw_requested() {
+            for ctx in self.windows.values() {
+                if let Some(w) = &ctx.window {
+                    w.request_redraw();
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Application 私有方法
+// ============================================================================
+
+impl Application {
+    /// 创建一个窗口并初始化上下文。
+    fn create_window(&mut self, el: &ActiveEventLoop, spec: WindowSpec) {
+        let (ww, wh) = spec.config.size;
+        let mut wa = Window::default_attributes()
+            .with_title(&spec.config.title)
+            .with_inner_size(LogicalSize::new(ww, wh))
+            .with_resizable(spec.config.resizable)
+            .with_decorations(spec.config.decorations);
+        if let Some((mw, mh)) = spec.config.min_size {
+            wa = wa.with_min_inner_size(LogicalSize::new(mw, mh));
+        }
+        if let Some((mw, mh)) = spec.config.max_size {
+            wa = wa.with_max_inner_size(LogicalSize::new(mw, mh));
+        }
+        if let Some(icon_path) = &spec.config.icon
+            && let Ok(img) = load_icon(icon_path)
+        {
+            wa = wa.with_window_icon(Some(img));
+        }
+        if spec.config.always_on_top {
+            wa = wa.with_window_level(WindowLevel::AlwaysOnTop);
+        }
+        if let Some((x, y)) = spec.config.position {
+            wa = wa.with_position(LogicalPosition::new(x as f64, y as f64));
+        }
+
+        let window = Rc::new(el.create_window(wa).unwrap());
+        let s = window.inner_size();
+        let wid = window.id();
+        let wsize = (s.width, s.height);
+
+        let viewport = Size::new(s.width as f32, s.height as f32);
+        let rt = Runtime::new(viewport);
+
+        let renderer = VelloRenderer::new(s.width as u16, s.height as u16);
+
+        let ctx = WindowContext {
+            runtime: rt,
+            renderer,
+            window: Some(window),
+            surface: None,
+            window_size: wsize,
+            mouse_pos: Point::zero(),
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            rendered_once: false,
+            last_ime_allowed: false,
+            last_ime_cursor: None,
+            scroll_drag: None,
+            builder: spec.builder,
+            close_guard: spec.close_guard,
+        };
+
+        self.windows.insert(wid, ctx);
+    }
+}
+
+// ============================================================================
+// WindowContext 方法
+// ============================================================================
+
+impl WindowContext {
+    fn build_and_render(
+        &mut self,
+        state: &Rc<RefCell<StateMap>>,
+        viewport_changed: bool,
+        rebuild_requested: bool,
+    ) {
         let pw = self.renderer.width();
         let ph = self.renderer.height();
         if pw == 0 || ph == 0 {
             return;
         }
 
-        if viewport_changed {
+        if viewport_changed || !self.rendered_once {
             let (ww, wh) = self.window_size;
             self.runtime.set_viewport(Size::new(ww as f32, wh as f32));
         }
 
-        let span = crate::perf::Span::start("builder");
-        let mut ctx = BuildContext::new(Rc::clone(&self.state));
+        // 构建 UI
+        let mut ctx = crate::widget::BuildContext::new(Rc::clone(state));
         let root_widget = (self.builder)(&mut ctx);
         let view_tree = root_widget.build(&mut ctx);
-        span.finish();
-        let span = crate::perf::Span::start("submit");
-        self.runtime.submit_view_tree(view_tree, rebuild_requested);
-        span.finish();
-        let elements = self.runtime.frame();
 
-        let span = crate::perf::Span::start("raster");
-        let pixmap = self.renderer.render(&elements);
-        span.finish();
-        let span = crate::perf::Span::start("blit");
-        self.blit_to_window(pixmap.data());
-        span.finish();
+        // 提交到 Runtime
+        if !self.runtime.submit_view_tree(view_tree, rebuild_requested) {
+            // 树无变化，跳过渲染
+            return;
+        }
+
+        // 执行 Reconciliation → 布局 → 渲染并取回渲染元素
+        let elements = self.runtime.frame();
+        if elements.is_empty() {
+            return;
+        }
+        let pix = self.renderer.render(&elements);
+        self.blit_to_window(pix.data());
         self.update_ime_state();
         self.rendered_once = true;
     }
 
     /// 应用事件回调产生的副作用：重建 / 重排 / 重绘。
-    /// 修复此前 `EventEffects` 被调用方直接丢弃、导致
-    /// `EventContext::request_rebuild/request_layout/request_render` 成为空操作的问题。
-    fn apply_event_effects(&mut self, effects: EventEffects) {
+    fn apply_event_effects(runtime: &mut Runtime, effects: &EventEffects) {
         if effects.needs_rebuild() {
             state::request_rebuild();
         }
         if effects.needs_layout() {
-            self.runtime.request_layout();
+            runtime.request_layout();
         }
         if effects.needs_render() {
-            self.runtime.request_render();
+            runtime.request_render();
         }
     }
 
@@ -228,7 +671,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
     }
 
     /// 根据当前焦点与布局结果更新 IME 的启用状态及候选窗位置。
-    /// 缓存上一次的值，避免每帧重复调用系统 IME API（Windows 上可能引发卡顿）。
     fn update_ime_state(&mut self) {
         let Some(window) = self.window.as_ref() else {
             return;
@@ -291,7 +733,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         }
         let buf_len = bw * bh;
         let copy_len = buf_len.min(data.len());
-        // 用切片迭代代替逐下标索引，避免每像素边界检查（debug 下差距显著）。
         let dst = &mut buf[..buf_len];
         for (d, s) in dst[..copy_len].iter_mut().zip(&data[..copy_len]) {
             *d = pack_softbuffer_pixel(*s);
@@ -323,36 +764,38 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         true
     }
 
-    fn init_window(&mut self, el: &ActiveEventLoop) {
-        let (ww, wh) = self.window_size;
-        let wa = Window::default_attributes()
-            .with_title("LieUI v2")
-            .with_inner_size(LogicalSize::new(ww as f64, wh as f64));
-        let window = Rc::new(el.create_window(wa).unwrap());
-        let s = window.inner_size();
-        self.window_size = (s.width, s.height);
-        set_window_size(s.width, s.height);
-        self.runtime
-            .set_viewport(Size::new(s.width as f32, s.height as f32));
-        self.renderer.resize(s.width as u16, s.height as u16);
-        self.window = Some(window);
+    // ========== 事件处理 ==========
+
+    fn build_hit_result(&mut self) -> Option<HitTestResult> {
+        let (_kind, target, _handle) = self.runtime.layers.hit_test_top(self.mouse_pos)?;
+        let path = self.runtime.layers.path_to(target);
+        Some(HitTestResult { target, path })
+    }
+
+    fn handle_lie_event(
+        tree: &crate::runtime::element::ElementTree,
+        id: crate::core::ElementId,
+        event: &crate::event::Event,
+        ctx: &mut crate::event::EventContext,
+    ) {
+        ctx.set_event(event.clone());
+        ctx.set_current(id, tree.layout(id).rect());
+        crate::event::dispatch_node_listeners(tree, id, event, ctx);
     }
 
     // ========== ScrollView 拖拽/滚动条辅助 ==========
 
-    /// 在命中路径中向上查找最近的 overflow_scroll 容器。
     fn find_scroll_container(&self, hit: &HitTestResult) -> Option<crate::core::ElementId> {
         for &id in hit.path.iter().rev() {
-            if let Some(node) = self.runtime.layers.tree.get_node_ref(id) {
-                if node.layout().overflow_scroll {
-                    return Some(id);
-                }
+            if let Some(node) = self.runtime.layers.tree.get_node_ref(id)
+                && node.layout().overflow_scroll
+            {
+                return Some(id);
             }
         }
         None
     }
 
-    /// 节点是否注册了 MouseDown 监听器。
     fn has_mouse_down_listener(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
@@ -362,7 +805,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             .any(|l| l.event == crate::event::EventType::MouseDown)
     }
 
-    /// 节点是否注册了 Click 监听器。
     fn has_click_listener(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
@@ -372,7 +814,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             .any(|l| l.event == crate::event::EventType::Click)
     }
 
-    /// 计算垂直滚动条轨道矩形（窗口坐标）。当前引擎只渲染垂直滚动条。
     fn scrollbar_track_rect(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
@@ -397,7 +838,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         ))
     }
 
-    /// 计算垂直滚动条 thumb 的 y 偏移与高度。
     fn scrollbar_thumb_info(
         tree: &crate::runtime::element::ElementTree,
         id: crate::core::ElementId,
@@ -420,7 +860,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         Some((track.y + thumb_offset, thumb_size))
     }
 
-    /// 在鼠标按下时尝试启动 ScrollView 拖拽滚动或滚动条交互。
     fn try_start_scroll_drag(
         &mut self,
         hit: &HitTestResult,
@@ -440,55 +879,50 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         let tree = &self.runtime.layers.tree;
         let point = self.mouse_pos;
 
-        // 优先判断是否在引擎渲染的垂直滚动条上。
-        if let Some(track) = Self::scrollbar_track_rect(tree, container_id) {
-            if track.contains(point) {
-                if let Some((thumb_y, thumb_size)) = Self::scrollbar_thumb_info(tree, container_id)
-                {
-                    let on_thumb = point.y >= thumb_y && point.y < thumb_y + thumb_size;
-                    if on_thumb {
-                        self.scroll_drag = Some(ScrollDragState {
-                            container_id,
-                            mode: ScrollDragMode::ScrollbarThumb,
-                            last_pos: point,
-                            track_length: track.height,
-                            thumb_size,
-                            content_length: tree.content_size(container_id).1,
-                            viewport_length: tree.layout(container_id).height,
-                        });
-                        self.runtime
-                            .layers
-                            .event_manager
-                            .borrow_mut()
-                            .set_mouse_capture(Some(container_id));
-                    } else {
-                        // 点击轨道空白处：按点击比例跳转。
-                        let ratio = ((point.y - track.y) / track.height).clamp(0.0, 1.0);
-                        let viewport_h = tree.layout(container_id).height;
-                        let content_h = tree.content_size(container_id).1;
-                        let max_scroll = (content_h - viewport_h).max(0.0);
-                        let new_y = ratio * max_scroll;
-                        let (ox, _) = tree.scroll_offset(container_id);
-                        self.runtime.scroll_to(container_id, ox, new_y);
-                    }
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-                return;
+        if let Some(track) = Self::scrollbar_track_rect(tree, container_id)
+            && track.contains(point)
+            && let Some((thumb_y, thumb_size)) = Self::scrollbar_thumb_info(tree, container_id)
+        {
+            let on_thumb = point.y >= thumb_y && point.y < thumb_y + thumb_size;
+            if on_thumb {
+                self.scroll_drag = Some(ScrollDragState {
+                    container_id,
+                    mode: ScrollDragMode::ScrollbarThumb,
+                    last_pos: point,
+                    track_length: track.height,
+                    thumb_size,
+                    content_length: tree.content_size(container_id).1,
+                    viewport_length: tree.layout(container_id).height,
+                });
+                self.runtime
+                    .layers
+                    .event_manager
+                    .borrow_mut()
+                    .set_mouse_capture(Some(container_id));
+            } else {
+                let ratio = ((point.y - track.y) / track.height).clamp(0.0, 1.0);
+                let viewport_h = tree.layout(container_id).height;
+                let content_h = tree.content_size(container_id).1;
+                let max_scroll = (content_h - viewport_h).max(0.0);
+                let new_y = ratio * max_scroll;
+                let (ox, _) = tree.scroll_offset(container_id);
+                self.runtime.scroll_to(container_id, ox, new_y);
             }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
         }
 
-        // 内容区拖拽：路径上滚动容器之后的后代节点若注册了 MouseDown 或 Click，
-        // 说明子控件需要接管鼠标（Input 选取、Slider 拖柄、Checkbox/Button 等），
-        // 此时不启动滚动拖拽，避免捕获导致子控件的 Click 事件无法生成。
         let container_idx = hit
             .path
             .iter()
             .position(|&id| id == container_id)
             .unwrap_or(hit.path.len());
         let descendant_interactive = hit.path.iter().skip(container_idx + 1).any(|&id| {
-            Self::has_mouse_down_listener(tree, id) || Self::has_click_listener(tree, id)
+            Self::has_mouse_down_listener(tree, id)
+                || Self::has_click_listener(tree, id)
+                || tree.is_interactive(id)
         });
         if descendant_interactive {
             return;
@@ -513,7 +947,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         }
     }
 
-    /// 处理拖拽滚动中的鼠标移动。
     fn handle_scroll_drag_move(&mut self, point: Point) {
         let Some(mut drag) = self.scroll_drag else {
             return;
@@ -526,7 +959,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         drag.last_pos = point;
         match drag.mode {
             ScrollDragMode::Content => {
-                // 自然滚动：手指/光标向下拖，内容向上滚动。
                 self.runtime
                     .scroll_by(drag.container_id, -delta_x, -delta_y);
             }
@@ -546,7 +978,6 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
         }
     }
 
-    /// 结束拖拽滚动。
     fn end_scroll_drag(&mut self) {
         if self.scroll_drag.is_some() {
             self.scroll_drag = None;
@@ -560,328 +991,22 @@ impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> Application<B> {
             }
         }
     }
-
-    // ========== 事件处理 ==========
-
-    fn build_hit_result(&self) -> Option<HitTestResult> {
-        let (_lt, target) = self.runtime.layers.hit_test_top(self.mouse_pos)?;
-        let path = self.runtime.layers.path_to(target);
-        Some(HitTestResult { target, path })
-    }
-
-    /// 通用事件回调：直接调用节点上附着的 `ViewListener`。
-    ///
-    /// HTML 式事件模型：任何挂有 listener 的节点都参与分发，事件按捕获 → 目标 → 冒泡
-    /// 顺序传播，每层 listener 自行决定是否调用 `ctx.stop_propagation()`。
-    ///
-    /// 阶段语义：
-    /// - 捕获 Capture：只有 `Callback::WithCtx` 触发，使父节点可在到达 target 前拦截。
-    /// - 目标 Target：`Simple` 和 `WithCtx` 都触发。`Simple` 自动 `stop_propagation()`。
-    /// - 冒泡 Bubble：只有 `Callback::Simple` 触发，`WithCtx` 已在捕获阶段处理过。
-    ///
-    /// 只处理关注的事件类型，按 `Listener.event` 类型匹配分派。
-    fn handle_lie_event(
-        tree: &crate::runtime::element::ElementTree,
-        id: crate::core::ElementId,
-        event: &crate::event::Event,
-        ctx: &mut crate::event::EventContext,
-    ) {
-        ctx.set_event(event.clone());
-        // 注入当前节点及其布局矩形，供回调换算局部坐标/请求鼠标捕获。
-        ctx.set_current(id, tree.layout(id).rect());
-
-        // 提取事件类型，非关注的事件跳过。
-        use crate::event::EventType as ET;
-        let event_type: ET = match event {
-            crate::event::Event::Click { .. } => ET::Click,
-            crate::event::Event::MouseDown { .. } => ET::MouseDown,
-            crate::event::Event::MouseUp { .. } => ET::MouseUp,
-            crate::event::Event::MouseMove { .. } => ET::MouseMove,
-            crate::event::Event::MouseWheel { .. } => ET::MouseWheel,
-            crate::event::Event::MouseEnter => ET::MouseEnter,
-            crate::event::Event::MouseLeave => ET::MouseLeave,
-            crate::event::Event::KeyDown { .. } => ET::KeyDown,
-            crate::event::Event::KeyUp { .. } => ET::KeyUp,
-            crate::event::Event::FocusIn => ET::FocusIn,
-            crate::event::Event::FocusOut => ET::FocusOut,
-            crate::event::Event::ImePreedit { .. } => ET::ImePreedit,
-            crate::event::Event::ImeCommit { .. } => ET::ImeCommit,
-            crate::event::Event::ImeDisabled => ET::ImeDisabled,
-        };
-        let Some(node) = tree.get_node_ref(id) else {
-            return;
-        };
-        for listener in node.listeners() {
-            if listener.event != event_type {
-                continue;
-            }
-            match ctx.phase() {
-                crate::event::EventPhase::Capture => {
-                    if let crate::view::node::Callback::WithCtx(cb) = &listener.callback {
-                        cb(ctx);
-                    }
-                }
-                crate::event::EventPhase::Target => match &listener.callback {
-                    crate::view::node::Callback::Simple(cb) => {
-                        cb();
-                        ctx.stop_propagation();
-                    }
-                    crate::view::node::Callback::WithCtx(cb) => {
-                        cb(ctx);
-                    }
-                },
-                crate::event::EventPhase::Bubble => {
-                    if let crate::view::node::Callback::Simple(cb) = &listener.callback {
-                        cb();
-                    }
-                }
-            }
-            if ctx.is_stopped() {
-                break;
-            }
-        }
-    }
 }
 
-impl<B: Fn(&mut BuildContext) -> Box<dyn Widget> + 'static> ApplicationHandler for Application<B> {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_none() {
-            self.init_window(el);
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-        }
-    }
+// ============================================================================
+// 图标加载辅助
+// ============================================================================
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::Resized(s) => {
-                if s.width > 0 && s.height > 0 && (s.width, s.height) != self.window_size {
-                    self.window_size = (s.width, s.height);
-                    set_window_size(s.width, s.height);
-                    self.renderer.resize(s.width as u16, s.height as u16);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_pos = Point::new(position.x as f32, position.y as f32);
-
-                // ScrollView 拖拽滚动优先：捕获期间不再走普通 hover 路径。
-                if self.scroll_drag.is_some() {
-                    self.handle_scroll_drag_move(self.mouse_pos);
-                    return;
-                }
-
-                let hit = self.build_hit_result();
-                let effects = {
-                    let tree = &self.runtime.layers.tree;
-                    let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    em.handle_mouse_move(self.mouse_pos, hit.as_ref(), tree, |id, event, ctx| {
-                        Self::handle_lie_event(tree, id, event, ctx)
-                    })
-                };
-                // 仅当 hover/capture 真正变化时才重绘，避免鼠标在静态 UI 上
-                // 移动也每帧全量重建渲染树（debug 下严重卡顿主因）。
-                let needs_redraw = effects.needs_render();
-                self.apply_event_effects(effects);
-                if needs_redraw {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
-                if let Some(hit) = self.build_hit_result() {
-                    let btn = if button == winit::event::MouseButton::Left {
-                        MouseButton::Left
-                    } else if button == winit::event::MouseButton::Right {
-                        MouseButton::Right
-                    } else {
-                        MouseButton::Middle
-                    };
-                    let effects = {
-                        let tree = &self.runtime.layers.tree;
-                        let modifiers = map_winit_modifiers(self.modifiers);
-                        let mut em = self.runtime.layers.event_manager.borrow_mut();
-                        em.handle_mouse_down(
-                            self.mouse_pos,
-                            btn,
-                            modifiers,
-                            &hit,
-                            tree,
-                            |id, event, ctx| Self::handle_lie_event(tree, id, event, ctx),
-                        )
-                    };
-                    self.apply_event_effects(effects);
-
-                    // 在普通 widget 处理之后尝试启动 ScrollView 拖拽滚动/滚动条交互。
-                    // 若子控件已截断事件或注册了 MouseDown，则让子控件优先处理。
-                    self.try_start_scroll_drag(&hit, btn, &effects);
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button,
-                ..
-            } => {
-                if let Some(hit) = self.build_hit_result() {
-                    let btn = if button == winit::event::MouseButton::Left {
-                        MouseButton::Left
-                    } else {
-                        MouseButton::Right
-                    };
-                    let effects = {
-                        let tree = &self.runtime.layers.tree;
-                        let mut em = self.runtime.layers.event_manager.borrow_mut();
-                        em.handle_mouse_up(self.mouse_pos, btn, &hit, tree, |id, event, ctx| {
-                            Self::handle_lie_event(tree, id, event, ctx)
-                        })
-                    };
-                    self.apply_event_effects(effects);
-                }
-                // 左键释放时结束 ScrollView 拖拽滚动。注意保持捕获直到 handle_mouse_up
-                // 完成，以抑制拖拽期间子控件被误触发的 Click 事件。
-                if button == winit::event::MouseButton::Left {
-                    self.end_scroll_drag();
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                // winit 的 y 方向：macOS 默认自然（手指下移→负）、Windows 默认传统（滚轮下滚→正）。
-                // 在非 macOS 上反转 dy 以统一为自然滚动：手指/滚轮方向 = 内容移动方向。
-                let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 16.0, y * 16.0),
-                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
-                };
-                // 非 macOS 反转 dy，统一为自然滚动（macOS 的自然方向由系统 / winit 处理）
-                let dy = if cfg!(target_os = "macos") { dy } else { -dy };
-                let hit = self.build_hit_result();
-                if let Some(hit) = &hit {
-                    let point = self.mouse_pos;
-                    let effects = {
-                        let tree = &self.runtime.layers.tree;
-                        let mut em = self.runtime.layers.event_manager.borrow_mut();
-                        em.handle_wheel(point, dx, dy, hit, |id, event, ctx| {
-                            Self::handle_lie_event(tree, id, event, ctx)
-                        })
-                    };
-                    self.apply_event_effects(effects);
-                    // 引擎层滚动：命中目标向上最近的 overflow_scroll 容器处理滚轮。
-                    self.runtime.handle_wheel_scroll(hit, dx, dy);
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            WindowEvent::ModifiersChanged(m) => {
-                self.modifiers = m.state();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let key = map_winit_key(&event.logical_key);
-                let modifiers = map_winit_modifiers(self.modifiers);
-                let effects = {
-                    let tree = &self.runtime.layers.tree;
-                    let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    match event.state {
-                        ElementState::Pressed => {
-                            em.handle_key_down(key, modifiers, |id, ev, ctx| {
-                                Self::handle_lie_event(tree, id, ev, ctx)
-                            })
-                        }
-                        ElementState::Released => {
-                            em.handle_key_up(key, modifiers, |id, ev, ctx| {
-                                Self::handle_lie_event(tree, id, ev, ctx)
-                            })
-                        }
-                    }
-                };
-                self.apply_event_effects(effects);
-                if effects.needs_render() || effects.needs_rebuild() {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::Ime(ime) => {
-                let effects = {
-                    let tree = &self.runtime.layers.tree;
-                    let mut em = self.runtime.layers.event_manager.borrow_mut();
-                    match ime {
-                        Ime::Preedit(text, cursor) => {
-                            let (start, end) =
-                                cursor.map_or((None, None), |(s, e)| (Some(s), Some(e)));
-                            em.handle_ime_preedit(text, start, end, |id, ev, ctx| {
-                                Self::handle_lie_event(tree, id, ev, ctx)
-                            })
-                        }
-                        Ime::Commit(text) => em.handle_ime_commit(text, |id, ev, ctx| {
-                            Self::handle_lie_event(tree, id, ev, ctx)
-                        }),
-                        Ime::Disabled => em.handle_ime_disabled(|id, ev, ctx| {
-                            Self::handle_lie_event(tree, id, ev, ctx)
-                        }),
-                        Ime::Enabled => EventEffects::default(),
-                    }
-                };
-                self.apply_event_effects(effects);
-                if effects.needs_render() || effects.needs_rebuild() {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                let viewport = (
-                    self.runtime.viewport.width as u32,
-                    self.runtime.viewport.height as u32,
-                );
-                let size_mismatch = self.window_size != viewport;
-                let rebuild_requested = state::take_rebuild_requested();
-                if !self.rendered_once
-                    || self.surface.is_none()
-                    || rebuild_requested
-                    || size_mismatch
-                {
-                    self.build_and_render(size_mismatch, rebuild_requested);
-                } else {
-                    self.render_visuals();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        // 推进到期动画；活跃时让循环休眠到下一次触发（避免忙等）。
-        let (fired, next) = crate::animation::tick(Instant::now());
-        if fired {
-            state::request_redraw();
-        }
-        match next {
-            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
-            None => el.set_control_flow(ControlFlow::Wait),
-        }
-        // 允许应用代码在事件循环空闲时通过 `state::request_redraw()` 触发重绘
-        // （动画、计时器、外部线程修改等场景）
-        if state::take_redraw_requested() {
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-        }
-    }
+fn load_icon(path: &std::path::Path) -> Result<winit::window::Icon, Box<dyn std::error::Error>> {
+    let img = image::open(path)?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(winit::window::Icon::from_rgba(rgba.into_raw(), w, h)?)
 }
+
+// ============================================================================
+// 测试
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -890,7 +1015,6 @@ mod tests {
 
     #[test]
     fn pack_softbuffer_obeys_0rgb_format() {
-        // softbuffer 0.4 要求 u32 像素格式为 0x00RRGGBB（小端内存中按 B、G、R、0 排列）
         let red = PremulRgba8::from_u8_array([255, 0, 0, 255]);
         assert_eq!(pack_softbuffer_pixel(red), 0x00FF0000);
 
@@ -903,7 +1027,6 @@ mod tests {
         let white = PremulRgba8::from_u8_array([255, 255, 255, 255]);
         assert_eq!(pack_softbuffer_pixel(white), 0x00FFFFFF);
 
-        // 最高 8 位必须为 0，避免把 alpha 错误地写入颜色通道
         let semi = PremulRgba8::from_u8_array([128, 64, 32, 128]);
         assert_eq!(pack_softbuffer_pixel(semi), 0x00804020);
     }

@@ -19,12 +19,13 @@ use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
 use crate::text::{
-    align_to_utf8_boundary, apply_plain_editor_style, create_plain_editor, editor_cursor_geometry,
-    with_text_contexts, PlainTextEditor, TextEngine,
+    PlainTextEditor, TextEngine, align_to_utf8_boundary, apply_plain_editor_style,
+    create_plain_editor, editor_cursor_geometry, with_text_contexts,
 };
 use crate::theme;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{PaintStyle, TextStyle};
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Stateful, Widget};
 
 /// Input 组件的运行时状态。
@@ -85,8 +86,7 @@ pub enum InputSize {
 
 pub struct Input {
     placeholder: String,
-    width: f32,
-    height: Option<f32>,
+    layout: LayoutAttr,
     text_style: TextStyle,
     paint: PaintStyle,
     padding_h: Option<f32>,
@@ -96,6 +96,10 @@ pub struct Input {
     multiline: bool,
     on_change: Option<Rc<dyn Fn(String)>>,
     on_submit: Option<Rc<dyn Fn(String)>>,
+    /// 聚焦回调。
+    on_focus: Option<Rc<dyn Fn()>>,
+    /// 失焦回调。
+    on_blur: Option<Rc<dyn Fn()>>,
     listeners: Vec<Listener>,
 }
 
@@ -104,8 +108,7 @@ impl Input {
         let t = theme::current();
         Self {
             placeholder: placeholder.into(),
-            width: 200.0,
-            height: None,
+            layout: LayoutAttr::new().width(200.0),
             text_style: TextStyle {
                 font_size: 0.0,
                 color: t.text.regular_default,
@@ -124,6 +127,8 @@ impl Input {
             multiline: false,
             on_change: None,
             on_submit: None,
+            on_focus: None,
+            on_blur: None,
             listeners: Vec::new(),
         }
     }
@@ -134,12 +139,18 @@ impl Input {
     }
 
     pub fn width(mut self, w: f32) -> Self {
-        self.width = w.max(0.0);
+        self.layout = self.layout.width(w.max(0.0));
         self
     }
 
     pub fn height(mut self, h: f32) -> Self {
-        self.height = Some(h.max(0.0));
+        self.layout = self.layout.height(h.max(0.0));
+        self
+    }
+
+    /// 用完整布局属性（builder 式）设置本输入框的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 
@@ -211,6 +222,18 @@ impl Input {
         self
     }
 
+    /// 聚焦回调（输入框获得焦点时触发）。
+    pub fn on_focus<F: Fn() + 'static>(mut self, f: F) -> Self {
+        self.on_focus = Some(Rc::new(f));
+        self
+    }
+
+    /// 失焦回调（输入框失去焦点时触发）。
+    pub fn on_blur<F: Fn() + 'static>(mut self, f: F) -> Self {
+        self.on_blur = Some(Rc::new(f));
+        self
+    }
+
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
         self.listeners.push(Listener::on_click(Rc::new(f)));
         self
@@ -220,7 +243,12 @@ impl Input {
         self
     }
 
-    fn focus_listener(state: &Stateful<InputState>, focused: bool) -> Listener {
+    fn focus_listener(
+        state: &Stateful<InputState>,
+        focused: bool,
+        on_focus: Option<Rc<dyn Fn()>>,
+        on_blur: Option<Rc<dyn Fn()>>,
+    ) -> Listener {
         let state = state.clone();
         let event = if focused {
             crate::event::EventType::FocusIn
@@ -229,6 +257,7 @@ impl Input {
         };
         Listener {
             event,
+            kind: crate::view::node::ListenerKind::BuiltIn,
             callback: crate::view::node::Callback::WithCtx(Rc::new(
                 move |ctx: &mut EventContext| {
                     state.update(|s| {
@@ -242,10 +271,16 @@ impl Input {
                                     crate::state::request_rebuild();
                                 }));
                             }
+                            if let Some(cb) = &on_focus {
+                                cb();
+                            }
                         } else {
                             // 失焦：停止闪烁定时器（Drop 自动取消注册）。
                             s.anim = None;
                             s.last_activity = None;
+                            if let Some(cb) = &on_blur {
+                                cb();
+                            }
                         }
                     });
                     ctx.request_render();
@@ -379,15 +414,14 @@ impl Input {
                     _ => {}
                 }
             }
-            if text_changed {
-                if let Some(cb) = &on_change {
-                    let text = state.get().editor.raw_text().to_string();
-                    cb(text);
-                }
+            if text_changed && let Some(cb) = &on_change {
+                let text = state.get().editor.raw_text().to_string();
+                cb(text);
             }
             ctx.request_render();
             ctx.request_rebuild();
         }))
+        .builtin()
     }
 
     fn ime_preedit_listener(state: &Stateful<InputState>) -> Listener {
@@ -424,6 +458,7 @@ impl Input {
             ctx.request_render();
             ctx.request_rebuild();
         }))
+        .builtin()
     }
 
     fn ime_commit_listener(state: &Stateful<InputState>) -> Listener {
@@ -443,6 +478,7 @@ impl Input {
             ctx.request_render();
             ctx.request_rebuild();
         }))
+        .builtin()
     }
 
     fn ime_disabled_listener(state: &Stateful<InputState>) -> Listener {
@@ -456,6 +492,7 @@ impl Input {
             ctx.request_render();
             ctx.request_rebuild();
         }))
+        .builtin()
     }
 
     /// 鼠标按下：定位光标 / Shift+单击扩选 / 双击选词 / 三击选行，
@@ -501,6 +538,7 @@ impl Input {
             ctx.request_render();
             ctx.request_rebuild();
         }))
+        .builtin()
     }
 
     /// 鼠标移动：拖拽中持续扩展选区（仅 selecting 期间生效）。
@@ -533,6 +571,7 @@ impl Input {
             ctx.request_render();
             ctx.request_rebuild();
         }))
+        .builtin()
     }
 
     /// 鼠标释放：结束拖拽选择（捕获由 EventManager 自动解除）。
@@ -543,6 +582,7 @@ impl Input {
                 state.update(|s| s.selecting = false);
             }
         }))
+        .builtin()
     }
 }
 
@@ -580,11 +620,13 @@ impl Widget for Input {
 
         let state = ctx.use_state(|| InputState::new(&text_style));
 
-        let content_width = (self.width - ph * 2.0).max(0.0);
+        let input_width = self.layout.width.unwrap_or(200.0);
+        let input_height = self.layout.height;
+        let content_width = (input_width - ph * 2.0).max(0.0);
         // 单行内容高度以实际文本行高（含 ascent/descent/行距）为准，而非仅 font_size；
         // 否则盒子比文本矮，文本会溢出并贴底。
         let line_h = TextEngine::measure_text("Mg", &text_style).1 as f32;
-        let inner_height = self.height.unwrap_or(line_h + pv * 2.0);
+        let inner_height = input_height.unwrap_or(line_h + pv * 2.0);
 
         // 同步样式/宽度，并计算光标与选区几何。
         let (text_content, caret, sel_rects, focused) = {
@@ -680,25 +722,26 @@ impl Widget for Input {
         children.push(text_node);
 
         // 光标：聚焦、几何可用且当前处于"点亮"相位时显示。
-        if focused && show_caret {
-            if let Some(BoundingBox { x0, y0, y1, .. }) = caret {
-                let caret_y = y0.max(0.0);
-                // 光标高度取该行块高度（与文本行一致），不再撑满整个输入框。
-                let caret_height = (y1 - y0).max(8.0);
-                let caret = ViewNode::Div {
-                    layout: FlexStyle::default()
-                        .width(1.0)
-                        .height(caret_height as f32)
-                        .absolute()
-                        .position_left(ph + x0 as f32)
-                        .position_top(pv + center_offset + caret_y as f32),
-                    paint: PaintStyle::new().background(text_style.color),
-                    key: Some("__ime_caret__".to_string()),
-                    children: vec![],
-                    listeners: vec![],
-                };
-                children.push(caret);
-            }
+        if focused
+            && show_caret
+            && let Some(BoundingBox { x0, y0, y1, .. }) = caret
+        {
+            let caret_y = y0.max(0.0);
+            // 光标高度取该行块高度（与文本行一致），不再撑满整个输入框。
+            let caret_height = (y1 - y0).max(8.0);
+            let caret = ViewNode::Div {
+                layout: FlexStyle::default()
+                    .width(1.0)
+                    .height(caret_height as f32)
+                    .absolute()
+                    .position_left(ph + x0 as f32)
+                    .position_top(pv + center_offset + caret_y as f32),
+                paint: PaintStyle::new().background(text_style.color),
+                key: Some("__ime_caret__".to_string()),
+                children: vec![],
+                listeners: vec![],
+            };
+            children.push(caret);
         }
 
         // 焦点时边框用品牌色；否则按校验状态着色（非 Default）。
@@ -715,19 +758,25 @@ impl Widget for Input {
             } else {
                 FlexAlign::Center
             })
-            .width(self.width)
+            .width(input_width)
             .height(inner_height)
             .padding_left(ph)
             .padding_right(ph)
             .padding_top(pv)
             .padding_bottom(pv);
-        if let Some(h) = self.height {
-            layout = layout.height(h);
-        }
+        // 应用通用布局属性（覆盖 width/height 及其它 margin/align 等）。
+        layout = self.layout.apply(layout);
 
         let mut listeners = self.listeners.clone();
-        listeners.push(Self::focus_listener(&state, true));
-        listeners.push(Self::focus_listener(&state, false));
+        let on_focus = self.on_focus.clone();
+        let on_blur = self.on_blur.clone();
+        listeners.push(Self::focus_listener(
+            &state,
+            true,
+            on_focus.clone(),
+            on_blur.clone(),
+        ));
+        listeners.push(Self::focus_listener(&state, false, on_focus, on_blur));
         listeners.push(self.key_listener(&state));
         listeners.push(self.mouse_down_listener(&state));
         listeners.push(self.mouse_move_listener(&state));

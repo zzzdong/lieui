@@ -52,11 +52,16 @@ impl Widget for Tooltip {
         let mut children = vec![child_node];
 
         if *hovered.get() {
+            // 根据字符估算气泡宽度，避免被父容器（按钮宽度）挤压成竖排
+            let chars = self.tip.chars().count();
+            let per_char = if self.tip.is_ascii() { 7.5f32 } else { 14.0f32 };
+            let tip_w = ((chars as f32) * per_char + 16.0).clamp(80.0, 360.0);
+
             let tip_node = ViewNode::Div {
                 layout: FlexStyle::default()
                     .absolute()
                     .position_top(self.offset_y)
-                    .position_left(0.0)
+                    .width(tip_w)
                     .padding_all(6.0)
                     .align_items(FlexAlign::Center)
                     .justify_content(FlexAlign::Center),
@@ -85,8 +90,8 @@ impl Widget for Tooltip {
             paint: PaintStyle::new(),
             children,
             listeners: vec![
-                Listener::on_mouse_enter(on_enter),
-                Listener::on_mouse_leave(on_leave),
+                Listener::on_mouse_enter(on_enter).builtin(),
+                Listener::on_mouse_leave(on_leave).builtin(),
             ],
             key: None,
         }

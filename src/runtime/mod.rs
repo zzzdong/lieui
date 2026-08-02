@@ -1,7 +1,7 @@
 //! Runtime — v2 核心"服务端"
 pub mod element;
 pub mod reconciler;
-use crate::core::layers::{LayerType, Layers};
+use crate::core::layers::{Anchor, LayerKind, LayerStack};
 use crate::geometry::Size;
 use crate::layout::context::LayoutContext;
 use crate::render::visual::LayeredElement;
@@ -11,7 +11,7 @@ use crate::view::node::ViewNode;
 pub use element::ElementTree;
 
 pub struct Runtime {
-    pub layers: Layers,
+    pub layers: LayerStack,
     pub(crate) viewport: Size,
     needs_layout: bool,
     needs_render: bool,
@@ -32,7 +32,7 @@ pub struct DebugStats {
 impl Runtime {
     pub fn new(viewport: Size) -> Self {
         Self {
-            layers: Layers::new(),
+            layers: LayerStack::new(),
             viewport,
             needs_layout: true,
             needs_render: true,
@@ -82,64 +82,68 @@ impl Runtime {
     }
 
     pub fn frame(&mut self) -> Vec<LayeredElement> {
-        if state::take_rebuild_requested() || self.pending_view_tree.is_some() {
-            if let Some(vt) = self.pending_view_tree.take() {
-                let vt: &ViewNode = &vt;
-                let span = crate::perf::Span::start("reconcile");
-                let mut r = Reconciler::new();
-                if self.layers.layer_root(LayerType::Base).is_none() {
-                    let id = self.layers.tree.create_from_node(vt);
-                    self.layers.tree.set_root(id);
-                    self.layers.set_base_root(id);
-                    let mut p = Vec::new();
-                    r.diff(vt, id, &self.layers.tree, &mut p);
-                    r.apply(p, &mut self.layers.tree);
-                } else {
-                    let rid = self.layers.layer_root(LayerType::Base).unwrap();
-                    let mut p = Vec::new();
-                    r.diff(vt, rid, &self.layers.tree, &mut p);
-                    r.apply(p, &mut self.layers.tree);
-                    self.debug_stats.reconciler = r.stats;
-                }
-                span.finish();
-                if crate::perf::enabled() {
-                    let s = &self.debug_stats.reconciler;
-                    eprintln!(
-                        "[lieui-perf] reconcile-stats  created={} updated={} removed={} moved={}",
-                        s.created, s.updated, s.removed, s.moved
-                    );
-                }
-                self.needs_layout = true;
+        if (state::take_rebuild_requested() || self.pending_view_tree.is_some())
+            && let Some(vt) = self.pending_view_tree.take()
+        {
+            let vt: &ViewNode = &vt;
+            let span = crate::perf::Span::start("reconcile");
+            let mut r = Reconciler::new();
+            if self.layers.content_root_id().is_none() {
+                let id = self.layers.tree.create_from_node(vt);
+                self.layers.tree.set_root(id);
+                self.layers.set_content_root(id);
+                let mut p = Vec::new();
+                r.diff(vt, id, &self.layers.tree, &mut p);
+                r.apply(p, &mut self.layers.tree);
+            } else {
+                let rid = self.layers.content_root_id().unwrap();
+                let mut p = Vec::new();
+                r.diff(vt, rid, &self.layers.tree, &mut p);
+                r.apply(p, &mut self.layers.tree);
+                self.debug_stats.reconciler = r.stats;
             }
-        }
-
-        // 处理 Modal / Overlay 的显示/隐藏请求
-        if let Some(pending) = state::take_pending_modal() {
-            match pending {
-                Some(view) => {
-                    let id = self.layers.tree.create_from_node(&view);
-                    self.layers.show_modal(id);
-                }
-                None => {
-                    if let Some(rid) = self.layers.layer_root(LayerType::Modal) {
-                        self.layers.tree.remove(rid);
-                    }
-                    self.layers.hide_modal();
-                }
+            span.finish();
+            if crate::perf::enabled() {
+                let s = &self.debug_stats.reconciler;
+                eprintln!(
+                    "[lieui-perf] reconcile-stats  created={} updated={} removed={} moved={}",
+                    s.created, s.updated, s.removed, s.moved
+                );
             }
             self.needs_layout = true;
         }
-        if let Some(pending) = state::take_pending_overlay() {
-            match pending {
-                Some(view) => {
-                    let id = self.layers.tree.create_from_node(&view);
-                    self.layers.show_overlay(id);
-                }
-                None => {
-                    if let Some(rid) = self.layers.layer_root(LayerType::Overlay) {
-                        self.layers.tree.remove(rid);
-                    }
-                    self.layers.hide_overlay();
+
+        // 处理待显示的浮层命令（Modal / Overlay / Popup / Tooltip / System）。
+        // 注意：必须用 create_subtree_from_node 递归构建完整子树，
+        // 否则浮层只有根节点（如 dialog 背景）而无内容（标题/按钮）。
+        let pending_layers = state::take_pending_layers();
+        if !pending_layers.is_empty() {
+            for cmd in pending_layers {
+                use crate::core::layers::LayerKind;
+                match cmd {
+                    state::LayerCmd::Hide { kind } => match kind {
+                        LayerKind::Modal => {
+                            self.layers.remove_default_modal();
+                        }
+                        LayerKind::Overlay => {
+                            self.layers.remove_default_overlay();
+                        }
+                        _ => {}
+                    },
+                    state::LayerCmd::Show { kind, spec, view } => match kind {
+                        LayerKind::Modal => {
+                            let id = self.layers.tree.create_subtree_from_node(&view);
+                            self.layers.push_default_modal(id);
+                        }
+                        LayerKind::Overlay => {
+                            let id = self.layers.tree.create_subtree_from_node(&view);
+                            self.layers.push_default_overlay(id);
+                        }
+                        _ => {
+                            self.layers
+                                .push(kind, *view, spec.anchor, spec.focus, spec.opts);
+                        }
+                    },
                 }
             }
             self.needs_layout = true;
@@ -156,28 +160,26 @@ impl Runtime {
                 static DUMPED: OnceLock<bool> = OnceLock::new();
                 if DUMPED.set(true).is_ok() {
                     eprintln!("=== LIEUI Layout Tree ===");
-                    for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
-                        if let Some(rid) = self.layers.layer_root(lt) {
-                            eprintln!("--- Layer: {:?} ---", lt);
-                            fn dump_layout(
-                                tree: &element::ElementTree,
-                                id: crate::core::ElementId,
-                                depth: usize,
-                            ) {
-                                let indent = "  ".repeat(depth);
-                                let nt =
-                                    tree.get_node_ref(id).map(|n| n.type_name()).unwrap_or("?");
-                                let l = tree.layout(id);
-                                eprintln!(
-                                    "{}{:?} [{}] pos=({:.1},{:.1}) size=({:.1},{:.1})",
-                                    indent, id, nt, l.x, l.y, l.width, l.height
-                                );
-                                for cid in tree.children_of(id) {
-                                    dump_layout(tree, cid, depth + 1);
-                                }
+                    for entry in self.layers.sorted_entries_for_render() {
+                        let rid = entry.root_id;
+                        eprintln!("--- Layer: {:?} (z={}) ---", entry.kind, entry.z());
+                        fn dump_layout(
+                            tree: &element::ElementTree,
+                            id: crate::core::ElementId,
+                            depth: usize,
+                        ) {
+                            let indent = "  ".repeat(depth);
+                            let nt = tree.get_node_ref(id).map(|n| n.type_name()).unwrap_or("?");
+                            let l = tree.layout(id);
+                            eprintln!(
+                                "{}{:?} [{}] pos=({:.1},{:.1}) size=({:.1},{:.1})",
+                                indent, id, nt, l.x, l.y, l.width, l.height
+                            );
+                            for cid in tree.children_of(id) {
+                                dump_layout(tree, cid, depth + 1);
                             }
-                            dump_layout(&self.layers.tree, rid, 0);
                         }
+                        dump_layout(&self.layers.tree, rid, 0);
                     }
                 }
             }
@@ -226,12 +228,59 @@ impl Runtime {
             return;
         }
         self.force_layout = false;
-        for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
-            if let Some(rid) = self.layers.layer_root(lt) {
-                LayoutContext::compute(rid, &self.layers.tree, self.viewport);
+        for entry in self.layers.sorted_entries_for_render() {
+            let rid = entry.root_id;
+            if entry.kind == LayerKind::Content {
+                // Content 走完整 Flex 布局（现有流程），根节点填充视口。
+                LayoutContext::compute(rid, &self.layers.tree, self.viewport, true);
+            } else {
+                // 其他 LayerKind（Modal/Popup/Overlay/Tooltip）：按内容自然尺寸布局，
+                // 避免根节点被撑满整个视口（如 modal 高度占满窗口），再按 Anchor 定位。
+                LayoutContext::compute(rid, &self.layers.tree, self.viewport, false);
+                Self::apply_anchor(&mut self.layers, entry.anchor, rid, self.viewport);
             }
         }
         self.layers.tree.clear_dirty();
+    }
+
+    /// 依据 Anchor 将层根子树平移到目标位置。
+    /// 布局阶段先按 viewport 约束在 (0,0) 计算子树尺寸，这里再按锚点计算平移量。
+    fn apply_anchor(
+        layers: &mut LayerStack,
+        anchor: Anchor,
+        root: crate::core::ElementId,
+        viewport: crate::geometry::Size,
+    ) {
+        let l = layers.tree.layout(root);
+        let (w, h) = (l.width, l.height);
+        let (dx, dy) = match anchor {
+            Anchor::None => (0.0, 0.0),
+            Anchor::Fixed { x, y } => (x - l.x, y - l.y),
+            Anchor::ScreenCenter => {
+                // root 在 (0,0) 计算，translate 使其中点对齐 viewport 中心。
+                (
+                    (viewport.width - w) / 2.0 - l.x,
+                    (viewport.height - h) / 2.0 - l.y,
+                )
+            }
+            Anchor::Above { anchor, gap } => {
+                let r = anchor;
+                (r.x + (r.width - w) / 2.0 - l.x, r.y - gap - h - l.y)
+            }
+            Anchor::Below { anchor, gap } => {
+                let r = anchor;
+                (r.x + (r.width - w) / 2.0 - l.x, r.y + r.height + gap - l.y)
+            }
+            Anchor::LeftOf { anchor, gap } => {
+                let r = anchor;
+                (r.x - gap - w - l.x, r.y + (r.height - h) / 2.0 - l.y)
+            }
+            Anchor::RightOf { anchor, gap } => {
+                let r = anchor;
+                (r.x + r.width + gap - l.x, r.y + (r.height - h) / 2.0 - l.y)
+            }
+        };
+        layers.tree.translate_subtree(root, dx, dy);
     }
 
     /// 调整滚动容器偏移并钳制到内容范围，请求重排+重绘。
@@ -289,31 +338,48 @@ impl Runtime {
             return;
         }
         for &id in hit.path.iter().rev() {
-            if let Some(node) = self.layers.tree.get_node_ref(id) {
-                if node.layout().overflow_scroll {
-                    self.scroll_by(id, dx, dy);
-                    return;
-                }
+            if let Some(node) = self.layers.tree.get_node_ref(id)
+                && node.layout().overflow_scroll
+            {
+                self.scroll_by(id, dx, dy);
+                return;
             }
         }
     }
 
     fn build_render_tree(&self) -> Vec<LayeredElement> {
         let mut e = Vec::new();
-        for lt in [LayerType::Base, LayerType::Overlay, LayerType::Modal] {
-            let z = lt.z_index();
-            if let Some(rid) = self.layers.layer_root(lt) {
-                Self::cv(rid, z, &self.layers, &mut e, None);
+        for entry in self.layers.sorted_entries_for_render() {
+            if !entry.visible.get() {
+                continue;
             }
+            let z = entry.z();
+            // Modal backdrop：在 Modal 内容之前绘制，z = entry.z() - 1
+            if let Some(color) = entry.backdrop {
+                let vp = &self.viewport;
+                e.push(crate::render::visual::LayeredElement::new(
+                    crate::render::visual::VisualElement::RoundedRect {
+                        rect: crate::render::visual::KRect::new(
+                            0.0,
+                            0.0,
+                            vp.width as f64,
+                            vp.height as f64,
+                        ),
+                        radius: 0.0,
+                        style: crate::render::visual::FillStrokeStyle::new().with_fill(color),
+                    },
+                    z - 1,
+                ));
+            }
+            Self::cv(entry.root_id, z, &self.layers, &mut e, None);
         }
-        e.sort_by_key(|x| x.z_index);
         e
     }
 
     fn cv(
         id: crate::core::ElementId,
         z_index: i32,
-        layers: &Layers,
+        layers: &LayerStack,
         elements: &mut Vec<LayeredElement>,
         listener_state: Option<crate::core::state::ElementState>,
     ) {
@@ -322,17 +388,18 @@ impl Runtime {
             None => return,
         };
         let computed = layers.tree.layout(id);
-        // HTML 式状态继承：当前节点自身有 listener 时使用自身状态；
-        // 否则继承最近有 listener 的祖先状态。
-        // 这样 Button/Checkbox 等组件根设置 hover/pressed 后，内部子节点会跟随变化。
+        // HTML 式状态继承：当前节点自身有 listener 或声明了 hover/pressed
+        // 视觉样式时使用自身状态；否则继承最近的可交互祖先状态。
+        // 这样 Button/Checkbox 等组件根设置 hover/pressed 后，内部子节点会跟随变化，
+        // 无回调的 IconButton 也能正确显示 hover/pressed 反馈。
         let own_state = layers.tree.state(id);
-        let has_callback = layers.tree.has_any_listener(id);
-        let state = if has_callback {
+        let interactive = layers.tree.has_any_listener(id) || layers.tree.is_interactive(id);
+        let state = if interactive {
             own_state
         } else {
             listener_state.unwrap_or_default()
         };
-        let next_listener_state = if has_callback {
+        let next_listener_state = if interactive {
             Some(own_state)
         } else {
             listener_state
@@ -357,6 +424,15 @@ impl Runtime {
                         .min(content_w as f64),
                 );
             }
+            // 交互状态变色：图标/文本在 hover/pressed 时切换颜色
+            // （Text 节点无 listener 时继承最近祖先的交互状态，见上方状态传播逻辑）。
+            let color = if state.pressed {
+                layout_style.pressed_color.unwrap_or(layout_style.color)
+            } else if state.hovered {
+                layout_style.hover_color.unwrap_or(layout_style.color)
+            } else {
+                layout_style.color
+            };
 
             // 复用 TextLayout 缓存，避免每帧重新排版：
             // 命中时直接返回 Arc 克隆，未命中时才创建并写入缓存一次。
@@ -378,7 +454,7 @@ impl Runtime {
                     crate::render::visual::VisualElement::TextRun {
                         text: std::sync::Arc::from(content.as_str()),
                         position: kurbo::Point::new(r.x as f64, r.y as f64),
-                        color: layout_style.color,
+                        color,
                         font_size: layout_style.font_size,
                         font_family: layout_style.font_family.clone(),
                         rotation: 0.0,
@@ -445,10 +521,10 @@ impl Runtime {
             }
             if let Some(bg) = bg {
                 let mut fs = crate::render::visual::FillStrokeStyle::new().with_fill(bg);
-                if let Some(bc) = paint.border_color {
-                    if paint.border_width > 0.0 {
-                        fs = fs.with_stroke(bc, paint.border_width as f64);
-                    }
+                if let Some(bc) = paint.border_color
+                    && paint.border_width > 0.0
+                {
+                    fs = fs.with_stroke(bc, paint.border_width as f64);
                 }
                 elements.push(
                     crate::render::visual::LayeredElement::new(
@@ -487,8 +563,12 @@ impl Runtime {
                         let scroll_off = layers.tree.scroll_offset(id);
                         eprintln!(
                             "[scroll] r={:.0},{:.0}+{:.0}x{:.0} offset=({:.1},{:.1}) content=({:.0},{:.0})",
-                            r.x, r.y, r.width, r.height,
-                            scroll_off.0, scroll_off.1,
+                            r.x,
+                            r.y,
+                            r.width,
+                            r.height,
+                            scroll_off.0,
+                            scroll_off.1,
                             layers.tree.content_size(id).0,
                             layers.tree.content_size(id).1,
                         );

@@ -10,6 +10,9 @@ pub enum EventType {
     MouseLeave,
     Click,
     MouseWheel,
+    DragStart,
+    DragMove,
+    DragEnd,
     KeyDown,
     KeyUp,
     FocusIn,
@@ -51,6 +54,46 @@ pub enum Event {
         x: f32,
         y: f32,
     },
+    /// 拖拽开始：按下左键后移动超过阈值，由 EventManager 合成。
+    /// 偏移始终为 0（刚超过阈值，尚未移动）。
+    DragStart {
+        x: f32,
+        y: f32,
+        /// 相对按下点的累计偏移（始终为 0）
+        offset_x: f32,
+        offset_y: f32,
+        button: MouseButton,
+        /// 按下时的键盘修饰键
+        modifiers: Modifiers,
+    },
+    /// 拖拽进行中（每次鼠标移动合成一次）。
+    DragMove {
+        x: f32,
+        y: f32,
+        /// 相对上一个事件的增量
+        dx: f32,
+        dy: f32,
+        /// 相对按下点的累计偏移
+        offset_x: f32,
+        offset_y: f32,
+        button: MouseButton,
+        /// 移动时的键盘修饰键
+        modifiers: Modifiers,
+    },
+    /// 拖拽结束（鼠标释放时投递，仅当拖拽真正开始过）。
+    DragEnd {
+        x: f32,
+        y: f32,
+        /// 相对上一个事件的增量
+        dx: f32,
+        dy: f32,
+        /// 相对按下点的累计偏移
+        offset_x: f32,
+        offset_y: f32,
+        button: MouseButton,
+        /// 释放时的键盘修饰键
+        modifiers: Modifiers,
+    },
     KeyDown {
         key: Key,
         modifiers: Modifiers,
@@ -82,6 +125,9 @@ impl Event {
             Event::MouseLeave => EventType::MouseLeave,
             Event::Click { .. } => EventType::Click,
             Event::MouseWheel { .. } => EventType::MouseWheel,
+            Event::DragStart { .. } => EventType::DragStart,
+            Event::DragMove { .. } => EventType::DragMove,
+            Event::DragEnd { .. } => EventType::DragEnd,
             Event::KeyDown { .. } => EventType::KeyDown,
             Event::KeyUp { .. } => EventType::KeyUp,
             Event::FocusIn => EventType::FocusIn,

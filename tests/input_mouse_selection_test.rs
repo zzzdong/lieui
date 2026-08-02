@@ -7,47 +7,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use lieui::core::ElementId;
-use lieui::event::{Event, EventContext, EventPhase, HitTestResult, Key, Modifiers, MouseButton};
+use lieui::event::{Event, EventContext, HitTestResult, Key, Modifiers, MouseButton};
 use lieui::geometry::{Point, Size};
 use lieui::runtime::{ElementTree, Runtime};
-use lieui::view::node::Callback;
 use lieui::widget::{BuildContext, Input, StateMap, Widget};
 
 /// 复刻 Application::handle_lie_event 的分发语义。
 fn handle_lie_event(tree: &ElementTree, id: ElementId, event: &Event, ctx: &mut EventContext) {
     ctx.set_event(event.clone());
     ctx.set_current(id, tree.layout(id).rect());
-    let event_type = event.to_type();
-    let Some(node) = tree.get_node_ref(id) else {
-        return;
-    };
-    for listener in node.listeners() {
-        if listener.event != event_type {
-            continue;
-        }
-        match ctx.phase() {
-            EventPhase::Capture => {
-                if let Callback::WithCtx(cb) = &listener.callback {
-                    cb(ctx);
-                }
-            }
-            EventPhase::Target => match &listener.callback {
-                Callback::Simple(cb) => {
-                    cb();
-                    ctx.stop_propagation();
-                }
-                Callback::WithCtx(cb) => cb(ctx),
-            },
-            EventPhase::Bubble => {
-                if let Callback::Simple(cb) = &listener.callback {
-                    cb();
-                }
-            }
-        }
-        if ctx.is_stopped() {
-            break;
-        }
-    }
+    lieui::event::dispatch_node_listeners(tree, id, event, ctx);
 }
 
 /// DFS 查找 key 以指定前缀开头的节点。
@@ -90,8 +59,8 @@ impl Harness {
         let _ = self.runtime.frame();
     }
 
-    fn hit(&self, p: Point) -> HitTestResult {
-        let (_lt, target) = self.runtime.layers.hit_test_top(p).expect("hit");
+    fn hit(&mut self, p: Point) -> HitTestResult {
+        let (_, target, _) = self.runtime.layers.hit_test_top(p).expect("hit");
         let path = self.runtime.layers.path_to(target);
         HitTestResult { target, path }
     }

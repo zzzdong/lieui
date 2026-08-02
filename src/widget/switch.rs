@@ -21,6 +21,7 @@ pub struct Switch {
     width: f32,
     height: f32,
     label: Option<String>,
+    on_change: Option<Rc<dyn Fn(bool)>>,
 }
 
 impl Switch {
@@ -33,6 +34,7 @@ impl Switch {
             width: 44.0,
             height: 24.0,
             label: None,
+            on_change: None,
         }
     }
     /// 在开关右侧显示文本标签。
@@ -56,6 +58,11 @@ impl Switch {
         self.height = h;
         self
     }
+    /// 切换回调（点击切换后触发，参数为切换后的值）。
+    pub fn on_change<F: Fn(bool) + 'static>(mut self, f: F) -> Self {
+        self.on_change = Some(Rc::new(f));
+        self
+    }
 }
 
 impl Widget for Switch {
@@ -67,8 +74,13 @@ impl Widget for Switch {
         let knob_left = if on { w - knob - 2.0 } else { 2.0 };
 
         let value = self.value.clone();
+        let on_change = self.on_change.clone();
         let on_click = Rc::new(move || {
-            value.update(|v| *v = !*v);
+            let new_val = !*value.get();
+            value.set(new_val);
+            if let Some(cb) = &on_change {
+                cb(new_val);
+            }
         });
 
         let knob_style = FlexStyle::default()
@@ -92,7 +104,7 @@ impl Widget for Switch {
                 listeners: vec![],
                 key: None,
             }],
-            listeners: vec![Listener::on_click(on_click)],
+            listeners: vec![Listener::on_click(on_click).builtin()],
             key: None,
         };
 

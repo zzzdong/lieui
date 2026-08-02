@@ -62,6 +62,21 @@ impl ElementTree {
         })
     }
 
+    /// 从 ViewNode 创建节点并**递归构建完整子树**（含所有后代）。
+    ///
+    /// `create_from_node` 只创建根节点（由 reconciler 通过 `apply_children` 补建后代）。
+    /// 而 Modal / Overlay 这类直接以整棵 ViewTree 挂载的层需要一次构建完整子树，
+    /// 否则弹层只有背景、内容缺失（表现为空白弹窗）。
+    pub fn create_subtree_from_node(&mut self, n: &ViewNode) -> ElementId {
+        let id = self.create_from_node(n);
+        let children: Vec<&ViewNode> = n.children().iter().collect();
+        for child in children {
+            let cid = self.create_subtree_from_node(child);
+            self.add_child(id, cid);
+        }
+        id
+    }
+
     // ---- 兼容方法（基于 type_name）----
     pub fn type_name(&self, id: ElementId) -> Option<&'static str> {
         self.entries.get(id).map(|e| e.node.type_name())
@@ -100,6 +115,14 @@ impl ElementTree {
         self.entries
             .get(id)
             .is_some_and(|e| !e.listeners.borrow().is_empty())
+    }
+
+    /// 检查节点是否声明了交互视觉（hover/pressed 样式），
+    /// 用于无监听器但需要 hover/pressed 反馈的节点（如无回调的图标按钮）。
+    pub fn is_interactive(&self, id: ElementId) -> bool {
+        self.entries
+            .get(id)
+            .is_some_and(|e| e.node.is_interactive())
     }
 
     /// 检查节点是否监听 IME 事件。
@@ -295,10 +318,10 @@ impl ElementTree {
     /// 将已有节点移动到目标父节点的指定位置，复用 Element 实例。
     /// 仅从原父节点的 children 列表中移除，不删除子树 entries。
     pub fn move_child(&mut self, id: ElementId, new_parent: ElementId, position: usize) {
-        if let Some(old_parent) = self.parent_of(id) {
-            if let Some(p) = self.entries.get_mut(old_parent) {
-                p.children.retain(|c| *c != id);
-            }
+        if let Some(old_parent) = self.parent_of(id)
+            && let Some(p) = self.entries.get_mut(old_parent)
+        {
+            p.children.retain(|c| *c != id);
         }
         if let Some(c) = self.entries.get_mut(id) {
             c.parent = Some(new_parent);
@@ -313,12 +336,11 @@ impl ElementTree {
             return false;
         }
         let sub = self.collect_subtree(id);
-        if let Some(e) = self.entries.get(id) {
-            if let Some(pid) = e.parent {
-                if let Some(p) = self.entries.get_mut(pid) {
-                    p.children.retain(|c| *c != id);
-                }
-            }
+        if let Some(e) = self.entries.get(id)
+            && let Some(pid) = e.parent
+            && let Some(p) = self.entries.get_mut(pid)
+        {
+            p.children.retain(|c| *c != id);
         }
         if self.root == Some(id) {
             self.root = None;
@@ -378,6 +400,28 @@ impl ElementTree {
         self.children_ref(id)
             .iter()
             .any(|c| self.subtree_has_dirty(*c))
+    }
+
+    /// 将 `id` 子树所有节点的全局坐标整体平移 (dx, dy)。
+    /// 用于层锚定定位（如 Modal 居中等），在布局计算完成后对整棵子树进行位移。
+    pub fn translate_subtree(&self, id: ElementId, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        self.translate_subtree_rec(id, dx, dy);
+    }
+
+    fn translate_subtree_rec(&self, id: ElementId, dx: f32, dy: f32) {
+        if let Some(e) = self.entries.get(id) {
+            let mut l = e.layout.get();
+            l.x += dx;
+            l.y += dy;
+            e.layout.set(l);
+            let children: Vec<ElementId> = e.children.clone();
+            for c in children {
+                self.translate_subtree_rec(c, dx, dy);
+            }
+        }
     }
 
     /// 检查整棵树是否存在 dirty 节点（遍历所有 entries，O(n)）。

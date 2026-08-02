@@ -117,10 +117,62 @@ impl View for Label {
   - `WithCtx`：回调收到 `&mut EventContext`，可调用 `ctx.stop_propagation()`、读 `ctx.phase()`。
   - ✅ **已修复**：`ctx.request_rebuild()/request_layout()/request_render()` 现在会在事件循环中被应用（触发重建 / 重排 / 重绘）。
 - 点击只会在 **Target / Bubble** 阶段触发（捕获阶段不触发 `Click`）。
+- 监听器区分**内置行为**（`ListenerKind::BuiltIn`，如 Slider 拖拽、Input 聚焦/输入、Draggable 拖拽接线）与**用户回调**（`ListenerKind::User`，如 `.on_click(...)`）。同一节点上内置回调**先于**用户回调执行，因此用户回调调用 `stop_propagation()` 不会阻止同节点已执行的内置行为，只会停止向其他节点传播。hover/pressed 视觉反馈不依赖回调，由样式（`hover_background` / `hover_color` 等）+ 交互状态驱动。
 
 > ✅ **已修复**：hover/pressed 状态现作用在最深层命中节点向上找到的「最近带 listener 的祖先」（交互节点）上，`Button` 的 hover/pressed 背景反馈正常显示（见 `docs/audit.md` 1.1）。
 
-### 2.5 布局（Flexbox）
+### 2.5 拖拽（Drag）
+事件系统内建通用的「按下 → 移动 → 释放」拖拽语义，由 `EventManager` 合成三种事件：
+
+| 事件 | 触发时机 | 数据 |
+|------|---------|------|
+| `DragStart { x, y, offset_x, offset_y, button, modifiers }` | 按下后移动超过阈值（默认 3px） | 触发位置与修饰键（偏移始终为 0） |
+| `DragMove { x, y, dx, dy, offset_x, offset_y, button, modifiers }` | 每次鼠标移动 | 相对上次的增量 + 相对按下点的累计偏移 |
+| `DragEnd { x, y, dx, dy, offset_x, offset_y, button, modifiers }` | 鼠标释放 | 最终偏移 |
+
+使用方式：在 `MouseDown` 回调里调用 `ctx.begin_drag()`（或 `begin_drag_with_threshold(px)`）请求拖拽；拖拽开始后自动捕获鼠标，指针移出组件仍持续收到 `DragMove`；超过阈值的真实拖拽结束时会抑制 `Click`，避免「拖完又触发点击」。
+
+推荐直接用 `Draggable` 组件包装任意内容：
+
+```rust
+use lieui::prelude::*;
+use lieui::event::Event;
+
+let pos = State::new((0.0f32, 0.0f32));
+
+Draggable::new(
+    Container::new()
+        .width(120.0)
+        .height(40.0)
+        .child(Text::new("拖我")),
+)
+.on_drag_move({
+    let pos = pos.clone();
+    move |ctx| {
+        if let Some(Event::DragMove { offset_x, offset_y, .. }) = ctx.event() {
+            pos.set((*offset_x, *offset_y));
+        }
+    }
+})
+```
+
+注意：拖拽开始后该节点会接管后续所有鼠标事件，因此不要用 `Draggable` 包裹 Button/Slider 等自身需要鼠标交互的组件；需要时用 `.enabled(false)` 关闭拖拽。
+
+### 2.6 图标（Icon / IconButton）
+项目随附 Google Material Icons（OFL 许可）字体，通过 `include_bytes!` 在**编译期内嵌**到二进制中，首次构建图标时自动注册到排版引擎——无需任何手动注册或额外文件。图标以文本字形渲染，可缩放、可着色。
+
+- `Icon::new(IconName::Search, 18.0)`：纯图标字形，支持 `.color()` / `.hover_color()` / `.pressed_color()`。
+- `IconButton::new(IconName::Add).on_click(...)`：工具栏风格的方形图标按钮（默认 28px、图标 18px），hover/pressed 时背景与图标自动变色；`IconButtonVariant::Plain / Outline / Primary` 控制风格。
+- 常用图标列表见 `IconName` 枚举（增删改查、方向箭头、收藏、设置、用户、文件夹等 100+）；码点与 `assets/MaterialIcons-Regular.codepoints` 一一对应，可自行扩展。
+
+```rust
+Row::new().spacing(4.0)
+    .child(IconButton::new(IconName::Add).on_click(|| add()))
+    .child(IconButton::new(IconName::Close).variant(IconButtonVariant::Outline))
+    .child(IconButton::new(IconName::Check).variant(IconButtonVariant::Primary));
+```
+
+### 2.7 布局（Flexbox）
 `Column`/`Row` 映射为 `ViewNode::Div` + `DisplayMode::Flex`：
 
 | 方法 | 作用 |
@@ -136,7 +188,7 @@ impl View for Label {
 
 > ✅ **已修复**：文本在约束宽度下会重新排版以支持换行（见 `docs/audit.md` 2.2）。注意：处于 `Row`（主轴水平）且宽度不受限时文本仍按单行处理；内部 `FlexStyle` 的 `flex_shrink` 默认 0 保持不变，因此在 `NoWrap` 行内挤占过满时仍可能溢出——需给容器设定宽度或改用 `Column`。
 
-### 2.6 图层（Base / Overlay / Modal）
+### 2.8 图层（Base / Overlay / Modal）
 通过顶层函数弹出覆盖层：
 
 ```rust
@@ -148,7 +200,7 @@ hide_modal();
 
 命中测试按 `Modal → Overlay → Base` 优先级返回最顶层节点，因此 modal 会拦截其范围内的点击。
 
-### 2.7 Reconciler 与 key
+### 2.9 Reconciler 与 key
 每次重建产生新 `ViewNode` 树，reconciler 与旧树 diff：
 - 优先按 `key` 匹配（`ViewExt::key`，见下）；
 - 无 key 时按「节点类型 + 位置」匹配，并复用原 `ElementId` 以保留布局/状态/回调。
@@ -164,16 +216,16 @@ Column::new().child(item_view.key(format!("row-{i}")))
 
 ## 3. 公开 API 速查
 
-预导入：`use lieui::prelude::*;` 包含 `Application`、`State`、`Column`、`Row`、`Text`、`Button`、`Container`、`Image`、`Color`、`Size`、`Point`、`Rect`、`JustifyContent`、`AlignItems`、`FlexDirection`、`FlexWrap`、`LayeredElement`、`VisualElement`、`View`。
+预导入：`use lieui::prelude::*;` 包含 `Application`、`State`、`Column`、`Row`、`Text`、`Button`、`Container`、`Draggable`、`Icon`、`IconButton`、`IconName`、`Image`、`Color`、`Size`、`Point`、`Rect`、`JustifyContent`、`AlignItems`、`FlexDirection`、`FlexWrap`、`LayeredElement`、`VisualElement`、`View`。
 
 | 类别 | 符号 |
 |------|------|
-| 入口 | `Application::new(builder, viewport).run()` |
+| 入口 | `Application::new(builder, viewport).run()`（自定义字体可用 `.with_font(path)`） |
 | 状态 | `State::new/get/set/update/clone`、`request_rebuild()`、`request_redraw()` |
 | 图层 | `show_overlay(ViewNode)`、`show_modal(ViewNode)`、`hide_overlay()`、`hide_modal()` |
 | 原语 | `Text::new(s)`、`Image::from_rgba(data,w,h)`、`Container::new()`、`Column::new()`、`Row::new()` |
-| 组件 | `Button::new(s)`、`Checkbox::new(...)`、`Divider`、`ListView` |
-| 通用方法 | `.child(v)`、`.expand(bool)`、`.spacing(f32)`、`.justify_content(...)`、`.align_items(...)`、`.center()`、`.background(Color)`、`.padding(f32)`、`.border_radius(f32)`、`.width(f32)`、`.height(f32)`、`.on_click(fn)`、`.on_click_with_ctx(fn)`、`.font_size(f32)`、`.color(Color)` |
+| 组件 | `Button::new(s)`、`Checkbox::new(...)`、`Divider`、`ListView`、`Draggable::new(w)`、`Icon::new(name, size)`、`IconButton::new(name)` |
+| 通用方法 | `.child(v)`、`.expand(bool)`、`.spacing(f32)`、`.justify_content(...)`、`.align_items(...)`、`.center()`、`.background(Color)`、`.padding(f32)`、`.border_radius(f32)`、`.width(f32)`、`.height(f32)`、`.on_click(fn)`、`.on_click_with_ctx(fn)`、`.on_drag_start(fn)`、`.on_drag_move(fn)`、`.on_drag_end(fn)`、`.font_size(f32)`、`.color(Color)` |
 | key | `ViewExt::key(s)`（需 `use lieui::view::ViewExt;`） |
 | 颜色 | `Color::new(r,g,b)`、`Color::WHITE`、`Color::RED`、…（带 alpha 见 `geometry::Color`） |
 

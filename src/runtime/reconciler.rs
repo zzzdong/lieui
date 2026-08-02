@@ -89,15 +89,15 @@ impl Reconciler {
                     used.insert(id);
                     matched.push(id);
                     // 若匹配到的节点当前不在期望位置，生成 Move 补丁以复用实例。
-                    if let Some(cur_pos) = existing.iter().position(|c| *c == id) {
-                        if cur_pos != pos {
-                            patches.push(Patch::Move {
-                                id,
-                                parent: parent_id,
-                                position: pos,
-                            });
-                            self.stats.moved += 1;
-                        }
+                    if let Some(cur_pos) = existing.iter().position(|c| *c == id)
+                        && cur_pos != pos
+                    {
+                        patches.push(Patch::Move {
+                            id,
+                            parent: parent_id,
+                            position: pos,
+                        });
+                        self.stats.moved += 1;
                     }
                     if !tree.config_eq(id, child_node) {
                         patches.push(Patch::Update {
@@ -144,12 +144,12 @@ impl Reconciler {
         tree: &ElementTree,
     ) -> Result<ElementId, ()> {
         // 1. 优先按 key 匹配
-        if let Some(key) = view_node.key() {
-            if let Some(candidates) = by_key.get(key) {
-                for id in candidates {
-                    if !used.contains(id) {
-                        return Ok(*id);
-                    }
+        if let Some(key) = view_node.key()
+            && let Some(candidates) = by_key.get(key)
+        {
+            for id in candidates {
+                if !used.contains(id) {
+                    return Ok(*id);
                 }
             }
         }

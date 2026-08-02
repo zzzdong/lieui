@@ -65,8 +65,9 @@ fn nested_click_stops_at_inner_listener() {
     // 命中测试：点击 Checkbox 区域（大致在 (8, 8) 附近）
     let hit = rt
         .layers
-        .layer_hit_test(lieui::core::layers::LayerType::Base, Point::new(12.0, 12.0))
-        .expect("should hit checkbox");
+        .hit_test_top(Point::new(12.0, 12.0))
+        .expect("should hit checkbox")
+        .1;
     let path = rt.layers.path_to(hit);
 
     let mut em = EventManager::new();
@@ -81,11 +82,11 @@ fn nested_click_stops_at_inner_listener() {
                     return;
                 }
                 for l in rt.layers.tree.listeners(id) {
-                    if l.event == lieui::event::EventType::Click {
-                        if let Callback::Simple(cb) = &l.callback {
-                            cb();
-                            ctx.stop_propagation();
-                        }
+                    if l.event == lieui::event::EventType::Click
+                        && let Callback::Simple(cb) = &l.callback
+                    {
+                        cb();
+                        ctx.stop_propagation();
                     }
                 }
             }

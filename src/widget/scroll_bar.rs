@@ -199,10 +199,10 @@ impl Widget for ScrollBar {
         let on_up = Rc::new({
             let captured = captured.clone();
             move |ctx: &mut EventContext| {
-                if let Some(Event::MouseUp { button, .. }) = ctx.event() {
-                    if *button == MouseButton::Left {
-                        captured.set(false);
-                    }
+                if let Some(Event::MouseUp { button, .. }) = ctx.event()
+                    && *button == MouseButton::Left
+                {
+                    captured.set(false);
                 }
             }
         });
@@ -224,7 +224,7 @@ impl Widget for ScrollBar {
                 .background(t.text.subtle_default)
                 .radius(t.radius.small),
             children: vec![],
-            listeners: vec![Listener::on_mouse_down(on_thumb_down)],
+            listeners: vec![Listener::on_mouse_down(on_thumb_down).builtin()],
             key: None,
         };
 
@@ -236,9 +236,9 @@ impl Widget for ScrollBar {
                 .radius(t.radius.small),
             children: vec![thumb],
             listeners: vec![
-                Listener::on_mouse_down(on_track_down),
-                Listener::on_mouse_move(on_move),
-                Listener::on_mouse_up(on_up),
+                Listener::on_mouse_down(on_track_down).builtin(),
+                Listener::on_mouse_move(on_move).builtin(),
+                Listener::on_mouse_up(on_up).builtin(),
             ],
             key: None,
         }

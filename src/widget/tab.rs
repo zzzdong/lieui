@@ -4,9 +4,10 @@ use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
 use crate::state::State;
 use crate::theme::current;
+use crate::view::FontWeight;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::{PaintStyle, TextStyle};
-use crate::view::FontWeight;
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 
 /// 选项卡（标签页）控件：顶部一排标签头，下方显示当前激活标签的内容。
@@ -16,7 +17,7 @@ pub struct Tab {
     active: State<usize>,
     tabs: Vec<(String, Box<dyn Widget>)>,
     header_height: f32,
-    flex_shrink: f32,
+    layout: LayoutAttr,
 }
 
 impl Tab {
@@ -26,7 +27,7 @@ impl Tab {
             active,
             tabs: Vec::new(),
             header_height: 36.0,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new(),
         }
     }
 
@@ -44,7 +45,12 @@ impl Tab {
 
     /// 设置 flex 收缩因子（默认 1.0）。
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本选项卡的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 }
@@ -146,7 +152,7 @@ impl Widget for Tab {
                     .align_items(FlexAlign::Center),
                 paint: PaintStyle::new(),
                 children,
-                listeners: vec![Listener::on_click(on_click)],
+                listeners: vec![Listener::on_click(on_click).builtin()],
                 key: Some(format!("tab-{i}")),
             });
         }
@@ -192,9 +198,7 @@ impl Widget for Tab {
         };
 
         let mut layout = FlexStyle::column().flex_grow(1.0);
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
-        }
+        layout = self.layout.apply(layout);
         ViewNode::Div {
             layout,
             paint: PaintStyle::new()

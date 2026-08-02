@@ -1,8 +1,9 @@
 use crate::layout::style::FlexStyle;
 use crate::layout::types::FlexAlign;
-use crate::theme::{current, Theme};
+use crate::theme::{Theme, current};
 use crate::view::node::ViewNode;
 use crate::view::paint::{FontWeight, PaintStyle, TextStyle};
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 
 /// 卡片容器：提供三个具名插槽 `header` / `body` / `footer`，以及可选的标题文本。
@@ -37,8 +38,7 @@ pub struct Card {
     header: Vec<Box<dyn Widget>>,
     body: Vec<Box<dyn Widget>>,
     footer: Vec<Box<dyn Widget>>,
-    padding: f32,
-    flex_shrink: f32,
+    layout: LayoutAttr,
     variant: CardVariant,
 }
 
@@ -49,8 +49,7 @@ impl Card {
             header: Vec::new(),
             body: Vec::new(),
             footer: Vec::new(),
-            padding: 16.0,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new().padding(16.0),
             variant: CardVariant::Default,
         }
     }
@@ -81,7 +80,13 @@ impl Card {
 
     /// 卡片内边距（默认 16）。
     pub fn padding(mut self, p: f32) -> Self {
-        self.padding = p;
+        self.layout = self.layout.padding(p);
+        self
+    }
+
+    /// 用完整布局属性（builder 式）设置本卡片的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 
@@ -93,7 +98,7 @@ impl Card {
 
     /// 设置 flex 收缩因子（默认 1.0）。
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
         self
     }
 }
@@ -180,7 +185,7 @@ impl Widget for Card {
 
         let pad = match self.variant {
             CardVariant::Compact => 12.0,
-            _ => self.padding,
+            _ => self.layout.padding,
         };
         let mut card_paint = PaintStyle::new()
             .background(t.background.primary_default)
@@ -192,9 +197,7 @@ impl Widget for Card {
         }
 
         let mut layout = FlexStyle::column().padding_all(pad);
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
-        }
+        layout = self.layout.apply(layout);
         ViewNode::Div {
             layout,
             paint: card_paint,

@@ -11,11 +11,29 @@ use crate::geometry::Point;
 use crate::runtime::element::ElementTree;
 use std::collections::HashSet;
 
+/// 进行中的拖拽状态（由 listener 调用 `ctx.begin_drag()` 开启）。
+struct DragState {
+    /// 拖拽源：发起拖拽的节点，后续 Drag 事件全部投递给它。
+    source: ElementId,
+    /// 按下点（窗口坐标）
+    start: Point,
+    /// 上一次鼠标移动的位置（窗口坐标），用于计算增量
+    last: Point,
+    /// 触发 DragStart 的移动阈值（像素）
+    threshold: f32,
+    /// 是否已超过阈值并投递过 DragStart
+    started: bool,
+    button: MouseButton,
+    modifiers: Modifiers,
+}
+
 /// 事件管理器
 pub struct EventManager {
     focused: Option<ElementId>,
     mouse_capture: Option<ElementId>,
     mouse_down: bool,
+    /// 进行中的拖拽（拖拽请求隐含鼠标捕获）。
+    drag: Option<DragState>,
     /// 命中最内层目标（可能无 listener）
     hovered: Option<ElementId>,
     /// 当前 hover 路径上所有带 listener 的节点（HTML 式 mouseenter 语义）
@@ -40,6 +58,7 @@ impl EventManager {
             focused: None,
             mouse_capture: None,
             mouse_down: false,
+            drag: None,
             hovered: None,
             hovered_listeners: Vec::new(),
             pressed_node: None,
@@ -136,6 +155,8 @@ impl EventManager {
         tree: &ElementTree,
         mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
+        // 防御：正常情况下一次拖拽会在 mouse_up 结束，这里兜底清理残留状态。
+        self.drag = None;
         self.mouse_down = true;
         let mut effects = EventEffects::default();
 
@@ -173,15 +194,16 @@ impl EventManager {
             Self::set_pressed_state(tree, Some(id), false);
         }
 
-        // 在当前命中目标以及 hit.path 上所有带 listener 的节点上设置 pressed。
-        // 这样 Button 等组件根在内部子节点被按下时也能正确显示 pressed 反馈。
+        // 在当前命中目标以及 hit.path 上所有带 listener 或声明了
+        // hover/pressed 视觉样式的节点上设置 pressed。这样 Button 等组件根在
+        // 内部子节点被按下时也能正确显示 pressed 反馈，无回调的 IconButton 同样生效。
         Self::set_pressed_state(tree, Some(target), true);
         self.pressed_node = Some(target);
         self.pressed_listeners = hit
             .path
             .iter()
             .copied()
-            .filter(|&id| tree.has_any_listener(id))
+            .filter(|&id| tree.has_any_listener(id) || tree.is_interactive(id))
             .collect();
         for &id in &self.pressed_listeners {
             Self::set_pressed_state(tree, Some(id), true);
@@ -205,6 +227,19 @@ impl EventManager {
         if let Some(cap) = ctx.take_capture_request() {
             self.mouse_capture = Some(cap);
         }
+        // 拖拽请求：隐含鼠标捕获，后续移动/释放事件全部投递给拖拽源。
+        if let Some((source, threshold)) = ctx.take_drag_request() {
+            self.mouse_capture = Some(source);
+            self.drag = Some(DragState {
+                source,
+                start: point,
+                last: point,
+                threshold,
+                started: false,
+                button,
+                modifiers,
+            });
+        }
         if ctx.is_stopped() {
             effects.stop_propagation();
         }
@@ -223,6 +258,26 @@ impl EventManager {
         mut handler: impl FnMut(ElementId, &Event, &mut EventContext),
     ) -> EventEffects {
         let mut effects = EventEffects::default();
+
+        // 拖拽结束：在 MouseUp 之前向拖拽源投递 DragEnd（仅当真正开始过拖拽）。
+        let dragged = self.drag.as_ref().is_some_and(|d| d.started);
+        if let Some(drag) = self.drag.take()
+            && drag.started
+        {
+            let mut ctx = EventContext::with_target(drag.source);
+            let event = Event::DragEnd {
+                x: point.x,
+                y: point.y,
+                dx: point.x - drag.last.x,
+                dy: point.y - drag.last.y,
+                offset_x: point.x - drag.start.x,
+                offset_y: point.y - drag.start.y,
+                button: drag.button,
+                modifiers: drag.modifiers,
+            };
+            handler(drag.source, &event, &mut ctx);
+            effects.merge(&ctx.take_effects());
+        }
 
         // 清除 pressed：同时清捕获节点、真正按下的节点以及按下时带 listener 的祖先节点，
         // 避免任一节点残留 pressed。（修复「按下 A → 移到 B → 在 B 释放」时 A 残留 pressed 的问题）
@@ -248,7 +303,8 @@ impl EventManager {
             handler(capture, &event, &mut ctx);
             effects.merge(&ctx.take_effects());
 
-            if hit.target == capture {
+            // 真实发生拖拽（超过阈值）时抑制 Click，避免「拖拽后又触发点击」。
+            if hit.target == capture && !dragged {
                 let mut ctx = EventContext::with_target(capture);
                 handler(capture, &Event::Click { button }, &mut ctx);
                 effects.merge(&ctx.take_effects());
@@ -286,18 +342,71 @@ impl EventManager {
     ) -> EventEffects {
         let mut effects = EventEffects::default();
 
-        let event = Event::MouseMove {
-            x: point.x,
-            y: point.y,
-        };
-
         if let Some(capture) = self.mouse_capture {
+            // 推进拖拽状态：超过阈值后开始合成 Drag 事件。
+            let mut drag_started_now = false;
+            let mut prev = None;
+            if let Some(drag) = &mut self.drag {
+                prev = Some(drag.last);
+                drag.last = point;
+                if !drag.started {
+                    let dist = ((point.x - drag.start.x).powi(2)
+                        + (point.y - drag.start.y).powi(2))
+                    .sqrt();
+                    if dist >= drag.threshold {
+                        drag.started = true;
+                        drag_started_now = true;
+                    }
+                }
+            }
+
+            let event = if let Some(drag) = &self.drag {
+                if drag.started {
+                    if drag_started_now {
+                        Event::DragStart {
+                            x: point.x,
+                            y: point.y,
+                            offset_x: 0.0,
+                            offset_y: 0.0,
+                            button: drag.button,
+                            modifiers: drag.modifiers,
+                        }
+                    } else {
+                        let prev = prev.expect("drag last known");
+                        Event::DragMove {
+                            x: point.x,
+                            y: point.y,
+                            dx: point.x - prev.x,
+                            dy: point.y - prev.y,
+                            offset_x: point.x - drag.start.x,
+                            offset_y: point.y - drag.start.y,
+                            button: drag.button,
+                            modifiers: drag.modifiers,
+                        }
+                    }
+                } else {
+                    Event::MouseMove {
+                        x: point.x,
+                        y: point.y,
+                    }
+                }
+            } else {
+                Event::MouseMove {
+                    x: point.x,
+                    y: point.y,
+                }
+            };
+
             let mut ctx = EventContext::with_target(capture);
             handler(capture, &event, &mut ctx);
             effects.merge(&ctx.take_effects());
             // 拖拽过程中位置变化需要重绘
             effects.request_render();
         } else if let Some(hit) = hit {
+            let event = Event::MouseMove {
+                x: point.x,
+                y: point.y,
+            };
             let mut ctx = EventContext::with_target(hit.target);
             dispatch_three_phase(&event, hit, &mut handler, &mut ctx);
             effects.merge(&ctx.take_effects());
@@ -305,15 +414,17 @@ impl EventManager {
 
         // HTML 式悬停状态管理：
         // - 命中最内层目标记录为 self.hovered；
-        // - hit.path 上所有带 listener 的节点都会获得 hovered 状态并触发 MouseEnter/MouseLeave。
-        // 这样 Button 等组件根在鼠标悬停其内部子节点时也能正确显示 hover 反馈。
+        // - hit.path 上所有带 listener 或声明了 hover/pressed 视觉样式的节点
+        //   都会获得 hovered 状态并触发 MouseEnter/MouseLeave。
+        // 这样 Button 等组件根在鼠标悬停其内部子节点时也能正确显示 hover 反馈，
+        // 且无回调的 IconButton 也能显示 hover 样式。
         let new_target = hit.map(|h| h.target);
         let new_listeners: Vec<ElementId> = hit
             .map(|h| {
                 h.path
                     .iter()
                     .copied()
-                    .filter(|&id| tree.has_any_listener(id))
+                    .filter(|&id| tree.has_any_listener(id) || tree.is_interactive(id))
                     .collect()
             })
             .unwrap_or_default();
@@ -507,6 +618,56 @@ impl EventManager {
 impl Default for EventManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 把事件分发给指定节点上匹配的监听器。
+///
+/// 同一节点上**内置行为回调**（`ListenerKind::BuiltIn`，组件内部接线，
+/// 如 Input 聚焦/输入、Slider 拖拽）**先于用户回调**（`ListenerKind::User`）执行；
+/// 因此用户回调调用 `stop_propagation()` 不会阻止同节点已执行的内置行为，
+/// 只会停止向其他节点传播。`ctx.set_event` / `ctx.set_current` 由调用方负责。
+pub fn dispatch_node_listeners(
+    tree: &ElementTree,
+    id: ElementId,
+    event: &Event,
+    ctx: &mut EventContext,
+) {
+    use crate::view::node::ListenerKind as LK;
+    let Some(node) = tree.get_node_ref(id) else {
+        return;
+    };
+    let event_type = event.to_type();
+    for pass in [LK::BuiltIn, LK::User] {
+        for listener in node.listeners().iter().filter(|l| l.kind == pass) {
+            if listener.event != event_type {
+                continue;
+            }
+            match ctx.phase() {
+                EventPhase::Capture => {
+                    if let crate::view::node::Callback::WithCtx(cb) = &listener.callback {
+                        cb(ctx);
+                    }
+                }
+                EventPhase::Target => match &listener.callback {
+                    crate::view::node::Callback::Simple(cb) => {
+                        cb();
+                        ctx.stop_propagation();
+                    }
+                    crate::view::node::Callback::WithCtx(cb) => {
+                        cb(ctx);
+                    }
+                },
+                EventPhase::Bubble => {
+                    if let crate::view::node::Callback::Simple(cb) = &listener.callback {
+                        cb();
+                    }
+                }
+            }
+            if ctx.is_stopped() {
+                break;
+            }
+        }
     }
 }
 

@@ -1,21 +1,22 @@
 //! Container — 映射到 `ViewNode::Div`（Block 模式）的布局型组件
+//!
+//! 通用语义化容器。布局属性通过 [`LayoutAttr`] 承载（见 `layout_methods!` 生成的
+//! `width` / `height` / `margin` / `padding` / `align` / `gap` 等方法），视觉装饰
+//! （背景 / 边框 / 圆角 / 阴影）由 `PaintStyle` 提供。
 
 use crate::event::EventContext;
 use crate::geometry::Color;
 use crate::layout::style::FlexStyle;
+use crate::layout::types::FlexAlign;
+use crate::layout_methods;
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::PaintStyle;
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
 pub struct Container {
-    expand: bool,
-    flex_shrink: f32,
-    width: Option<f32>,
-    height: Option<f32>,
-    max_width: Option<f32>,
-    max_height: Option<f32>,
-    padding: f32,
+    layout: LayoutAttr,
     clip_content: bool,
     children: Vec<Box<dyn Widget>>,
     listeners: Vec<Listener>,
@@ -25,49 +26,17 @@ pub struct Container {
 impl Container {
     pub fn new() -> Self {
         Self {
-            expand: false,
-            flex_shrink: 1.0,
-            width: None,
-            height: None,
-            max_width: None,
-            max_height: None,
-            padding: 0.0,
+            layout: LayoutAttr::new(),
             clip_content: false,
             children: Vec::new(),
             listeners: Vec::new(),
             paint: None,
         }
     }
-    pub fn width(mut self, v: f32) -> Self {
-        self.width = Some(v);
-        self
-    }
-    pub fn height(mut self, v: f32) -> Self {
-        self.height = Some(v);
-        self
-    }
+    layout_methods!(for Container);
+
     pub fn child(mut self, c: impl Widget + 'static) -> Self {
         self.children.push(Box::new(c));
-        self
-    }
-    pub fn expand(mut self, v: bool) -> Self {
-        self.expand = v;
-        self
-    }
-    pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
-        self
-    }
-    pub fn max_width(mut self, v: f32) -> Self {
-        self.max_width = Some(v);
-        self
-    }
-    pub fn max_height(mut self, v: f32) -> Self {
-        self.max_height = Some(v);
-        self
-    }
-    pub fn padding(mut self, v: f32) -> Self {
-        self.padding = v;
         self
     }
     pub fn clip(mut self, v: bool) -> Self {
@@ -141,25 +110,22 @@ impl Default for Container {
 }
 impl Widget for Container {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
-        let mut layout = FlexStyle::block().padding_all(self.padding);
-        if self.expand {
-            layout = layout.flex_grow(1.0);
+        let mut layout = FlexStyle::block().padding_all(self.layout.padding);
+        // 方向性 padding 覆盖统一值。
+        if let Some(v) = self.layout.padding_l {
+            layout = layout.padding_left(v);
         }
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
+        if let Some(v) = self.layout.padding_t {
+            layout = layout.padding_top(v);
         }
-        if let Some(w) = self.width {
-            layout = layout.width(w);
+        if let Some(v) = self.layout.padding_r {
+            layout = layout.padding_right(v);
         }
-        if let Some(h) = self.height {
-            layout = layout.height(h);
+        if let Some(v) = self.layout.padding_b {
+            layout = layout.padding_bottom(v);
         }
-        if let Some(mw) = self.max_width {
-            layout = layout.max_width(mw);
-        }
-        if let Some(mh) = self.max_height {
-            layout = layout.max_height(mh);
-        }
+        // 其余布局属性统一应用。
+        layout = self.layout.apply(layout);
 
         let mut paint = PaintStyle::default();
         if let Some(p) = &self.paint {
@@ -175,10 +141,10 @@ impl Widget for Container {
             if p.border_radius > 0.0 {
                 paint = paint.radius(p.border_radius);
             }
-            if let Some(bc) = p.border_color {
-                if p.border_width > 0.0 {
-                    paint = paint.border(p.border_width, bc);
-                }
+            if let Some(bc) = p.border_color
+                && p.border_width > 0.0
+            {
+                paint = paint.border(p.border_width, bc);
             }
             if p.opacity != 1.0 {
                 paint = paint.opacity(p.opacity);

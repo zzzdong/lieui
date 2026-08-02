@@ -55,6 +55,23 @@ pub struct Listener {
     pub event: EventType,
     /// 事件发生时的回调。
     pub callback: Callback,
+    /// 事件来源：内置行为 vs 用户自定义回调。
+    ///
+    /// 组件内部行为（Slider 拖拽、Input 聚焦/输入、Draggable 拖拽接线等）标记为
+    /// [`ListenerKind::BuiltIn`]，通过公开 API 注册的回调（`.on_click(...)` 等）
+    /// 标记为 [`ListenerKind::User`]。分发时同一节点上内置回调先于用户回调执行，
+    /// 用户回调调用 `stop_propagation()` 不会阻止同节点已执行的内置行为。
+    pub kind: ListenerKind,
+}
+
+/// 事件监听器来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ListenerKind {
+    /// 组件内部行为所需的回调（由组件构建时标记）。
+    BuiltIn,
+    /// 用户通过组件公开 API 注册的回调。
+    #[default]
+    User,
 }
 
 impl Listener {
@@ -62,6 +79,7 @@ impl Listener {
         Self {
             event: EventType::Click,
             callback: Callback::Simple(Rc::clone(&cb)),
+            kind: ListenerKind::User,
         }
     }
 
@@ -69,6 +87,7 @@ impl Listener {
         Self {
             event: EventType::Click,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -76,6 +95,7 @@ impl Listener {
         Self {
             event: EventType::MouseDown,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -83,6 +103,7 @@ impl Listener {
         Self {
             event: EventType::MouseUp,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -90,6 +111,7 @@ impl Listener {
         Self {
             event: EventType::MouseMove,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -97,6 +119,7 @@ impl Listener {
         Self {
             event: EventType::MouseWheel,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -104,6 +127,7 @@ impl Listener {
         Self {
             event: EventType::MouseEnter,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -111,6 +135,31 @@ impl Listener {
         Self {
             event: EventType::MouseLeave,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
+        }
+    }
+
+    pub fn on_drag_start(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::DragStart,
+            callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
+        }
+    }
+
+    pub fn on_drag_move(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::DragMove,
+            callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
+        }
+    }
+
+    pub fn on_drag_end(cb: Rc<dyn Fn(&mut crate::event::EventContext)>) -> Self {
+        Self {
+            event: EventType::DragEnd,
+            callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -118,6 +167,7 @@ impl Listener {
         Self {
             event: EventType::KeyDown,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -125,6 +175,7 @@ impl Listener {
         Self {
             event: EventType::KeyUp,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -132,6 +183,7 @@ impl Listener {
         Self {
             event: EventType::FocusIn,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -139,6 +191,7 @@ impl Listener {
         Self {
             event: EventType::FocusOut,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -146,6 +199,7 @@ impl Listener {
         Self {
             event: EventType::ImePreedit,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -153,6 +207,7 @@ impl Listener {
         Self {
             event: EventType::ImeCommit,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
     }
 
@@ -160,7 +215,19 @@ impl Listener {
         Self {
             event: EventType::ImeDisabled,
             callback: Callback::WithCtx(cb),
+            kind: ListenerKind::User,
         }
+    }
+
+    /// 标记为内置行为回调（组件内部接线使用）。
+    pub fn builtin(mut self) -> Self {
+        self.kind = ListenerKind::BuiltIn;
+        self
+    }
+
+    /// 事件来源。
+    pub fn kind(&self) -> ListenerKind {
+        self.kind
     }
 }
 
@@ -173,6 +240,7 @@ pub fn listeners_sig_eq(a: &[Listener], b: &[Listener]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b.iter()).all(|(x, y)| {
             x.event == y.event
+                && x.kind == y.kind
                 && matches!(
                     (&x.callback, &y.callback),
                     (Callback::Simple(_), Callback::Simple(_))
@@ -287,7 +355,7 @@ impl ViewNode {
                     .measure(constraint)
             }
             ViewNode::Div { layout, .. } => {
-                use crate::layout::types::{is_defined, Dimension as LayoutDimension};
+                use crate::layout::types::{Dimension as LayoutDimension, is_defined};
                 let w = layout.dim[LayoutDimension::Width as usize];
                 let h = layout.dim[LayoutDimension::Height as usize];
                 if is_defined(w) || is_defined(h) {
@@ -445,5 +513,22 @@ impl ViewNode {
             .iter()
             .filter(|l| l.event == EventType::Click)
             .collect()
+    }
+
+    /// 节点是否声明了交互视觉（hover / pressed 样式）。
+    ///
+    /// 与 listener 无关：IconButton、Button 等组件即使没有注册任何回调，
+    /// 只要配置了 hover/pressed 背景或文字颜色，就应参与 hover/pressed
+    /// 状态管理与渲染（工具栏按钮最常见的形态）。
+    pub fn is_interactive(&self) -> bool {
+        match self {
+            ViewNode::Div { paint, .. } => {
+                paint.hover_background.is_some() || paint.pressed_background.is_some()
+            }
+            ViewNode::Text { style, .. } => {
+                style.hover_color.is_some() || style.pressed_color.is_some()
+            }
+            ViewNode::Image { .. } => false,
+        }
     }
 }

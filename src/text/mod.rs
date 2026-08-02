@@ -4,9 +4,9 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 
 use parley::{
+    Alignment, AlignmentOptions, FontContext, LayoutContext,
     editing::PlainEditor,
     style::{FontFamily, FontFamilyName, FontWeight as ParleyFontWeight, StyleProperty},
-    Alignment, AlignmentOptions, FontContext, LayoutContext,
 };
 
 use crate::geometry::Color;

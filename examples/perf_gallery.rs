@@ -183,7 +183,7 @@ fn find_first_clickable(tree: &ElementTree, id: ElementId) -> Option<ElementId> 
 }
 
 fn main() {
-    std::env::set_var("LIEUI_PERF", "1");
+    unsafe { std::env::set_var("LIEUI_PERF", "1") };
 
     let viewport = Size::new(900.0, 720.0); // 与 gallery 一致
     let count = State::new(0i32);
@@ -222,7 +222,7 @@ fn main() {
 
         // 事件分发
         let t_ev = Instant::now();
-        let (_lt, target) = runtime.layers.hit_test_top(click_pos).expect("hit");
+        let (_, target, _) = runtime.layers.hit_test_top(click_pos).expect("hit");
         let path = runtime.layers.path_to(target);
         let hit = HitTestResult { target, path };
         {

@@ -1,4 +1,8 @@
 //! Column / Row — 映射到 `ViewNode::Div`（Flex 模式）的布局型组件
+//!
+//! 主轴/交叉轴对齐、间距、伸缩等通用布局属性统一由 [`LayoutAttr`] 承载，
+//! 通过 builder 方法设置（`spacing` 对应 `gap`，`justify_content` /
+//! `align_items` / `expand` / `flex_shrink` 一一对应）。
 
 use crate::event::EventContext;
 use crate::geometry::Color;
@@ -6,16 +10,13 @@ use crate::layout::style::FlexStyle;
 use crate::layout::types::{FlexAlign, FlexWrap};
 use crate::view::node::{Listener, ViewNode};
 use crate::view::paint::PaintStyle;
+use crate::widget::layout::LayoutAttr;
 use crate::widget::{BuildContext, Widget};
 use std::rc::Rc;
 
 // ===== Column (map → ViewNode::Flex, direction = Column) =====
 pub struct Column {
-    spacing: f32,
-    justify: FlexAlign,
-    align: FlexAlign,
-    expand: bool,
-    flex_shrink: f32,
+    layout: LayoutAttr,
     children: Vec<Box<dyn Widget>>,
     listeners: Vec<Listener>,
     /// 视觉样式自定义。
@@ -24,11 +25,7 @@ pub struct Column {
 impl Column {
     pub fn new() -> Self {
         Self {
-            spacing: 4.0,
-            justify: FlexAlign::Start,
-            align: FlexAlign::Stretch,
-            expand: false,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new().gap(4.0).align_items(FlexAlign::Stretch),
             children: Vec::new(),
             listeners: Vec::new(),
             paint: None,
@@ -38,30 +35,50 @@ impl Column {
         self.children.push(Box::new(c));
         self
     }
+    /// 子项间距。
     pub fn spacing(mut self, s: f32) -> Self {
-        self.spacing = s;
+        self.layout = self.layout.gap(s);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本 widget 的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
+        self
+    }
+    pub fn width(mut self, v: f32) -> Self {
+        self.layout = self.layout.width(v);
+        self
+    }
+    pub fn height(mut self, v: f32) -> Self {
+        self.layout = self.layout.height(v);
         self
     }
     pub fn justify_content(mut self, j: FlexAlign) -> Self {
-        self.justify = j;
+        self.layout = self.layout.justify_content(j);
         self
     }
     pub fn align_items(mut self, a: FlexAlign) -> Self {
-        self.align = a;
+        self.layout = self.layout.align_items(a);
         self
     }
     pub fn expand(mut self, v: bool) -> Self {
-        self.expand = v;
+        self.layout = self.layout.expand(v);
         self
     }
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+    pub fn margin(mut self, v: f32) -> Self {
+        self.layout = self.layout.margin(v);
         self
     }
     pub fn center(mut self) -> Self {
-        self.justify = FlexAlign::Center;
-        self.align = FlexAlign::Center;
-        self.expand = true;
+        self.layout = self
+            .layout
+            .justify_content(FlexAlign::Center)
+            .align_items(FlexAlign::Center)
+            .expand(true);
         self
     }
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
@@ -70,6 +87,14 @@ impl Column {
     }
     pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
         self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
+        self
+    }
+
+    /// 条件添加子节点。当 `c` 为 `Some` 时将其加入子节点列表。
+    pub fn maybe_child<W: Widget + 'static>(mut self, c: Option<W>) -> Self {
+        if let Some(c) = c {
+            self.children.push(Box::new(c));
+        }
         self
     }
 
@@ -120,16 +145,11 @@ impl Default for Column {
 impl Widget for Column {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
         let mut layout = FlexStyle::column()
-            .justify_content(self.justify)
-            .align_items(self.align)
-            .gap(self.spacing)
+            .justify_content(self.layout.justify_content.unwrap_or(FlexAlign::Start))
+            .align_items(self.layout.align_items.unwrap_or(FlexAlign::Stretch))
+            .gap(self.layout.gap)
             .wrap(FlexWrap::NoWrap);
-        if self.expand {
-            layout = layout.flex_grow(1.0);
-        }
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
-        }
+        layout = self.layout.apply(layout);
         ViewNode::Div {
             layout,
             paint: self.paint.clone().unwrap_or_default(),
@@ -147,11 +167,7 @@ impl Widget for Column {
 
 // ===== Row (map → ViewNode::Flex, direction = Row) =====
 pub struct Row {
-    spacing: f32,
-    justify: FlexAlign,
-    align: FlexAlign,
-    expand: bool,
-    flex_shrink: f32,
+    layout: LayoutAttr,
     children: Vec<Box<dyn Widget>>,
     listeners: Vec<Listener>,
     /// 视觉样式自定义。
@@ -160,11 +176,7 @@ pub struct Row {
 impl Row {
     pub fn new() -> Self {
         Self {
-            spacing: 4.0,
-            justify: FlexAlign::Start,
-            align: FlexAlign::Center,
-            expand: false,
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new().gap(4.0).align_items(FlexAlign::Center),
             children: Vec::new(),
             listeners: Vec::new(),
             paint: None,
@@ -174,30 +186,50 @@ impl Row {
         self.children.push(Box::new(c));
         self
     }
+    /// 子项间距。
     pub fn spacing(mut self, s: f32) -> Self {
-        self.spacing = s;
+        self.layout = self.layout.gap(s);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本 widget 的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
+        self
+    }
+    pub fn width(mut self, v: f32) -> Self {
+        self.layout = self.layout.width(v);
+        self
+    }
+    pub fn height(mut self, v: f32) -> Self {
+        self.layout = self.layout.height(v);
         self
     }
     pub fn justify_content(mut self, j: FlexAlign) -> Self {
-        self.justify = j;
+        self.layout = self.layout.justify_content(j);
         self
     }
     pub fn align_items(mut self, a: FlexAlign) -> Self {
-        self.align = a;
+        self.layout = self.layout.align_items(a);
         self
     }
     pub fn expand(mut self, v: bool) -> Self {
-        self.expand = v;
+        self.layout = self.layout.expand(v);
         self
     }
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+    pub fn margin(mut self, v: f32) -> Self {
+        self.layout = self.layout.margin(v);
         self
     }
     pub fn center(mut self) -> Self {
-        self.justify = FlexAlign::Center;
-        self.align = FlexAlign::Center;
-        self.expand = true;
+        self.layout = self
+            .layout
+            .justify_content(FlexAlign::Center)
+            .align_items(FlexAlign::Center)
+            .expand(true);
         self
     }
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
@@ -206,6 +238,14 @@ impl Row {
     }
     pub fn on_click_with_ctx<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
         self.listeners.push(Listener::on_click_with_ctx(Rc::new(f)));
+        self
+    }
+
+    /// 条件添加子节点。当 `c` 为 `Some` 时将其加入子节点列表。
+    pub fn maybe_child<W: Widget + 'static>(mut self, c: Option<W>) -> Self {
+        if let Some(c) = c {
+            self.children.push(Box::new(c));
+        }
         self
     }
 
@@ -256,16 +296,11 @@ impl Default for Row {
 impl Widget for Row {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
         let mut layout = FlexStyle::row()
-            .justify_content(self.justify)
-            .align_items(self.align)
-            .gap(self.spacing)
+            .justify_content(self.layout.justify_content.unwrap_or(FlexAlign::Start))
+            .align_items(self.layout.align_items.unwrap_or(FlexAlign::Center))
+            .gap(self.layout.gap)
             .wrap(FlexWrap::NoWrap);
-        if self.expand {
-            layout = layout.flex_grow(1.0);
-        }
-        if self.flex_shrink != 1.0 {
-            layout = layout.flex_shrink(self.flex_shrink);
-        }
+        layout = self.layout.apply(layout);
         ViewNode::Div {
             layout,
             paint: self.paint.clone().unwrap_or_default(),

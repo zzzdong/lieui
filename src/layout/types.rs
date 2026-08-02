@@ -213,11 +213,7 @@ pub fn is_undefined(v: f32) -> bool {
 
 /// NaN 转 INF
 pub fn nan_as_inf(n: f32) -> f32 {
-    if n.is_nan() {
-        f32::INFINITY
-    } else {
-        n
-    }
+    if n.is_nan() { f32::INFINITY } else { n }
 }
 
 /// 浮点数近似相等比较

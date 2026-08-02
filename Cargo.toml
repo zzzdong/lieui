@@ -1,12 +1,12 @@
 [package]
 name = "lieui"
-version = "0.2.0"
-edition = "2021"
+version = "0.2.0-beta.1"
+edition = "2024"
 description = "A Rust GUI library with C/S architecture and builder-driven UI"
 
 [dependencies]
 log = "0.4"
-vello_cpu = "0.0.9"
+vello_cpu = "0.1"
 kurbo = "0.13.1"
 parley = "0.11.0"
 slotmap = "1.0"
@@ -15,8 +15,6 @@ softbuffer = "0.4"
 arboard = "3.4"
 image = "0.25"
 
-# debug 构建下自身代码用 O1，依赖（vello_cpu/parley 等纯 CPU 密集库）用 O2，
-# 否则 debug 运行光栅化/排版慢数十倍，无法正常交互调试。
 [profile.dev]
 opt-level = 1
 

@@ -13,20 +13,22 @@ pub mod text;
 pub mod theme;
 pub mod view;
 pub mod widget;
+pub mod window;
 
 pub mod prelude {
-    // ── app ──
-    pub use crate::app::set_window_size;
-    pub use crate::app::window_size;
-    pub use crate::app::Application;
+    // ── app / window ──
+    pub use crate::app::{Application, CloseAction};
     pub use crate::core::ElementId;
     pub use crate::render::visual::{LayeredElement, VisualElement};
     pub use crate::render::{Renderer, VelloRenderer};
     pub use crate::runtime::Runtime;
+    pub use crate::window::WindowConfig;
 
     // ── state ──
+    pub use crate::core::layers::{Anchor, FocusPolicy, LayerKind, LayerOptions};
     pub use crate::state::{
-        hide_modal, hide_overlay, request_rebuild, request_redraw, show_modal, show_overlay, State,
+        LayerSpec, State, hide_modal, hide_overlay, request_rebuild, request_redraw,
+        request_window_close, show_layer, show_modal, show_overlay,
     };
 
     // ── geometry ──
@@ -36,11 +38,12 @@ pub mod prelude {
     pub use crate::layout::{FlexAlign, FlexDirection, FlexWrap};
 
     // ── theme ──
-    pub use crate::theme::{current, set, Theme};
+    pub use crate::theme::{Theme, current, set};
 
     // ── widgets ──
     pub use crate::widget::{
-        Button, Card, Checkbox, Column, Container, Divider, Image, Input, Progress, Radio, Row,
-        ScrollView, Slider, Switch, Tab, Text, Tooltip, VirtualList,
+        Button, Card, Checkbox, Column, Container, Divider, Draggable, Icon, IconButton,
+        IconButtonVariant, IconName, Image, Input, LayoutAttr, Progress, Radio, Row, ScrollView,
+        Slider, Switch, Tab, Text, Tooltip, VirtualList,
     };
 }

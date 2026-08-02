@@ -89,11 +89,7 @@ impl FlexNode {
 
     pub fn get_layout_dimension(&self, axis: FlexDirection) -> f32 {
         let v = self.layout_result.dim[K_AXIS_DIM[axis as usize] as usize];
-        if is_defined(v) {
-            v
-        } else {
-            VALUE_UNDEFINED
-        }
+        if is_defined(v) { v } else { VALUE_UNDEFINED }
     }
 
     // ---- Border/Padding ----
@@ -140,19 +136,11 @@ impl FlexNode {
     }
     pub fn get_layout_start_margin(&self, axis: FlexDirection) -> f32 {
         let v = self.layout_result.margin[K_AXIS_START[axis as usize] as usize];
-        if is_defined(v) {
-            v
-        } else {
-            0.0
-        }
+        if is_defined(v) { v } else { 0.0 }
     }
     pub fn get_layout_end_margin(&self, axis: FlexDirection) -> f32 {
         let v = self.layout_result.margin[K_AXIS_END[axis as usize] as usize];
-        if is_defined(v) {
-            v
-        } else {
-            0.0
-        }
+        if is_defined(v) { v } else { 0.0 }
     }
 
     // ---- Position ----

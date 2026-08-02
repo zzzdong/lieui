@@ -22,9 +22,9 @@ pub use flex_line::FlexLine;
 pub use flex_node::FlexNode;
 pub use style::FlexStyle;
 pub use types::{
+    CSSDirection, Dimension, Direction as LayoutDirection, DisplayType, FlexAlign, FlexDirection,
+    FlexWrap, K_AXIS_DIM, K_AXIS_END, K_AXIS_START, LayoutAction, LayoutResult, MeasureMode,
+    NodeType as EngineNodeType, PositionType, SizeMode, TaitankSize, VALUE_AUTO, VALUE_UNDEFINED,
     float_is_equal, is_column_direction, is_defined, is_reverse_direction, is_row_direction,
-    is_undefined, nan_as_inf, CSSDirection, Dimension, Direction as LayoutDirection, DisplayType,
-    FlexAlign, FlexDirection, FlexWrap, LayoutAction, LayoutResult, MeasureMode,
-    NodeType as EngineNodeType, PositionType, SizeMode, TaitankSize, K_AXIS_DIM, K_AXIS_END,
-    K_AXIS_START, VALUE_AUTO, VALUE_UNDEFINED,
+    is_undefined, nan_as_inf,
 };

@@ -17,7 +17,7 @@
 //!   │  Pages: 8  |  Selected: 1  |  Ready            │
 //!   └───────────────────────────────────────────────┘
 
-use lieui::geometry::{Color, Size};
+use lieui::geometry::Color;
 use lieui::layout::types::FlexAlign;
 use lieui::prelude::*;
 use lieui::state::State;
@@ -153,244 +153,235 @@ fn main() {
 
     // ── Builder ──
 
-    let app = Application::new(
-        move |_ctx| {
-            let c = |h| hex(h);
-            let hbg = c(0x1e293b);
-            let sbb = c(0xf1f5f9);
-            let acc = c(0x3b82f6);
-            let acl = c(0xdbeafe);
-            let tp = c(0x0f172a);
-            let ts = c(0x64748b);
-            let tm = c(0x94a3b8);
-            let bd = c(0xe2e8f0);
-            let sbg = c(0xf8fafc);
-            let cbgb = c(0xf8fafc);
-            let tb = c(0xdbeafe);
+    let app = Application::new(WindowConfig::new().size(960.0, 640.0), move |_ctx| {
+        let c = |h| hex(h);
+        let hbg = c(0x1e293b);
+        let sbb = c(0xf1f5f9);
+        let acc = c(0x3b82f6);
+        let acl = c(0xdbeafe);
+        let tp = c(0x0f172a);
+        let ts = c(0x64748b);
+        let tm = c(0x94a3b8);
+        let bd = c(0xe2e8f0);
+        let sbg = c(0xf8fafc);
+        let cbgb = c(0xf8fafc);
+        let tb = c(0xdbeafe);
 
-            let pl = pages.get();
-            let sl = selected.get();
-            let cu = *current.get();
-            let sc = sl.iter().filter(|&&b| b).count();
-            let stxt: String = status.get().clone();
+        let pl = pages.get();
+        let sl = selected.get();
+        let cu = *current.get();
+        let sc = sl.iter().filter(|&&b| b).count();
+        let stxt: String = status.get().clone();
 
-            // ── 左侧：缩略图列表 ──
+        // ── 左侧：缩略图列表 ──
 
-            let mut side = Column::new().spacing(4.0).child(
-                Text::new(format!("Pages ({})", pl.len()))
-                    .font_size(13.0)
-                    .color(ts),
-            );
+        let mut side = Column::new().spacing(4.0).child(
+            Text::new(format!("Pages ({})", pl.len()))
+                .font_size(13.0)
+                .color(ts),
+        );
 
-            if pl.is_empty() {
-                side = side.child(Text::new("No pages loaded").font_size(11.0).color(tm));
-            } else {
-                for (idx, info) in pl.iter().enumerate() {
-                    let chk = *sl.get(idx).unwrap_or(&false);
-                    let curp = cu == Some(idx);
-                    let t = tog.clone();
-                    let c = set_cur.clone();
-                    side = side.child(
-                        Container::new()
-                            .background(if curp { acl } else { Color::WHITE })
-                            .child(
-                                Row::new()
-                                    .spacing(10.0)
-                                    .align_items(FlexAlign::Center)
-                                    .child(
-                                        Container::new()
-                                            .width(48.0)
-                                            .height(64.0)
-                                            .background(tb)
-                                            .child(
-                                                Column::new()
-                                                    .expand(true)
-                                                    .justify_content(FlexAlign::Center)
-                                                    .align_items(FlexAlign::Center)
-                                                    .child(
-                                                        Text::new(format!("{}", info.index + 1))
-                                                            .font_size(28.0)
-                                                            .color(acc),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        Column::new()
-                                            .spacing(2.0)
-                                            .child(Text::new(&info.label).font_size(13.0).color(tp))
-                                            .child(
-                                                Text::new(&info.dimensions)
-                                                    .font_size(10.0)
-                                                    .color(tm),
-                                            )
-                                            .child(
-                                                Checkbox::new(chk)
-                                                    .label("Select")
-                                                    .on_click(move || t(idx)),
-                                            ),
-                                    )
-                                    .child(Button::new("View").on_click(move || c(idx))),
-                            ),
-                    );
-                }
+        if pl.is_empty() {
+            side = side.child(Text::new("No pages loaded").font_size(11.0).color(tm));
+        } else {
+            for (idx, info) in pl.iter().enumerate() {
+                let chk = *sl.get(idx).unwrap_or(&false);
+                let curp = cu == Some(idx);
+                let t = tog.clone();
+                let c = set_cur.clone();
+                side = side.child(
+                    Container::new()
+                        .background(if curp { acl } else { Color::WHITE })
+                        .child(
+                            Row::new()
+                                .spacing(10.0)
+                                .align_items(FlexAlign::Center)
+                                .child(
+                                    Container::new()
+                                        .width(48.0)
+                                        .height(64.0)
+                                        .background(tb)
+                                        .child(
+                                            Column::new()
+                                                .expand(true)
+                                                .justify_content(FlexAlign::Center)
+                                                .align_items(FlexAlign::Center)
+                                                .child(
+                                                    Text::new(format!("{}", info.index + 1))
+                                                        .font_size(28.0)
+                                                        .color(acc),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    Column::new()
+                                        .spacing(2.0)
+                                        .child(Text::new(&info.label).font_size(13.0).color(tp))
+                                        .child(
+                                            Text::new(&info.dimensions).font_size(10.0).color(tm),
+                                        )
+                                        .child(
+                                            Checkbox::new(chk)
+                                                .label("Select")
+                                                .on_click(move || t(idx)),
+                                        ),
+                                )
+                                .child(Button::new("View").on_click(move || c(idx))),
+                        ),
+                );
             }
+        }
 
-            let sidebar = Container::new()
-                .width(220.0)
-                .background(sbb)
-                .child(ScrollView::new(520.0).child(side));
+        let sidebar = Container::new()
+            .width(220.0)
+            .background(sbb)
+            .child(ScrollView::new(520.0).child(side));
 
-            // ── 右侧 ──
+        // ── 右侧 ──
 
-            // 预览
-            let preview: Container = if let Some(idx) = cu {
-                if let Some(info) = pl.get(idx) {
-                    let card = Container::new().expand(true).padding(24.0).child(
-                        Column::new()
-                            .spacing(12.0)
-                            .child(
-                                Column::new()
-                                    .spacing(4.0)
-                                    .child(Text::new(&info.label).font_size(24.0).color(tp))
-                                    .child(Text::new(&info.dimensions).font_size(13.0).color(ts)),
-                            )
-                            .child(divider(bd))
-                            .child(
-                                Column::new()
-                                    .spacing(6.0)
-                                    .child(Text::new("Text preview:").font_size(11.0).color(tm))
-                                    .child(Text::new(&info.preview_text).font_size(12.0).color(tp)),
-                            ),
-                    );
-                    Container::new().expand(true).background(cbgb).child(
-                        Column::new()
-                            .expand(true)
-                            .justify_content(FlexAlign::Center)
-                            .align_items(FlexAlign::Stretch)
-                            .child(card),
-                    )
-                } else {
-                    Container::new().expand(true).background(cbgb)
-                }
-            } else {
+        // 预览
+        let preview: Container = if let Some(idx) = cu {
+            if let Some(info) = pl.get(idx) {
+                let card = Container::new().expand(true).padding(24.0).child(
+                    Column::new()
+                        .spacing(12.0)
+                        .child(
+                            Column::new()
+                                .spacing(4.0)
+                                .child(Text::new(&info.label).font_size(24.0).color(tp))
+                                .child(Text::new(&info.dimensions).font_size(13.0).color(ts)),
+                        )
+                        .child(divider(bd))
+                        .child(
+                            Column::new()
+                                .spacing(6.0)
+                                .child(Text::new("Text preview:").font_size(11.0).color(tm))
+                                .child(Text::new(&info.preview_text).font_size(12.0).color(tp)),
+                        ),
+                );
                 Container::new().expand(true).background(cbgb).child(
                     Column::new()
                         .expand(true)
                         .justify_content(FlexAlign::Center)
-                        .align_items(FlexAlign::Center)
-                        .child(
-                            Text::new("Select a page to preview")
-                                .font_size(14.0)
-                                .color(tm),
-                        ),
+                        .align_items(FlexAlign::Stretch)
+                        .child(card),
                 )
-            };
+            } else {
+                Container::new().expand(true).background(cbgb)
+            }
+        } else {
+            Container::new().expand(true).background(cbgb).child(
+                Column::new()
+                    .expand(true)
+                    .justify_content(FlexAlign::Center)
+                    .align_items(FlexAlign::Center)
+                    .child(
+                        Text::new("Select a page to preview")
+                            .font_size(14.0)
+                            .color(tm),
+                    ),
+            )
+        };
 
-            // 工具栏
-            let toolbar = Column::new()
-                .spacing(0.0)
+        // 工具栏
+        let toolbar = Column::new()
+            .spacing(0.0)
+            .child(
+                Container::new()
+                    .padding(12.0)
+                    .background(Color::WHITE)
+                    .child(
+                        Row::new()
+                            .expand(true)
+                            .justify_content(FlexAlign::SpaceBetween)
+                            .align_items(FlexAlign::Center)
+                            .child(
+                                Row::new()
+                                    .spacing(12.0)
+                                    .align_items(FlexAlign::Center)
+                                    .child(Button::new("Load Sample").on_click(load.clone()))
+                                    .child(Button::new("Delete Sel").on_click(del.clone()))
+                                    .child(Button::new("Extract Sel").on_click(ext.clone()))
+                                    .child(Button::new("Export All").on_click(exp.clone())),
+                            )
+                            .child(
+                                Text::new(format!("{} selected", sc))
+                                    .font_size(12.0)
+                                    .color(if sc > 0 { acc } else { tm }),
+                            ),
+                    ),
+            )
+            .child(divider(bd));
+
+        let right = Column::new()
+            .spacing(0.0)
+            .expand(true)
+            .child(toolbar)
+            .child(preview);
+
+        // ── 底部状态栏 ──
+
+        let status_bar = Container::new().background(sbg).child(
+            Row::new()
+                .spacing(24.0)
+                .align_items(FlexAlign::Center)
                 .child(
-                    Container::new()
-                        .padding(12.0)
-                        .background(Color::WHITE)
-                        .child(
+                    Text::new(format!("Pages: {}", pl.len()))
+                        .font_size(11.0)
+                        .color(ts),
+                )
+                .child(
+                    Text::new(format!("Selected: {}", sc))
+                        .font_size(11.0)
+                        .color(ts),
+                )
+                .child(Text::new(&stxt).font_size(11.0).color(tm)),
+        );
+
+        // ── 页面结构 ──
+        // Container.expand(true) 填满视口宽高，
+        // 内层 Column 填充高度且从 Container 的 loose 约束获得全宽
+
+        Box::new(
+            Container::new().expand(true).child(
+                Column::new()
+                    .spacing(0.0)
+                    .expand(true)
+                    .child(
+                        Container::new().background(hbg).child(
                             Row::new()
-                                .expand(true)
                                 .justify_content(FlexAlign::SpaceBetween)
                                 .align_items(FlexAlign::Center)
                                 .child(
                                     Row::new()
-                                        .spacing(12.0)
+                                        .spacing(16.0)
                                         .align_items(FlexAlign::Center)
-                                        .child(Button::new("Load Sample").on_click(load.clone()))
-                                        .child(Button::new("Delete Sel").on_click(del.clone()))
-                                        .child(Button::new("Extract Sel").on_click(ext.clone()))
-                                        .child(Button::new("Export All").on_click(exp.clone())),
+                                        .child(
+                                            Text::new("PDFKit").font_size(20.0).color(Color::WHITE),
+                                        )
+                                        .child(Text::new("|").font_size(16.0).color(c(0x475569)))
+                                        .child(
+                                            Text::new("sample.pdf")
+                                                .font_size(13.0)
+                                                .color(c(0x94a3b8)),
+                                        ),
                                 )
-                                .child(
-                                    Text::new(format!("{} selected", sc))
-                                        .font_size(12.0)
-                                        .color(if sc > 0 { acc } else { tm }),
-                                ),
+                                .child(Button::new("Import PDF...").on_click(load.clone())),
                         ),
-                )
-                .child(divider(bd));
-
-            let right = Column::new()
-                .spacing(0.0)
-                .expand(true)
-                .child(toolbar)
-                .child(preview);
-
-            // ── 底部状态栏 ──
-
-            let status_bar = Container::new().background(sbg).child(
-                Row::new()
-                    .spacing(24.0)
-                    .align_items(FlexAlign::Center)
-                    .child(
-                        Text::new(format!("Pages: {}", pl.len()))
-                            .font_size(11.0)
-                            .color(ts),
                     )
                     .child(
-                        Text::new(format!("Selected: {}", sc))
-                            .font_size(11.0)
-                            .color(ts),
+                        Row::new()
+                            .spacing(0.0)
+                            .expand(true)
+                            .align_items(FlexAlign::Stretch)
+                            .child(sidebar)
+                            .child(right),
                     )
-                    .child(Text::new(&stxt).font_size(11.0).color(tm)),
-            );
-
-            // ── 页面结构 ──
-            // Container.expand(true) 填满视口宽高，
-            // 内层 Column 填充高度且从 Container 的 loose 约束获得全宽
-
-            Box::new(
-                Container::new().expand(true).child(
-                    Column::new()
-                        .spacing(0.0)
-                        .expand(true)
-                        .child(
-                            Container::new().background(hbg).child(
-                                Row::new()
-                                    .justify_content(FlexAlign::SpaceBetween)
-                                    .align_items(FlexAlign::Center)
-                                    .child(
-                                        Row::new()
-                                            .spacing(16.0)
-                                            .align_items(FlexAlign::Center)
-                                            .child(
-                                                Text::new("PDFKit")
-                                                    .font_size(20.0)
-                                                    .color(Color::WHITE),
-                                            )
-                                            .child(
-                                                Text::new("|").font_size(16.0).color(c(0x475569)),
-                                            )
-                                            .child(
-                                                Text::new("sample.pdf")
-                                                    .font_size(13.0)
-                                                    .color(c(0x94a3b8)),
-                                            ),
-                                    )
-                                    .child(Button::new("Import PDF...").on_click(load.clone())),
-                            ),
-                        )
-                        .child(
-                            Row::new()
-                                .spacing(0.0)
-                                .expand(true)
-                                .align_items(FlexAlign::Stretch)
-                                .child(sidebar)
-                                .child(right),
-                        )
-                        .child(divider(bd))
-                        .child(status_bar),
-                ),
-            )
-        },
-        Size::new(960.0, 640.0),
-    );
+                    .child(divider(bd))
+                    .child(status_bar),
+            ),
+        )
+    });
 
     app.run();
 }

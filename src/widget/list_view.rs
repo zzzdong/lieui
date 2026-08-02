@@ -5,6 +5,7 @@ use crate::layout::types::FlexAlign;
 use crate::state::State;
 use crate::view::node::ViewNode;
 use crate::view::paint::PaintStyle;
+use crate::widget::layout::LayoutAttr;
 use crate::widget::scroll_bar::ScrollBar;
 use crate::widget::virtual_list::VirtualList;
 use crate::widget::{BuildContext, Stateful, Widget};
@@ -30,7 +31,7 @@ pub struct ListView {
     item: Arc<dyn Fn(usize) -> Box<dyn Widget>>,
     overscan: usize,
     scrollbar_thickness: Option<f32>,
-    flex_shrink: f32,
+    layout: LayoutAttr,
 }
 
 impl ListView {
@@ -53,7 +54,7 @@ impl ListView {
             item: Arc::new(item),
             overscan: 3,
             scrollbar_thickness: Some(8.0),
-            flex_shrink: 1.0,
+            layout: LayoutAttr::new(),
         }
     }
 
@@ -77,7 +78,12 @@ impl ListView {
 
     /// 设置 flex 收缩因子（默认 1.0）。
     pub fn flex_shrink(mut self, v: f32) -> Self {
-        self.flex_shrink = v;
+        self.layout = self.layout.flex_shrink(v);
+        self
+    }
+    /// 用完整布局属性（builder 式）设置本列表的布局。
+    pub fn layout(mut self, l: LayoutAttr) -> Self {
+        self.layout = l;
         self
     }
 }
@@ -97,6 +103,7 @@ impl Widget for ListView {
         };
 
         let total = self.item_count as f32 * self.item_height;
+        let flex_shrink = self.layout.flex_shrink.unwrap_or(1.0);
 
         let list_widget = VirtualList::new(
             self.height,
@@ -106,7 +113,7 @@ impl Widget for ListView {
         )
         .item_arc(self.item.clone())
         .overscan(self.overscan)
-        .flex_shrink(self.flex_shrink);
+        .flex_shrink(flex_shrink);
 
         match self.scrollbar_thickness {
             Some(t) if t > 0.0 => {
@@ -117,9 +124,7 @@ impl Widget for ListView {
                 let bar_node = ctx.child(1, &bar_widget);
 
                 let mut layout = FlexStyle::row().gap(0.0).align_items(FlexAlign::Stretch);
-                if self.flex_shrink != 1.0 {
-                    layout = layout.flex_shrink(self.flex_shrink);
-                }
+                layout = self.layout.apply(layout);
                 ViewNode::Div {
                     layout,
                     paint: PaintStyle::new(),

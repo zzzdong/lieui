@@ -1,17 +1,20 @@
 //! Gallery — 展示 LieUI 内置 Widget
 //!
 //! 以顶层 `Tab` 分页组织：基础控件 / 布局 / 交互控件 / 容器组件 / 虚拟列表 / 关于，
-//! 涵盖 Button、Checkbox、Input、Text、Divider、Flex 布局，
-//! 以及 Slider、Progress、Switch、Radio、Tooltip、Tab、Card、VirtualList、ScrollView 等控件。
+//! 涵盖 Button、Checkbox、Input、Text、Divider、Flex 布局、Image（fit 模式），
+//! 以及 Slider、Progress、Switch、Radio、Tooltip、Tab、Draggable、Icon/IconButton、
+//! Card、VirtualList、ScrollView 等控件。
 //!
 //! 构建方式：先按 Tab 拆出 `page_*` 页面函数，每个页面内再按 Section 拆出
 //! `section_*` 区块函数（每个区块用 `card()` 包成一个卡片），避免单一巨型链式调用。
 
-use lieui::geometry::{Color, Size};
+use lieui::event::Event;
+use lieui::geometry::Color;
 use lieui::layout::types::FlexAlign;
 use lieui::prelude::*;
-use lieui::state::{request_rebuild, State};
-use lieui::theme::{self, set_mode, Mode};
+use lieui::state::{State, request_rebuild};
+use lieui::theme::{self, Mode, set_mode};
+use lieui::view::paint::ImageFit;
 use lieui::widget::Widget;
 use lieui::widget::{ButtonSize, ButtonVariant, CardVariant, InputSize, InputStatus, ScrollBar};
 
@@ -27,12 +30,56 @@ fn section_title(title: &str) -> impl Widget {
 fn card(children: impl Widget + 'static) -> impl Widget {
     let t = theme::current();
     Container::new()
-        .padding(t.spacer.md)
+        .layout(LayoutAttr::new().padding(t.spacer.md))
         .border_radius(t.radius.medium)
         .background(t.background.primary_default)
         .border(1.0, t.border.default)
         .shadow(t.shadow.sm)
         .child(children)
+}
+
+/// 生成一张 64x64 的棋盘格 RGBA 图，用于演示图片控件（无需外部文件）。
+fn checkerboard() -> Vec<u8> {
+    let n = 64;
+    let mut data = vec![0u8; n * n * 4];
+    for y in 0..n {
+        for x in 0..n {
+            let on = ((x / 8) + (y / 8)) % 2 == 0;
+            let (r, g, b) = if on { (80, 140, 230) } else { (230, 120, 80) };
+            let i = (y * n + x) * 4;
+            data[i] = r;
+            data[i + 1] = g;
+            data[i + 2] = b;
+            data[i + 3] = 255;
+        }
+    }
+    data
+}
+
+/// 一个带标签的 fit 模式演示框。
+fn fit_box(label: &str, fit: ImageFit) -> impl Widget {
+    Column::new()
+        .spacing(6.0)
+        .align_items(FlexAlign::Start)
+        .child(
+            Text::new(label)
+                .font_size(12.0)
+                .color(theme::current().text.subtle_default),
+        )
+        .child(
+            Container::new()
+                .width(120.0)
+                .height(120.0)
+                .background(Color::from_hex("#101418"))
+                .border_radius(6.0)
+                .child(
+                    Image::from_rgba(checkerboard(), 64, 64)
+                        .width(120.0)
+                        .height(120.0)
+                        .fit(fit)
+                        .radius(6.0),
+                ),
+        )
 }
 
 // ───────────────────────────── 基础控件 ─────────────────────────────
@@ -220,6 +267,29 @@ fn section_text_divider() -> impl Widget {
     )
 }
 
+fn section_image() -> impl Widget {
+    card(
+        Column::new()
+            .spacing(12.0)
+            .align_items(FlexAlign::Start)
+            .child(section_title("Image · 图片与 fit"))
+            .child(
+                Text::new("64x64 棋盘格演示图，在 120x120 深色容器内展示四种 fit 模式。")
+                    .font_size(12.0)
+                    .color(theme::current().text.subtle_default),
+            )
+            .child(
+                Row::new()
+                    .spacing(16.0)
+                    .align_items(FlexAlign::Start)
+                    .child(fit_box("Contain", ImageFit::Contain))
+                    .child(fit_box("Cover", ImageFit::Cover))
+                    .child(fit_box("Fill", ImageFit::Fill))
+                    .child(fit_box("None", ImageFit::None)),
+            ),
+    )
+}
+
 fn page_basic(
     count: State<i32>,
     checked: State<bool>,
@@ -233,7 +303,8 @@ fn page_basic(
             .child(section_button(count))
             .child(section_checkbox(checked))
             .child(section_input(input_text, multi_text))
-            .child(section_text_divider()),
+            .child(section_text_divider())
+            .child(section_image()),
     )
 }
 
@@ -369,11 +440,169 @@ fn section_nested_tab(nested: State<usize>) -> impl Widget {
     )
 }
 
+fn section_draggable(pos: State<(f32, f32)>, active: State<bool>) -> impl Widget {
+    card(
+        Column::new()
+            .spacing(12.0)
+            .align_items(FlexAlign::Start)
+            .child(section_title("Draggable · 通用拖拽"))
+            .child(
+                Text::new("按下卡片并移动超过 3px 触发拖拽；拖拽期间自动捕获鼠标，真实拖拽不会产生 Click。")
+                    .font_size(12.0)
+                    .color(theme::current().text.subtle_default),
+            )
+            .child(
+                Draggable::new(
+                    Container::new()
+                        .width(280.0)
+                        .height(120.0)
+                        .background(theme::current().background.secondary_default)
+                        .border(1.0, theme::current().border.default)
+                        .border_radius(theme::current().radius.medium)
+                        .child(
+                            Column::new()
+                                .expand(true)
+                                .align_items(FlexAlign::Center)
+                                .justify_content(FlexAlign::Center)
+                                .spacing(6.0)
+                                .child(Text::new("按住我拖动").font_size(15.0).font_weight(600))
+                                .child(
+                                    Text::new(format!(
+                                        "offset: ({:.0}, {:.0})",
+                                        pos.get().0, pos.get().1
+                                    ))
+                                    .font_size(12.0)
+                                    .color(theme::current().text.subtle_default),
+                                ),
+                        ),
+                )
+                .on_drag_start({
+                    let a = active.clone();
+                    move |_| a.set(true)
+                })
+                .on_drag_move({
+                    let p = pos.clone();
+                    move |ctx| {
+                        if let Some(Event::DragMove { offset_x, offset_y, .. }) = ctx.event() {
+                            p.set((*offset_x, *offset_y));
+                        }
+                    }
+                })
+                .on_drag_end({
+                    let a = active.clone();
+                    move |_| a.set(false)
+                }),
+            )
+            .child(
+                Row::new()
+                    .spacing(12.0)
+                    .align_items(FlexAlign::Center)
+                    .child(
+                        Text::new(if *active.get() { "● 拖拽中" } else { "○ 空闲" })
+                            .font_size(12.0)
+                            .color(if *active.get() {
+                                theme::current().status.info
+                            } else {
+                                theme::current().text.subtle_default
+                            }),
+                    )
+                    .child(
+                        Button::new("复位")
+                            .variant(ButtonVariant::Secondary)
+                            .on_click({
+                                let p = pos.clone();
+                                move || p.set((0.0, 0.0))
+                            }),
+                    ),
+            ),
+    )
+}
+
+fn section_icon_toolbar(clicks: State<i32>) -> impl Widget {
+    card(
+        Column::new()
+            .spacing(12.0)
+            .align_items(FlexAlign::Start)
+            .child(section_title("IconButton · 工具栏图标按钮"))
+            .child(
+                Text::new("基于内置 Material Icons 字体（OFL），hover/pressed 时背景与图标变色。")
+                    .font_size(12.0)
+                    .color(theme::current().text.subtle_default),
+            )
+            .child(
+                Row::new()
+                    .spacing(4.0)
+                    .align_items(FlexAlign::Center)
+                    .child(IconButton::new(IconName::Add).on_click({
+                        let c = clicks.clone();
+                        move || c.update(|v| *v += 1)
+                    }))
+                    .child(IconButton::new(IconName::Remove))
+                    .child(IconButton::new(IconName::Edit))
+                    .child(IconButton::new(IconName::Delete))
+                    .child(IconButton::new(IconName::Search))
+                    .child(IconButton::new(IconName::Settings))
+                    .child(IconButton::new(IconName::Star))
+                    .child(IconButton::new(IconName::Favorite))
+                    .child(IconButton::new(IconName::Menu))
+                    .child(IconButton::new(IconName::Close).variant(IconButtonVariant::Outline))
+                    .child(IconButton::new(IconName::Check).variant(IconButtonVariant::Primary)),
+            )
+            .child(
+                Row::new()
+                    .spacing(8.0)
+                    .align_items(FlexAlign::Center)
+                    .child(IconButton::new(IconName::ArrowUp))
+                    .child(IconButton::new(IconName::ArrowDown))
+                    .child(IconButton::new(IconName::ArrowBack))
+                    .child(IconButton::new(IconName::ArrowForward))
+                    .child(IconButton::new(IconName::Home))
+                    .child(IconButton::new(IconName::Folder))
+                    .child(IconButton::new(IconName::Person))
+                    .child(IconButton::new(IconName::Mail))
+                    .child(IconButton::new(IconName::Save))
+                    .child(IconButton::new(IconName::Refresh))
+                    .child(IconButton::new(IconName::Info))
+                    .child(IconButton::new(IconName::Lock)),
+            )
+            .child(
+                Row::new()
+                    .spacing(4.0)
+                    .align_items(FlexAlign::Center)
+                    .child(IconButton::new(IconName::RotateLeft))
+                    .child(IconButton::new(IconName::RotateRight))
+                    .child(IconButton::new(IconName::Rotate90DegreesCcw))
+                    .child(IconButton::new(IconName::Rotate90DegreesCw))
+                    .child(IconButton::new(IconName::Flip))
+                    .child(IconButton::new(IconName::FlipToBack))
+                    .child(IconButton::new(IconName::FlipToFront)),
+            )
+            .child(
+                Row::new()
+                    .spacing(12.0)
+                    .align_items(FlexAlign::Center)
+                    .child(Text::new("Icon 字形:").font_size(13.0))
+                    .child(Icon::new(IconName::Search, 20.0))
+                    .child(Icon::new(IconName::Favorite, 20.0).color(Color::RED))
+                    .child(Icon::new(IconName::Star, 20.0).color(Color::from_hex("#f0a000")))
+                    .child(Icon::new(IconName::Check, 20.0).color(theme::current().status.success)),
+            )
+            .child(
+                Text::new(format!("点击次数: {}", clicks.get()))
+                    .font_size(13.0)
+                    .color(theme::current().text.subtle_default),
+            ),
+    )
+}
+
 fn page_interactive(
     slider_val: State<f32>,
     switch_val: State<bool>,
     radio_val: State<usize>,
     nested: State<usize>,
+    drag_pos: State<(f32, f32)>,
+    drag_active: State<bool>,
+    icon_clicks: State<i32>,
 ) -> impl Widget {
     ScrollView::expand().scrollbar(true).child(
         Column::new()
@@ -382,7 +611,9 @@ fn page_interactive(
             .child(section_slider_progress(slider_val))
             .child(section_switch_radio(switch_val, radio_val))
             .child(section_tooltip())
-            .child(section_nested_tab(nested)),
+            .child(section_nested_tab(nested))
+            .child(section_draggable(drag_pos, drag_active))
+            .child(section_icon_toolbar(icon_clicks)),
     )
 }
 
@@ -674,6 +905,9 @@ fn main() {
     let switch_val = State::new(true);
     let radio_val = State::new(1usize);
     let scroll_y = State::new((0.0f32, 0.0f32));
+    let drag_pos = State::new((0.0f32, 0.0f32));
+    let drag_active = State::new(false);
+    let icon_clicks = State::new(0i32);
 
     // 顶层分页 + 嵌套 Tab 演示状态
     let page = State::new(0usize);
@@ -682,36 +916,38 @@ fn main() {
     // 明暗主题切换状态
     let theme_mode = State::new(Mode::Light);
 
-    let app = Application::new(
-        move |_ctx| {
-            // 先分 tab：每个 tab 的内容由各 page_* 函数独立构建（其内部再分 section）。
-            let tabs = Tab::new(page.clone())
-                .header_height(38.0)
-                .tab(
-                    "基础控件",
-                    page_basic(
-                        count.clone(),
-                        checked.clone(),
-                        input_text.clone(),
-                        multi_text.clone(),
-                    ),
-                )
-                .tab("布局", page_layout())
-                .tab("设计系统", page_design())
-                .tab(
-                    "交互控件",
-                    page_interactive(
-                        slider_val.clone(),
-                        switch_val.clone(),
-                        radio_val.clone(),
-                        nested.clone(),
-                    ),
-                )
-                .tab("容器组件", page_containers(switch_val.clone()))
-                .tab("虚拟列表", page_lists(scroll_y.clone()))
-                .tab("关于", page_about());
+    let app = Application::new(WindowConfig::new().size(900.0, 720.0), move |_ctx| {
+        // 先分 tab：每个 tab 的内容由各 page_* 函数独立构建（其内部再分 section）。
+        let tabs = Tab::new(page.clone())
+            .header_height(38.0)
+            .tab(
+                "基础控件",
+                page_basic(
+                    count.clone(),
+                    checked.clone(),
+                    input_text.clone(),
+                    multi_text.clone(),
+                ),
+            )
+            .tab("布局", page_layout())
+            .tab("设计系统", page_design())
+            .tab(
+                "交互控件",
+                page_interactive(
+                    slider_val.clone(),
+                    switch_val.clone(),
+                    radio_val.clone(),
+                    nested.clone(),
+                    drag_pos.clone(),
+                    drag_active.clone(),
+                    icon_clicks.clone(),
+                ),
+            )
+            .tab("容器组件", page_containers(switch_val.clone()))
+            .tab("虚拟列表", page_lists(scroll_y.clone()))
+            .tab("关于", page_about());
 
-            Box::new(
+        Box::new(
                 Row::new()
                     .expand(true)
                     .justify_content(FlexAlign::Center)
@@ -773,9 +1009,7 @@ fn main() {
                             ),
                     ),
             )
-        },
-        Size::new(900.0, 720.0),
-    );
+    });
 
     app.run();
 }
