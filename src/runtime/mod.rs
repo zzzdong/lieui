@@ -81,8 +81,8 @@ impl Runtime {
         self.needs_render = true;
     }
 
-    pub fn frame(&mut self) -> Vec<LayeredElement> {
-        if (state::take_rebuild_requested() || self.pending_view_tree.is_some())
+    pub fn frame(&mut self, wid: winit::window::WindowId) -> Vec<LayeredElement> {
+        if (state::take_rebuild_requested(wid) || self.pending_view_tree.is_some())
             && let Some(vt) = self.pending_view_tree.take()
         {
             let vt: &ViewNode = &vt;
@@ -664,8 +664,13 @@ mod tests {
     use super::*;
     use crate::geometry::{Color, Size};
     use crate::layout::style::FlexStyle;
+    use crate::render::renderer::Renderer;
     use crate::render::visual::VisualElement;
     use crate::view::paint::PaintStyle;
+    use crate::widget::BuildContext;
+    use crate::widget::Widget;
+    use crate::widget::scroll_view::ScrollView;
+    use winit::window::WindowId;
 
     fn div(layout: FlexStyle, paint: PaintStyle, children: Vec<ViewNode>) -> ViewNode {
         ViewNode::Div {
@@ -674,6 +679,14 @@ mod tests {
             key: None,
             children,
             listeners: Vec::new(),
+        }
+    }
+
+    /// 测试用 widget：产出一个固定尺寸、纯色的盒子（模拟溢出内容）。
+    struct SolidBox;
+    impl Widget for SolidBox {
+        fn build(&self, _ctx: &mut BuildContext) -> ViewNode {
+            colored_box(200.0, 200.0, Color::RED)
         }
     }
 
@@ -697,7 +710,7 @@ mod tests {
 
         let mut rt = Runtime::new(Size::new(100.0, 100.0));
         rt.submit_view_tree(root, false);
-        let rendered = rt.frame();
+        let rendered = rt.frame(WindowId::dummy());
 
         // 应该有容器背景 + 一个 Group
         assert_eq!(rendered.len(), 2, "expected background + one Group");
@@ -729,13 +742,62 @@ mod tests {
 
         let mut rt = Runtime::new(Size::new(100.0, 100.0));
         rt.submit_view_tree(root, false);
-        let rendered = rt.frame();
+        let rendered = rt.frame(WindowId::dummy());
 
         assert!(
             rendered
                 .iter()
                 .all(|e| !matches!(e.element, VisualElement::Group { .. })),
             "non-clip container should not produce Group elements"
+        );
+    }
+
+    #[test]
+    fn scroll_view_clips_overflowing_content() {
+        // 构造一个真实 ScrollView widget（高度 100），内含一个 200x200 的红色子盒，
+        // 子盒在垂直方向溢出视口，应被 ScrollView 的 clip 裁剪掉。
+        let sv = ScrollView::new(100.0).child(SolidBox);
+
+        let mut ctx = BuildContext::empty();
+        let view = sv.build(&mut ctx);
+
+        let mut rt = Runtime::new(Size::new(100.0, 100.0));
+        rt.submit_view_tree(view, false);
+        let elements = rt.frame(WindowId::dummy());
+
+        // 必须存在带 clip_rect 的 Group（ScrollView 通过 paint.clip_content 触发）
+        let has_clip_group = elements.iter().any(|e| {
+            matches!(
+                &e.element,
+                VisualElement::Group {
+                    clip_rect: Some(_),
+                    ..
+                }
+            )
+        });
+        assert!(has_clip_group, "ScrollView should produce a clipped Group");
+
+        // 渲染并做像素级验证：渲染图 200x200 大于 ScrollView 视口(100x100)，
+        // 这样裁剪边界 (x/y = 100) 落在图内，可区分「被裁」与「可见」。
+        let mut renderer = crate::render::engine::VelloRenderer::new(200, 200);
+        let pix = renderer.render(&elements);
+        let data = pix.data();
+        let w = pix.width() as usize;
+
+        // 视口内（x=50, y=50，均 < 100）应看到红色子盒
+        let inside = data[50 * w + 50];
+        assert_eq!(
+            inside,
+            vello_cpu::color::PremulRgba8::from_u8_array([255, 0, 0, 255]),
+            "viewport should show the scrolled content"
+        );
+
+        // 视口外（x=150 > 100）溢出部分必须被裁剪，保持默认背景(240,240,240)而非红色
+        let outside = data[50 * w + 150];
+        assert_ne!(
+            outside,
+            vello_cpu::color::PremulRgba8::from_u8_array([255, 0, 0, 255]),
+            "overflowing content outside the viewport must be clipped"
         );
     }
 }

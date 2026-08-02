@@ -83,10 +83,14 @@ struct WindowSpec {
     config: WindowConfig,
     builder: WidgetBuilder,
     close_guard: Option<CloseGuard>,
+    /// 是否启用 Inspector（CDP，仅 feature `inspector` 生效）
+    #[cfg(feature = "inspector")]
+    inspector: bool,
 }
 
 /// 每个窗口的运行时上下文。
 struct WindowContext {
+    wid: winit::window::WindowId,
     runtime: Runtime,
     renderer: VelloRenderer,
     window: Option<Rc<Window>>,
@@ -104,6 +108,11 @@ struct WindowContext {
     builder: WidgetBuilder,
     /// 关闭守卫：窗口关闭请求时调用，决定是允许关闭还是由集成方自行处理。
     close_guard: Option<CloseGuard>,
+    /// 该窗口独立的 UI 状态表，不与其他窗口共享（多窗口状态隔离）。
+    state: Rc<RefCell<StateMap>>,
+    /// Inspector 句柄（feature `inspector` 时 Some）
+    #[cfg(feature = "inspector")]
+    inspector: Option<crate::inspector::Inspector>,
 }
 
 // ============================================================================
@@ -161,7 +170,6 @@ pub(crate) fn pack_softbuffer_pixel(p: vello_cpu::color::PremulRgba8) -> u32 {
 pub struct Application {
     specs: Vec<WindowSpec>,
     windows: HashMap<WindowId, WindowContext>,
-    state: Rc<RefCell<StateMap>>,
 }
 
 impl Application {
@@ -189,9 +197,10 @@ impl Application {
                 config,
                 builder: Box::new(builder),
                 close_guard: None,
+                #[cfg(feature = "inspector")]
+                inspector: false,
             }],
             windows: HashMap::new(),
-            state: Rc::new(RefCell::new(StateMap::new())),
         }
     }
 
@@ -205,7 +214,25 @@ impl Application {
             config,
             builder: Box::new(builder),
             close_guard: None,
+            #[cfg(feature = "inspector")]
+            inspector: false,
         });
+        self
+    }
+
+    /// 为最近添加的窗口启用 Inspector（通过 Chrome DevTools 查看 Widget 树）。
+    ///
+    /// 需要 feature `inspector` 编译；非该 feature 下为 no-op。
+    #[cfg(feature = "inspector")]
+    pub fn inspector(mut self, enabled: bool) -> Self {
+        if let Some(spec) = self.specs.last_mut() {
+            spec.inspector = enabled;
+            if enabled {
+                eprintln!(
+                    "[lieui-inspector] enabled for window; open the printed DevTools URL in Chrome"
+                );
+            }
+        }
         self
     }
 
@@ -258,6 +285,8 @@ impl Application {
     /// 真正关闭一个窗口（绕过关闭守卫），并清理事件循环状态。
     fn close_window(&mut self, wid: &WindowId, el: &ActiveEventLoop) {
         self.windows.remove(wid);
+        // 注销该窗口的标志，避免泄漏
+        state::unregister_window(*wid);
         // 清理该窗口在 EventManager 中的焦点/捕获状态
         if self.windows.is_empty() {
             el.exit();
@@ -304,15 +333,22 @@ impl ApplicationHandler for Application {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
+        // 标记「当前窗口」，使所有 `state::request_*` 都路由到该窗口，
+        // 实现 per-window 的重建/重绘/关闭标志，避免多窗口信号互相干扰。
+        state::set_current_window(wid);
+
         // 关闭请求单独处理：调用守卫并（在允许时）关闭窗口，均不持有 `ctx` 借用，
         // 因此不会与下方 `self.windows.get_mut` 的借用冲突。
         if matches!(event, WindowEvent::CloseRequested) {
-            if self.handle_close_request(&wid) {
+            let allow = self.handle_close_request(&wid);
+            state::clear_current_window();
+            if allow {
                 self.close_window(&wid, el);
             }
             return;
         }
         let Some(ctx) = self.windows.get_mut(&wid) else {
+            state::clear_current_window();
             return;
         };
         match event {
@@ -504,10 +540,10 @@ impl ApplicationHandler for Application {
                     ctx.runtime.viewport.height as u32,
                 );
                 let size_mismatch = ctx.window_size != viewport;
-                let rebuild_requested = state::take_rebuild_requested();
+                let rebuild_requested = state::take_rebuild_requested(wid);
                 if !ctx.rendered_once || ctx.surface.is_none() || rebuild_requested || size_mismatch
                 {
-                    ctx.build_and_render(&self.state, size_mismatch, rebuild_requested);
+                    ctx.build_and_render(size_mismatch, rebuild_requested);
                 } else {
                     ctx.render_visuals();
                 }
@@ -518,25 +554,28 @@ impl ApplicationHandler for Application {
         // 集成方可能通过 `state::request_window_close` 请求真正关闭窗口（通常在自行实现的
         // 确认弹窗被用户确认后）。该标志绕过关闭守卫，此处统一消费并关闭窗口。
         let _ = ctx;
-        if state::take_window_close_requested() {
+        if state::take_window_close_requested(wid) {
             self.close_window(&wid, el);
         }
+        state::clear_current_window();
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let (fired, next) = crate::animation::tick(Instant::now());
         if fired {
+            // 当前无窗口上下文，request_redraw 会自动广播到所有已注册窗口
             state::request_redraw();
         }
         match next {
             Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
-        if state::take_redraw_requested() {
-            for ctx in self.windows.values() {
-                if let Some(w) = &ctx.window {
-                    w.request_redraw();
-                }
+        // 逐窗口取走重绘标记，仅对真正请求重绘的窗口发起 RedrawRequested
+        for (wid, ctx) in &self.windows {
+            if state::take_redraw_requested(*wid)
+                && let Some(w) = &ctx.window
+            {
+                w.request_redraw();
             }
         }
     }
@@ -578,12 +617,19 @@ impl Application {
         let wid = window.id();
         let wsize = (s.width, s.height);
 
+        // 注册窗口，使其拥有独立的重建/重绘/关闭标志
+        state::register_window(wid);
+
         let viewport = Size::new(s.width as f32, s.height as f32);
         let rt = Runtime::new(viewport);
 
         let renderer = VelloRenderer::new(s.width as u16, s.height as u16);
 
+        // 每个窗口拥有独立的 UI 状态表，保证多窗口之间状态不互相串味
+        let state = Rc::new(RefCell::new(StateMap::new()));
+
         let ctx = WindowContext {
+            wid,
             runtime: rt,
             renderer,
             window: Some(window),
@@ -597,6 +643,13 @@ impl Application {
             scroll_drag: None,
             builder: spec.builder,
             close_guard: spec.close_guard,
+            state,
+            #[cfg(feature = "inspector")]
+            inspector: if spec.inspector {
+                Some(crate::inspector::Inspector::start())
+            } else {
+                None
+            },
         };
 
         self.windows.insert(wid, ctx);
@@ -608,12 +661,7 @@ impl Application {
 // ============================================================================
 
 impl WindowContext {
-    fn build_and_render(
-        &mut self,
-        state: &Rc<RefCell<StateMap>>,
-        viewport_changed: bool,
-        rebuild_requested: bool,
-    ) {
+    fn build_and_render(&mut self, viewport_changed: bool, rebuild_requested: bool) {
         let pw = self.renderer.width();
         let ph = self.renderer.height();
         if pw == 0 || ph == 0 {
@@ -625,10 +673,35 @@ impl WindowContext {
             self.runtime.set_viewport(Size::new(ww as f32, wh as f32));
         }
 
-        // 构建 UI
-        let mut ctx = crate::widget::BuildContext::new(Rc::clone(state));
+        // 构建 UI（使用本窗口独立的状态表）
+        let mut ctx = crate::widget::BuildContext::new(Rc::clone(&self.state));
+
+        // Inspector：在开始构建前，准备根描述节点收集
+        #[cfg(feature = "inspector")]
+        let inspect_root: Option<Rc<RefCell<crate::inspector::WidgetDescNode>>> =
+            self.inspector.as_ref().map(|_| {
+                Rc::new(RefCell::new(crate::inspector::WidgetDescNode {
+                    name: "Root".to_string(),
+                    path: "".to_string(),
+                    text: None,
+                    children: Vec::new(),
+                }))
+            });
+        #[cfg(feature = "inspector")]
+        if let Some(root_node) = &inspect_root {
+            ctx.begin_inspect(Rc::clone(root_node));
+        }
+
         let root_widget = (self.builder)(&mut ctx);
         let view_tree = root_widget.build(&mut ctx);
+
+        // Inspector：构建结束，冻结描述树并写入共享
+        #[cfg(feature = "inspector")]
+        if let Some(desc) = ctx.finish_inspect() {
+            if let Some(insp) = &self.inspector {
+                insp.set_snapshot(desc);
+            }
+        }
 
         // 提交到 Runtime
         if !self.runtime.submit_view_tree(view_tree, rebuild_requested) {
@@ -637,7 +710,7 @@ impl WindowContext {
         }
 
         // 执行 Reconciliation → 布局 → 渲染并取回渲染元素
-        let elements = self.runtime.frame();
+        let elements = self.runtime.frame(self.wid);
         if elements.is_empty() {
             return;
         }

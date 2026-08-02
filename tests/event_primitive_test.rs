@@ -19,7 +19,7 @@ fn button_hit_test_returns_clickable() {
         .build_node();
 
     runtime.submit_view_tree(vt, false);
-    let _ = runtime.frame();
+    let _ = runtime.frame(winit::window::WindowId::dummy());
 
     // Button 大致位于 (4,4) ~ (80,40) 区域
     // 从根节点向下找到第一个附带点击回调的节点
@@ -51,7 +51,7 @@ fn button_hover_state_affects_background_render() {
         .build_node();
 
     runtime.submit_view_tree(vt, false);
-    let _ = runtime.frame();
+    let _ = runtime.frame(winit::window::WindowId::dummy());
 
     let root_id = runtime.layers.content_root_id().unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");
@@ -101,7 +101,7 @@ fn checkbox_hit_test_returns_clickable() {
         .build_node();
 
     runtime.submit_view_tree(vt, false);
-    let _ = runtime.frame();
+    let _ = runtime.frame(winit::window::WindowId::dummy());
 
     let root_id = runtime.layers.content_root_id().unwrap();
     let clickable_id = find_clickable_in_tree(&runtime, root_id).expect("should find a clickable");

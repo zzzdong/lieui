@@ -194,12 +194,16 @@ fn main() {
     let mut runtime = Runtime::new(viewport);
     let mut renderer = VelloRenderer::new(viewport.width as u16, viewport.height as u16);
 
+    // 性能测试为单窗口独立运行时：注册一个占位窗口 id 供 per-window 标志路由使用
+    let wid = winit::window::WindowId::dummy();
+    lieui::state::register_window(wid);
+
     // ---- 首帧 ----
     let t0 = Instant::now();
     let mut ctx = BuildContext::new(Rc::clone(&state));
     let view_tree = build_gallery_page(&count, &checked, &text1).build(&mut ctx);
     runtime.submit_view_tree(view_tree, true);
-    let elements = runtime.frame();
+    let elements = runtime.frame(wid);
     let _ = renderer.render(&elements);
     eprintln!(
         "== first frame total: {:.1}ms elements={} tree-nodes={}\n",
@@ -247,7 +251,7 @@ fn main() {
 
         // Builder
         assert!(
-            lieui::state::take_rebuild_requested_pub(),
+            lieui::state::take_rebuild_requested_pub(wid),
             "click should trigger rebuild"
         );
         let t_b = Instant::now();
@@ -267,7 +271,7 @@ fn main() {
         );
 
         // Frame (reconcile + layout + render-tree)
-        let elements = runtime.frame();
+        let elements = runtime.frame(wid);
 
         // Raster
         let t_r = Instant::now();

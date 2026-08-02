@@ -263,7 +263,7 @@ fn icon_button_renders_textrun_with_icon_font() {
     let mut ctx = BuildContext::new(Rc::new(RefCell::new(StateMap::new())));
     let vt = IconButton::new(IconName::Settings).build(&mut ctx);
     runtime.submit_view_tree(vt, true);
-    let _ = runtime.frame();
+    let _ = runtime.frame(winit::window::WindowId::dummy());
 
     let visuals = runtime.frame_render_only();
     let runs: Vec<_> = visuals
@@ -302,7 +302,7 @@ fn icon_button_without_listener_still_gets_hover_and_pressed() {
     // 无任何回调的 IconButton：hover/pressed 反馈不应依赖 listener。
     let vt = IconButton::new(IconName::Search).build(&mut ctx);
     runtime.submit_view_tree(vt, true);
-    let _ = runtime.frame();
+    let _ = runtime.frame(winit::window::WindowId::dummy());
 
     let root = runtime.layers.content_root_id().expect("root");
     let p = Point::new(14.0, 14.0); // 28x28 按钮中心

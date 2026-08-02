@@ -6,13 +6,78 @@
 use crate::core::layers::{Anchor, FocusPolicy, LayerKind, LayerOptions};
 use crate::view::node::ViewNode;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use winit::window::WindowId;
+
+/// 每个窗口各自的重建/重绘/关闭标志。
+#[derive(Default, Clone, Copy)]
+struct Flags {
+    rebuild: bool,
+    redraw: bool,
+    close: bool,
+}
 
 thread_local! {
-    static REBUILD_REQUESTED: Cell<bool> = const { Cell::new(false) };
-    static REDRAW_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    /// 当前正在处理的窗口。所有 `request_*` 调用都会路由到该窗口，
+    /// 从而把全局标志变成 per-window，避免多窗口下的信号互相吞噬/重复。
+    static CURRENT_WID: Cell<Option<WindowId>> = const { Cell::new(None) };
+}
+
+/// 所有已注册窗口的标志表。键为窗口 id，值是该窗口独有的重建/重绘/关闭标记。
+static FLAGS: std::sync::LazyLock<std::sync::Mutex<HashMap<WindowId, Flags>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// 注册一个窗口，使其在标志表中拥有独立条目。
+///
+/// 由 `Application` 在创建窗口时调用；独立的性能测试/嵌入式驱动也可调用
+/// 以接入 per-window 标志路由（详见 `request_rebuild` / `take_rebuild_requested`）。
+pub fn register_window(wid: WindowId) {
+    FLAGS.lock().unwrap().entry(wid).or_default();
+}
+
+/// 注销一个窗口并清理其标志（窗口关闭时调用）。
+pub fn unregister_window(wid: WindowId) {
+    FLAGS.lock().unwrap().remove(&wid);
+}
+
+/// 设置「当前窗口」。在 `window_event` 进入某窗口处理时调用，
+/// 之后的 `request_*` 都会作用于该窗口。
+pub(crate) fn set_current_window(wid: WindowId) {
+    CURRENT_WID.with(|c| c.set(Some(wid)));
+}
+
+/// 清除「当前窗口」。窗口处理结束时调用。
+pub(crate) fn clear_current_window() {
+    CURRENT_WID.with(|c| c.set(None));
+}
+
+/// 取得当前窗口的已注册窗口 id（若存在）。
+fn current_wid() -> Option<WindowId> {
+    CURRENT_WID.with(|c| c.get())
+}
+
+/// 修改指定窗口的标志。
+fn set_flag<F: FnOnce(&mut Flags)>(wid: WindowId, f: F) {
+    let mut g = FLAGS.lock().unwrap();
+    f(g.entry(wid).or_default());
+}
+
+/// 若无「当前窗口」（例如全局动画 tick），则广播到所有已注册窗口，
+/// 保持与单窗口时代一致的语义。
+fn set_flag_current_or_all<F: Fn(&mut Flags) + Copy>(f: F) {
+    match current_wid() {
+        Some(wid) => set_flag(wid, f),
+        None => {
+            for fl in FLAGS.lock().unwrap().values_mut() {
+                f(fl);
+            }
+        }
+    }
+}
+
+thread_local! {
     static PENDING_LAYER: RefCell<Vec<LayerCmd>> = const { RefCell::new(Vec::new()) };
-    static WINDOW_CLOSE_REQUESTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 一次「以 widget tree 显示某层」的规格：锚点 + 焦点/阻塞策略 + 层选项。
@@ -51,29 +116,41 @@ pub(crate) enum LayerCmd {
 }
 
 /// 请求全量重建（builder + layout + render）
+///
+/// 作用于「当前窗口」；若当前不在任何窗口上下文（如全局动画 tick），则广播到所有窗口。
 pub fn request_rebuild() {
-    REBUILD_REQUESTED.with(|r| r.set(true));
+    set_flag_current_or_all(|f| f.rebuild = true);
 }
 
-/// 检查并清除重建标记
-pub(crate) fn take_rebuild_requested() -> bool {
-    REBUILD_REQUESTED.with(|r| r.replace(false))
+/// 检查并清除指定窗口的重建标记
+pub(crate) fn take_rebuild_requested(wid: WindowId) -> bool {
+    let mut g = FLAGS.lock().unwrap();
+    match g.get_mut(&wid) {
+        Some(f) => std::mem::replace(&mut f.rebuild, false),
+        None => false,
+    }
 }
 
-/// 公开版本：检查并清除重建标记。
+/// 公开版本：检查并清除指定窗口的重建标记。
 /// 供嵌入式驱动（自定义事件循环）与性能测试使用。
-pub fn take_rebuild_requested_pub() -> bool {
-    take_rebuild_requested()
+pub fn take_rebuild_requested_pub(wid: WindowId) -> bool {
+    take_rebuild_requested(wid)
 }
 
 /// 请求仅重绘（不跑 builder/layout，只更新交互状态渲染）
+///
+/// 作用于「当前窗口」；若当前不在任何窗口上下文（如全局动画 tick），则广播到所有窗口。
 pub fn request_redraw() {
-    REDRAW_REQUESTED.with(|r| r.set(true));
+    set_flag_current_or_all(|f| f.redraw = true);
 }
 
-/// 检查并清除重绘标记
-pub(crate) fn take_redraw_requested() -> bool {
-    REDRAW_REQUESTED.with(|r| r.replace(false))
+/// 检查并清除指定窗口的重绘标记
+pub(crate) fn take_redraw_requested(wid: WindowId) -> bool {
+    let mut g = FLAGS.lock().unwrap();
+    match g.get_mut(&wid) {
+        Some(f) => std::mem::replace(&mut f.redraw, false),
+        None => false,
+    }
 }
 
 /// 以 **widget tree** 方式显示任意层（window 之外的浮层：Modal / Overlay / Popup /
@@ -159,13 +236,31 @@ pub(crate) fn take_pending_layers() -> Vec<LayerCmd> {
 /// （例如按钮 `on_click` 中），下一帧事件循环会直接关闭窗口，不再触发
 /// `CloseAction::Cancel`，从而避免重复弹窗。与关闭守卫回调中的 `&dyn Fn()` 相比，
 /// 本函数可被存到跨帧存活的回调（如 `on_click`）中异步调用。
+///
+/// 作用于「当前窗口」。若调用时不在任何窗口上下文（异常情况），会广播到所有窗口
+/// 并打印告警，避免静默丢失关闭请求。
 pub fn request_window_close() {
-    WINDOW_CLOSE_REQUESTED.with(|c| c.set(true));
+    match current_wid() {
+        Some(wid) => set_flag(wid, |f| f.close = true),
+        None => {
+            eprintln!(
+                "[lieui] request_window_close called outside any window context; \
+                 broadcasting close to all windows"
+            );
+            for fl in FLAGS.lock().unwrap().values_mut() {
+                fl.close = true;
+            }
+        }
+    }
 }
 
-/// 检查并清除「请求关闭窗口」标记（Runtime 内部使用）。
-pub(crate) fn take_window_close_requested() -> bool {
-    WINDOW_CLOSE_REQUESTED.with(|c| c.replace(false))
+/// 检查并清除指定窗口的「请求关闭窗口」标记（Runtime 内部使用）。
+pub(crate) fn take_window_close_requested(wid: WindowId) -> bool {
+    let mut g = FLAGS.lock().unwrap();
+    match g.get_mut(&wid) {
+        Some(f) => std::mem::replace(&mut f.close, false),
+        None => false,
+    }
 }
 
 /// 线程局部的共享状态。

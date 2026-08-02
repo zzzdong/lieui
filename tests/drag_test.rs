@@ -99,7 +99,7 @@ impl Harness {
             ],
         };
         h.runtime.submit_view_tree(vt, true);
-        let _ = h.runtime.frame();
+        let _ = h.runtime.frame(winit::window::WindowId::dummy());
         h
     }
 

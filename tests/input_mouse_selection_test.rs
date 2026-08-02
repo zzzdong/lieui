@@ -56,7 +56,7 @@ impl Harness {
         let mut ctx = BuildContext::new(Rc::clone(&self.state));
         let vt = Input::new("type here").width(300.0).build(&mut ctx);
         self.runtime.submit_view_tree(vt, true);
-        let _ = self.runtime.frame();
+        let _ = self.runtime.frame(winit::window::WindowId::dummy());
     }
 
     fn hit(&mut self, p: Point) -> HitTestResult {

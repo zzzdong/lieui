@@ -112,7 +112,7 @@ fn builtin_listeners_run_first_before_user() {
 
     let mut runtime = Runtime::new(Size::new(200.0, 100.0));
     runtime.submit_view_tree(vt, true);
-    let _ = runtime.frame();
+    let _ = runtime.frame(winit::window::WindowId::dummy());
 
     let p = Point::new(50.0, 25.0);
     let (_, target, _) = runtime.layers.hit_test_top(p).expect("hit");

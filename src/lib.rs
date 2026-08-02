@@ -4,6 +4,8 @@ pub mod clipboard;
 pub mod core;
 pub mod event;
 pub mod geometry;
+#[cfg(feature = "inspector")]
+pub mod inspector;
 pub mod layout;
 pub mod perf;
 pub mod render;

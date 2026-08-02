@@ -60,7 +60,7 @@ fn nested_click_stops_at_inner_listener() {
 
     let mut rt = Runtime::new(Size::new(400.0, 200.0));
     rt.submit_view_tree(vt, false);
-    let _ = rt.frame();
+    let _ = rt.frame(winit::window::WindowId::dummy());
 
     // 命中测试：点击 Checkbox 区域（大致在 (8, 8) 附近）
     let hit = rt

@@ -116,12 +116,16 @@ fn main() {
     let mut runtime = Runtime::new(viewport);
     let mut renderer = VelloRenderer::new(viewport.width as u16, viewport.height as u16);
 
+    // 性能测试为单窗口独立运行时：注册一个占位窗口 id 供 per-window 标志路由使用
+    let wid = winit::window::WindowId::dummy();
+    lieui::state::register_window(wid);
+
     // ---- 首帧 ----
     let t0 = Instant::now();
     let mut ctx = BuildContext::new(Rc::clone(&state));
     let view_tree = build_ui(&checked).build(&mut ctx);
     runtime.submit_view_tree(view_tree, true);
-    let elements = runtime.frame();
+    let elements = runtime.frame(wid);
     let _ = renderer.render(&elements);
     eprintln!(
         "== first frame total: {:.1}ms, elements={} tree-nodes={}\n",
@@ -167,7 +171,7 @@ fn main() {
 
         // 2. rebuild 管线（等价 RedrawRequested 分支）
         assert!(
-            lieui::state::take_rebuild_requested_pub(),
+            lieui::state::take_rebuild_requested_pub(wid),
             "click should trigger rebuild"
         );
         let t_b = Instant::now();
@@ -183,7 +187,7 @@ fn main() {
             "[lieui-perf] submit           {:>8.1}us",
             t_s.elapsed().as_secs_f64() * 1e6
         );
-        let elements = runtime.frame();
+        let elements = runtime.frame(wid);
         let t_r = Instant::now();
         let pix = renderer.render(&elements);
         eprintln!(

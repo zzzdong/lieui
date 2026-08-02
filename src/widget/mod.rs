@@ -78,6 +78,28 @@ pub trait Widget {
     fn build_node(&self) -> ViewNode {
         self.build(&mut BuildContext::empty())
     }
+
+    /// Inspector 支持：返回该 widget 的文本表示（用于 DevTools 显示）。
+    ///
+    /// 默认返回 `None`；文本类 widget（如 `Text`）可 override 暴露内容。
+    /// 仅在 `inspector` feature 下有意义，但作为 trait 方法常驻以保证 API 稳定。
+    fn inspect_text(&self) -> Option<String> {
+        None
+    }
+
+    /// Inspector 支持：返回该 widget 的**具体类型名**（用于 DevTools 显示）。
+    ///
+    /// 默认基于 `std::any::type_name_of_val(self)` 截短末段（如 `my_module::Button`
+    /// -> `Button`）。由于 `self` 是具体类型，`type_name_of_val` 能拿到真实类型名，
+    /// 不会退化成 `dyn Widget`。绝大多数 widget 无需 override；如需在 DevTools 中显示
+    /// 自定义别名（如匿名组合组件）可重写此方法。
+    fn inspect_name(&self) -> String {
+        let full = std::any::type_name_of_val(self);
+        match full.rsplit("::").next() {
+            Some(s) => s.to_string(),
+            None => full.to_string(),
+        }
+    }
 }
 
 /// Widget 构建上下文。
@@ -87,6 +109,9 @@ pub struct BuildContext {
     path: Vec<String>,
     hook_index: usize,
     state: Rc<RefCell<StateMap>>,
+    /// Inspector 描述树收集器（仅在开启 inspector feature 时 Some）
+    #[cfg(feature = "inspector")]
+    inspect: Option<crate::inspector::WidgetDescBuilder>,
 }
 
 impl BuildContext {
@@ -95,6 +120,8 @@ impl BuildContext {
             path: Vec::new(),
             hook_index: 0,
             state,
+            #[cfg(feature = "inspector")]
+            inspect: None,
         }
     }
 
@@ -104,7 +131,25 @@ impl BuildContext {
             path: Vec::new(),
             hook_index: 0,
             state: Rc::new(RefCell::new(StateMap::new())),
+            #[cfg(feature = "inspector")]
+            inspect: None,
         }
+    }
+
+    /// 启用 Inspector 描述树收集：把根 widget 的描述节点挂到收集器。
+    #[cfg(feature = "inspector")]
+    pub(crate) fn begin_inspect(&mut self, root: Rc<RefCell<crate::inspector::WidgetDescNode>>) {
+        self.inspect = Some(crate::inspector::WidgetDescBuilder {
+            node: Rc::clone(&root),
+            stack: vec![root],
+        });
+    }
+
+    /// 取回已冻结的 widget 描述树（构建结束后调用）
+    #[cfg(feature = "inspector")]
+    pub(crate) fn finish_inspect(&mut self) -> Option<crate::inspector::WidgetDesc> {
+        let b = self.inspect.take()?;
+        Some(b.node.borrow().freeze())
     }
 
     /// 构建一个子 Widget，并自动维护路径。
@@ -117,9 +162,39 @@ impl BuildContext {
             .map(|k| k.to_string())
             .unwrap_or_else(|| index.to_string());
         self.path.push(segment);
-        let node = widget.build(self);
-        self.path.pop();
 
+        // ---- Inspector：在构建子节点前，把该 widget 挂到描述树 ----
+        #[cfg(feature = "inspector")]
+        {
+            if let Some(b) = self.inspect.as_mut() {
+                use crate::inspector::WidgetDescNode;
+                let name = widget.inspect_name();
+                let path = self.path.join("/");
+                let node = Rc::new(RefCell::new(WidgetDescNode {
+                    name,
+                    path: path.clone(),
+                    text: widget.inspect_text(),
+                    children: Vec::new(),
+                }));
+                // 挂到当前栈顶，并把该节点压栈（后续 build 内的 child 归它）
+                if let Some(top) = b.stack.last() {
+                    top.borrow_mut().children.push(Rc::clone(&node));
+                }
+                b.stack.push(node);
+            }
+        }
+
+        let node = widget.build(self);
+
+        // ---- Inspector：子节点构建完毕，弹栈 ----
+        #[cfg(feature = "inspector")]
+        {
+            if let Some(b) = self.inspect.as_mut() {
+                b.stack.pop();
+            }
+        }
+
+        self.path.pop();
         self.hook_index = saved_hook;
         node
     }

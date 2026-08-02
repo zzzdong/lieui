@@ -47,7 +47,7 @@ fn button_text_is_centered() {
 
     let mut rt = Runtime::new(Size::new(400.0, 200.0));
     rt.submit_view_tree(vt, false);
-    let elements = rt.frame();
+    let elements = rt.frame(winit::window::WindowId::dummy());
 
     let (rect, (tx, ty, tw, th)) =
         find_button_parts(&elements, label).expect("button rect and text not found");

@@ -76,4 +76,8 @@ impl Widget for Text {
             listeners: self.listeners.clone(),
         }
     }
+
+    fn inspect_text(&self) -> Option<String> {
+        Some(self.content.clone())
+    }
 }
