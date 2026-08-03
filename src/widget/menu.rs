@@ -32,27 +32,16 @@ use crate::prelude::FlexAlign;
 use crate::state::{PopupHandle, PopupPlacement, hide_popup, show_popup_with};
 use crate::view::node::ViewNode;
 use crate::view::paint::ShadowSpec;
-use crate::widget::{BuildContext, Column, Container, Row, Text, Widget};
+use crate::widget::{BuildContext, Button, ButtonVariant, Column, Container, Row, Text, Widget};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// 菜单项点击回调类型。
 type MenuClickFn = Rc<dyn Fn(&mut EventContext)>;
-/// 右键菜单内容构建器类型。
-type ContextMenuFn = Rc<dyn Fn(PopupHandle, &mut BuildContext) -> Menu>;
-
-/// 允许 `Box<dyn Widget>` 作为 `Widget` 使用（如 `ContextMenu` 包裹任意触发 widget）。
-impl Widget for Box<dyn Widget> {
-    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
-        (**self).build(ctx)
-    }
-}
-
-/// 允许 `Rc<dyn Widget>` 作为 `Widget` 使用（如 `ContextMenu` 包裹任意触发 widget）。
-impl Widget for Rc<dyn Widget> {
-    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
-        (**self).build(ctx)
-    }
-}
+/// 菜单内容构建器类型：给定 Popup 句柄与构建上下文，产出菜单内容。
+/// 由 `ContextMenu` 与 `MenuButton` 共用。
+type MenuBuilder = Rc<dyn Fn(PopupHandle, &mut BuildContext) -> Menu>;
 
 /// 菜单容器：纵向排列的菜单项/分隔线/子菜单，自绘背景、圆角、边框、阴影。
 ///
@@ -63,6 +52,14 @@ pub struct Menu {
     min_width: f32,
     background: Color,
     close_handle: Option<PopupHandle>,
+    /// 鼠标离开菜单区域时是否自动关闭（如右键菜单场景）。
+    close_on_leave: bool,
+    /// 记录本菜单当前已展开的二级菜单句柄集合。
+    ///
+    /// 由本菜单构建时共享给其直接子 `Submenu`：子菜单展开/收起时写入/移除句柄，
+    /// 主菜单 `close_on_leave` 判定时据此在「仍有子菜单展开」时挂起关闭——
+    /// 这样鼠标从主菜单移向右侧子菜单时不会误关主菜单（解决 close_on_leave 与子菜单冲突）。
+    submenu_tracker: Rc<RefCell<HashSet<PopupHandle>>>,
 }
 
 enum MenuChild {
@@ -78,6 +75,8 @@ impl Menu {
             min_width: 180.0,
             background: Color::WHITE,
             close_handle: None,
+            close_on_leave: false,
+            submenu_tracker: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
@@ -109,6 +108,13 @@ impl Menu {
         self.close_handle = Some(handle);
         self
     }
+
+    /// 配置鼠标离开菜单区域时自动关闭。适合右键菜单等「移开即收」的场景。
+    /// 默认关闭；若鼠标正移向已展开的子菜单，则主菜单挂起关闭，待子菜单收起后再生效。
+    pub fn close_on_leave(mut self, on: bool) -> Self {
+        self.close_on_leave = on;
+        self
+    }
 }
 
 impl Default for Menu {
@@ -124,6 +130,8 @@ impl Clone for Menu {
             min_width: self.min_width,
             background: self.background,
             close_handle: self.close_handle,
+            close_on_leave: self.close_on_leave,
+            submenu_tracker: Rc::clone(&self.submenu_tracker),
         }
     }
 }
@@ -151,7 +159,12 @@ impl Widget for Menu {
                     col = col.child(it);
                 }
                 MenuChild::Separator => col = col.child(MenuSeparator::new()),
-                MenuChild::Submenu(sub) => col = col.child(sub.clone()),
+                MenuChild::Submenu(sub) => {
+                    // 把本菜单的子菜单跟踪器共享给直接子 Submenu，用于解决
+                    // close_on_leave 与子菜单的关闭冲突（P3）。
+                    let s = sub.clone().track_with(Rc::clone(&self.submenu_tracker));
+                    col = col.child(s);
+                }
             }
         }
         let mut c = Container::new().child(col);
@@ -166,6 +179,19 @@ impl Widget for Menu {
             spread: 0.0,
             color: Color::rgba(0, 0, 0, 40),
         });
+        // 集成「离开即关闭」特性：鼠标移出菜单整体时自动收起（点击项/点击外部关闭
+        // 仍由 auto_close 与 LayerStack 的 Dismissable 机制负责，此处为额外开关）。
+        if self.close_on_leave
+            && let Some(h) = self.close_handle
+        {
+            let tracker = Rc::clone(&self.submenu_tracker);
+            c = c.on_mouse_leave(move |_ctx| {
+                // 若仍有子菜单展开（鼠标正移向子菜单），挂起关闭，避免主菜单被误关。
+                if tracker.borrow().is_empty() {
+                    hide_popup(h);
+                }
+            });
+        }
         c.build(ctx)
     }
 }
@@ -303,6 +329,10 @@ pub struct Submenu {
     label: String,
     items: Menu,
     hover_background: Color,
+    /// 当前已展开的二级菜单句柄（结构体级 Rc 成员，重建后仍能追踪，避免泄漏）。
+    open_handle: Rc<RefCell<Option<PopupHandle>>>,
+    /// 父级 `Menu` 共享过来的子菜单跟踪器（用于 close_on_leave 挂起判定）。无则 None。
+    tracker: Option<Rc<RefCell<HashSet<PopupHandle>>>>,
 }
 
 impl Submenu {
@@ -311,6 +341,8 @@ impl Submenu {
             label: label.into(),
             items: Menu::new(),
             hover_background: Color::rgba(232, 240, 254, 255),
+            open_handle: Rc::new(RefCell::new(None)),
+            tracker: None,
         }
     }
 
@@ -323,6 +355,12 @@ impl Submenu {
         self.items = self.items.separator();
         self
     }
+
+    /// 绑定父级共享的子菜单跟踪器（由 `Menu::build` 注入）。
+    pub(crate) fn track_with(mut self, tracker: Rc<RefCell<HashSet<PopupHandle>>>) -> Self {
+        self.tracker = Some(tracker);
+        self
+    }
 }
 
 impl Clone for Submenu {
@@ -331,6 +369,9 @@ impl Clone for Submenu {
             label: self.label.clone(),
             items: self.items.clone(),
             hover_background: self.hover_background,
+            // Rc 克隆共享同一底层句柄/跟踪器，保证重建后仍能追踪打开的二级菜单。
+            open_handle: Rc::clone(&self.open_handle),
+            tracker: self.tracker.as_ref().map(Rc::clone),
         }
     }
 }
@@ -349,19 +390,43 @@ impl Widget for Submenu {
             );
 
         let sub = self.items.clone();
+        let open = Rc::clone(&self.open_handle);
+        let tracker = self.tracker.clone();
         let mut c = Container::new().child(row);
         c = c.padding(6.0);
         c = c.hover_background(self.hover_background);
         c = c.on_mouse_enter(move |ctx| {
+            // 切换父项时关闭上次打开的二级菜单（hover 到别的项时替换）。
+            if let Some(h) = open.borrow_mut().take() {
+                hide_popup(h);
+                if let Some(t) = &tracker {
+                    t.borrow_mut().remove(&h);
+                }
+            }
             let r = ctx
                 .current_rect()
                 .unwrap_or_else(|| crate::geometry::Rect::new(0.0, 0.0, 0.0, 0.0));
             let s = sub.clone();
-            show_popup_with(r, PopupPlacement::RightOf, move |h, _ctx| {
+            let tracker_for_builder = tracker.clone();
+            let h = show_popup_with(r, PopupPlacement::RightOf, move |h, _ctx| {
                 // 把二级菜单的关闭句柄注入，点击项后关闭二级（父级菜单由
                 // 用户点击父项或点击外部关闭）。
-                Box::new(s.clone().auto_close(h))
+                let inner = s.clone().auto_close(h);
+                // 鼠标离开二级菜单区域后自动关闭它，并同步更新父级跟踪器。
+                let t = tracker_for_builder.clone();
+                let mut cc = Container::new().child(inner);
+                cc = cc.on_mouse_leave(move |_ctx| {
+                    hide_popup(h);
+                    if let Some(tt) = &t {
+                        tt.borrow_mut().remove(&h);
+                    }
+                });
+                Box::new(cc)
             });
+            *open.borrow_mut() = Some(h);
+            if let Some(t) = &tracker {
+                t.borrow_mut().insert(h);
+            }
         });
         c.build(ctx)
     }
@@ -373,7 +438,8 @@ impl Widget for Submenu {
 /// 设置 `auto_close(handle)`，点击菜单项后自动关闭。
 pub struct ContextMenu {
     trigger: Rc<dyn Widget>,
-    menu: Option<ContextMenuFn>,
+    menu: Option<MenuBuilder>,
+    close_on_leave: bool,
 }
 
 impl ContextMenu {
@@ -381,6 +447,7 @@ impl ContextMenu {
         Self {
             trigger: Rc::new(trigger),
             menu: None,
+            close_on_leave: false,
         }
     }
 
@@ -390,10 +457,17 @@ impl ContextMenu {
         self.menu = Some(Rc::new(f));
         self
     }
+
+    /// 右键菜单是否在鼠标移开后自动关闭（默认关闭）。
+    pub fn close_on_leave(mut self, on: bool) -> Self {
+        self.close_on_leave = on;
+        self
+    }
 }
 
 impl Widget for ContextMenu {
     fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        let close_on_leave = self.close_on_leave;
         let mut c = Container::new().child(self.trigger.clone());
         if let Some(menu) = self.menu.clone() {
             c = c.on_mouse_down(move |ctx| {
@@ -411,11 +485,77 @@ impl Widget for ContextMenu {
                     let anchor = crate::geometry::Rect::new(x, y, 1.0, 1.0);
                     let m = menu.clone();
                     show_popup_with(anchor, PopupPlacement::Below, move |handle, ctx| {
-                        Box::new(m(handle, ctx).auto_close(handle))
+                        Box::new(
+                            m(handle, ctx)
+                                .auto_close(handle)
+                                .close_on_leave(close_on_leave),
+                        )
                     });
                 }
             });
         }
         c.build(ctx)
+    }
+}
+
+/// 菜单按钮：点击后弹出下拉菜单的一站式组件。
+///
+/// 封装了 `Button` + `show_popup_with` + `auto_close` 的全部样板，使用者只需提供
+/// 菜单内容构建器，无需手动处理弹出锚点、`PopupHandle` 或 `Box::new` 等细节。
+/// 弹出的 `Menu` 已被自动注入 `auto_close(handle)`，点击项或点击外部均会自动关闭。
+pub struct MenuButton {
+    label: String,
+    menu: Option<MenuBuilder>,
+    placement: PopupPlacement,
+    variant: ButtonVariant,
+}
+
+impl MenuButton {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            menu: None,
+            placement: PopupPlacement::Below,
+            variant: ButtonVariant::Secondary,
+        }
+    }
+
+    /// 设置下拉菜单内容构建器（可拿到 `PopupHandle`，但框架会自动注入 `auto_close`）。
+    pub fn menu(mut self, f: impl Fn(PopupHandle, &mut BuildContext) -> Menu + 'static) -> Self {
+        self.menu = Some(Rc::new(f));
+        self
+    }
+
+    /// 菜单相对按钮的弹出方位（默认 `Below`）。
+    pub fn placement(mut self, p: PopupPlacement) -> Self {
+        self.placement = p;
+        self
+    }
+
+    /// 按钮外观变体（默认 `Secondary`）。
+    pub fn variant(mut self, v: ButtonVariant) -> Self {
+        self.variant = v;
+        self
+    }
+}
+
+impl Widget for MenuButton {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        let m = self.menu.clone();
+        let placement = self.placement;
+        let variant = self.variant;
+        Button::new(self.label.clone())
+            .variant(variant)
+            .on_click_with_ctx(move |ctx| {
+                let r = ctx
+                    .current_rect()
+                    .unwrap_or_else(|| crate::geometry::Rect::new(0.0, 0.0, 0.0, 0.0));
+                if let Some(m) = m.clone() {
+                    show_popup_with(r, placement, move |handle, ctx| {
+                        Box::new(m(handle, ctx).auto_close(handle))
+                    });
+                }
+            })
+            .build(ctx)
     }
 }

@@ -66,6 +66,11 @@ impl Container {
         self.listeners.push(Listener::on_mouse_enter(Rc::new(f)));
         self
     }
+    /// 鼠标离开节点区域。
+    pub fn on_mouse_leave<F: Fn(&mut EventContext) + 'static>(mut self, f: F) -> Self {
+        self.listeners.push(Listener::on_mouse_leave(Rc::new(f)));
+        self
+    }
 
     // ── 视觉样式 ──
 

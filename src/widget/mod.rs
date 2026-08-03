@@ -39,7 +39,7 @@ pub use image::Image;
 pub use input::{Input, InputSize, InputStatus};
 pub use layout::LayoutAttr;
 pub use list_view::ListView;
-pub use menu::{ContextMenu, Menu, MenuItem, MenuSeparator, Submenu};
+pub use menu::{ContextMenu, Menu, MenuButton, MenuItem, MenuSeparator, Submenu};
 pub use progress::Progress;
 pub use radio::Radio;
 pub use scroll_bar::{ScrollBar, ScrollOrientation};
@@ -101,6 +101,20 @@ pub trait Widget {
             Some(s) => s.to_string(),
             None => full.to_string(),
         }
+    }
+}
+
+/// 允许 `Box<dyn Widget>` 作为 `Widget` 使用（如组合容器包裹任意子 widget）。
+impl Widget for Box<dyn Widget> {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        (**self).build(ctx)
+    }
+}
+
+/// 允许 `Rc<dyn Widget>` 作为 `Widget` 使用（如 `ContextMenu` 包裹任意触发 widget）。
+impl Widget for Rc<dyn Widget> {
+    fn build(&self, ctx: &mut BuildContext) -> ViewNode {
+        (**self).build(ctx)
     }
 }
 

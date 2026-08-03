@@ -9,13 +9,13 @@
 //! `section_*` 区块函数（每个区块用 `card()` 包成一个卡片），避免单一巨型链式调用。
 
 use lieui::event::Event;
-use lieui::geometry::{Color, Rect};
+use lieui::geometry::Color;
 use lieui::layout::types::FlexAlign;
 use lieui::prelude::*;
-use lieui::state::{PopupPlacement, State, request_rebuild, show_popup_with};
+use lieui::state::{State, request_rebuild};
 use lieui::theme::{self, Mode, set_mode};
 use lieui::view::paint::ImageFit;
-use lieui::widget::menu::{ContextMenu, Menu, MenuItem, Submenu};
+use lieui::widget::menu::{ContextMenu, Menu, MenuButton, MenuItem, Submenu};
 use lieui::widget::{
     ButtonSize, ButtonVariant, CardVariant, InputSize, InputStatus, ScrollBar, Widget,
 };
@@ -606,56 +606,48 @@ fn section_menu() -> impl Widget {
                 .align_items(FlexAlign::Center)
                 .child(section_title("下拉菜单"))
                 .child(
-                    Button::new("文件 ▾")
+                    MenuButton::new("文件")
                         .variant(ButtonVariant::Secondary)
-                        .on_click_with_ctx(|ctx| {
-                            show_popup_with(
-                                ctx.current_rect()
-                                    .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0)),
-                                PopupPlacement::Below,
-                                |handle, _ctx| {
-                                    Box::new(
-                                        Menu::new()
-                                            .item(
-                                                MenuItem::new("新建文件")
-                                                    .on_click(|_c| println!("[menu] 新建文件")),
-                                            )
-                                            .item(
-                                                MenuItem::new("打开…")
-                                                    .on_click(|_c| println!("[menu] 打开")),
-                                            )
-                                            .separator()
-                                            .item(
-                                                MenuItem::new("保存")
-                                                    .hint("Ctrl+S")
-                                                    .on_click(|_c| println!("[menu] 保存")),
-                                            )
-                                            .item(
-                                                MenuItem::new("另存为…")
-                                                    .on_click(|_c| println!("[menu] 另存为")),
-                                            )
-                                            .submenu(
-                                                Submenu::new("最近打开")
-                                                    .item(MenuItem::new("report.pdf").on_click(
-                                                        |_c| println!("[menu] 最近: report.pdf"),
-                                                    ))
-                                                    .item(MenuItem::new("budget.xlsx").on_click(
-                                                        |_c| println!("[menu] 最近: budget.xlsx"),
-                                                    ))
-                                                    .item(MenuItem::new("slides.pptx").on_click(
-                                                        |_c| println!("[menu] 最近: slides.pptx"),
-                                                    )),
-                                            )
-                                            .separator()
-                                            .item(
-                                                MenuItem::new("退出")
-                                                    .hint("Alt+F4")
-                                                    .on_click(|_c| println!("[menu] 退出")),
-                                            )
-                                            .auto_close(handle),
-                                    )
-                                },
-                            );
+                        .menu(|_handle, _ctx| {
+                            Menu::new()
+                                .item(
+                                    MenuItem::new("新建文件")
+                                        .on_click(|_c| println!("[menu] 新建文件")),
+                                )
+                                .item(MenuItem::new("打开…").on_click(|_c| println!("[menu] 打开")))
+                                .separator()
+                                .item(
+                                    MenuItem::new("保存")
+                                        .hint("Ctrl+S")
+                                        .on_click(|_c| println!("[menu] 保存")),
+                                )
+                                .item(
+                                    MenuItem::new("另存为…")
+                                        .on_click(|_c| println!("[menu] 另存为")),
+                                )
+                                .submenu(
+                                    Submenu::new("最近打开")
+                                        .item(
+                                            MenuItem::new("report.pdf")
+                                                .on_click(|_c| println!("[menu] 最近: report.pdf")),
+                                        )
+                                        .item(
+                                            MenuItem::new("budget.xlsx").on_click(|_c| {
+                                                println!("[menu] 最近: budget.xlsx")
+                                            }),
+                                        )
+                                        .item(
+                                            MenuItem::new("slides.pptx").on_click(|_c| {
+                                                println!("[menu] 最近: slides.pptx")
+                                            }),
+                                        ),
+                                )
+                                .separator()
+                                .item(
+                                    MenuItem::new("退出")
+                                        .hint("Alt+F4")
+                                        .on_click(|_c| println!("[menu] 退出")),
+                                )
                         }),
                 ),
         )
@@ -669,22 +661,24 @@ fn section_menu() -> impl Widget {
                 .variant(CardVariant::Default)
                 .padding(20.0)
                 .body(Text::new("右键我 →").font_size(15.0));
-            ContextMenu::new(card).menu(|_handle, _ctx| {
-                Menu::new()
-                    .item(MenuItem::new("复制").on_click(|_ctx| {
-                        println!("[ctx] 复制");
-                    }))
-                    .item(MenuItem::new("粘贴").on_click(|_ctx| {
-                        println!("[ctx] 粘贴");
-                    }))
-                    .separator()
-                    .item(MenuItem::new("重命名").on_click(|_ctx| {
-                        println!("[ctx] 重命名");
-                    }))
-                    .item(MenuItem::new("删除").hint("Del").on_click(|_ctx| {
-                        println!("[ctx] 删除");
-                    }))
-            })
+            ContextMenu::new(card)
+                .close_on_leave(true)
+                .menu(|_handle, _ctx| {
+                    Menu::new()
+                        .item(MenuItem::new("复制").on_click(|_ctx| {
+                            println!("[ctx] 复制");
+                        }))
+                        .item(MenuItem::new("粘贴").on_click(|_ctx| {
+                            println!("[ctx] 粘贴");
+                        }))
+                        .separator()
+                        .item(MenuItem::new("重命名").on_click(|_ctx| {
+                            println!("[ctx] 重命名");
+                        }))
+                        .item(MenuItem::new("删除").hint("Del").on_click(|_ctx| {
+                            println!("[ctx] 删除");
+                        }))
+                })
         })
 }
 

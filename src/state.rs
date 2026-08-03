@@ -279,7 +279,7 @@ impl PopupPlacement {
 }
 
 /// 弹出浮层句柄：用于 `hide_popup` 精确关闭该浮层实例。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PopupHandle(pub LayerHandle);
 
 // 全局自增句柄源，保证跨窗口 Popup 句柄唯一（句柄仅在创建窗口内消费）。
@@ -341,15 +341,13 @@ pub fn show_popup_with(
     PopupHandle(handle)
 }
 
-/// 关闭指定 Popup 浮层。
+/// 关闭指定 Popup 浮层（按句柄精确移除）。
+///
+/// 说明：Popup 层通过 `PENDING_POPUP_HIDE` 按 handle 精确移除；`LayerCmd::Hide`
+/// 仅用于单实例的 Modal/Overlay，对 Popup 无意义，故不推送（避免冗余命令）。
 pub fn hide_popup(handle: PopupHandle) {
     PENDING_POPUP_HIDE.with(|c| {
         c.borrow_mut().push(handle.0.0);
-    });
-    PENDING_LAYER.with(|c| {
-        c.borrow_mut().push(LayerCmd::Hide {
-            kind: LayerKind::Popup,
-        });
     });
     request_rebuild();
 }
