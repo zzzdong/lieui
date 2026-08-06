@@ -96,6 +96,27 @@ pub struct StatusTokens {
     pub info_bg: Color,
 }
 
+/// 菜单（下拉 / 右键 / 子菜单）专属设计令牌，对齐 PatternFly v6 的
+/// `--pf-t--menu--*` 系列。菜单表面、项文字、hover 项背景、分隔线、
+/// 边框、阴影等均引用本组，而非通用 background/text token。
+#[derive(Debug, Clone, Copy)]
+pub struct MenuTokens {
+    /// 菜单整体表面背景（`--pf-t--menu--BackgroundColor`）。
+    pub background: Color,
+    /// 菜单项文字色（`--pf-t--menu--item--link--Color`）。
+    pub item_text: Color,
+    /// 右侧快捷键提示文字色（`--pf-t--menu--item--description--Color`）。
+    pub item_hint: Color,
+    /// 菜单项 hover 高亮背景（`--pf-t--menu--item--hover--BackgroundColor`）。
+    pub item_hover_background: Color,
+    /// 分隔线颜色（`--pf-t--menu--divider--Color`）。
+    pub divider: Color,
+    /// 菜单边框色（`--pf-t--menu--BorderColor`）。
+    pub border: Color,
+    /// 菜单浮层阴影（`--pf-t--menu--BoxShadow`）。
+    pub shadow: ShadowSpec,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub text: TextTokens,
@@ -106,6 +127,7 @@ pub struct Theme {
     pub font: FontTokens,
     pub shadow: ShadowTokens,
     pub status: StatusTokens,
+    pub menu: MenuTokens,
 }
 
 // ───────────────────────────── 主题实例 ─────────────────────────────
@@ -193,6 +215,28 @@ impl Theme {
                 info: Color::from_hex("#0066cc"),
                 info_bg: Color::from_hex("#e7f1fa"),
             },
+            menu: MenuTokens {
+                // --pf-t--menu--BackgroundColor: #ffffff
+                background: Color::from_hex("#ffffff"),
+                // --pf-t--menu--item--link--Color: 等同文本主色
+                item_text: Color::from_hex("#151515"),
+                // --pf-t--menu--item--description--Color: subtle
+                item_hint: Color::from_hex("#6a6e73"),
+                // --pf-t--menu--item--hover--BackgroundColor: blue-50
+                item_hover_background: Color::from_hex("#e0f0ff"),
+                // --pf-t--menu--divider--Color: 同 border default
+                divider: Color::from_hex("#e0e0e0"),
+                // --pf-t--menu--BorderColor
+                border: Color::from_hex("#e0e0e0"),
+                // --pf-t--menu--BoxShadow
+                shadow: ShadowSpec {
+                    offset_x: 0.0,
+                    offset_y: 4.0,
+                    blur: 12.0,
+                    spread: 0.0,
+                    color: Color::rgba(3, 3, 3, 26),
+                },
+            },
         }
     }
 
@@ -207,6 +251,20 @@ impl Theme {
         t.background.disabled_default = Color::from_hex("#383838");
         t.border.default = Color::from_hex("#383838");
         t.border.strong = Color::from_hex("#6a6a6a");
+        // 暗色菜单：表面用暗色 background，hover 用品牌蓝半透明叠层
+        t.menu.background = Color::from_hex("#1b1d23");
+        t.menu.item_text = Color::from_hex("#f0f0f0");
+        t.menu.item_hint = Color::from_hex("#a3a3a3");
+        t.menu.item_hover_background = Color::rgba(255, 255, 255, 31); // 半透明白叠层
+        t.menu.divider = Color::from_hex("#383838");
+        t.menu.border = Color::from_hex("#383838");
+        t.menu.shadow = ShadowSpec {
+            offset_x: 0.0,
+            offset_y: 4.0,
+            blur: 12.0,
+            spread: 0.0,
+            color: Color::rgba(0, 0, 0, 70),
+        };
         // 暗色下阴影更重
         let dk = Color::rgba(0, 0, 0, 70);
         t.shadow.sm = ShadowSpec {

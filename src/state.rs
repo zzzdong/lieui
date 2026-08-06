@@ -117,6 +117,8 @@ pub(crate) enum LayerCmd {
         spec: LayerSpec,
         view: Box<ViewNode>,
         handle: LayerHandle,
+        /// Popup 父子归属：子 popup 的父 popup 句柄（菜单子菜单等）。
+        parent: Option<LayerHandle>,
     },
     /// 移除指定单实例层（Modal / Overlay）。
     Hide { kind: LayerKind },
@@ -191,6 +193,7 @@ pub fn show_layer(
             spec,
             view: Box::new(view),
             handle,
+            parent: None,
         });
     });
     request_rebuild();
@@ -318,6 +321,22 @@ pub fn show_popup_with(
     ) -> Box<dyn crate::widget::Widget>
     + 'static,
 ) -> PopupHandle {
+    show_popup_with_parent(trigger, placement, None, builder)
+}
+
+/// `show_popup_with` 的变体：允许指定 `parent: Option<PopupHandle>` 建立 Popup
+/// 父子归属。被指定为父 popup 的子菜单在父关闭时会**级联关闭**（见 LayerStack::close_popup），
+/// 避免父菜单消失而子菜单残留为孤儿浮层。菜单子菜单、右键菜单套菜单等使用本函数。
+pub fn show_popup_with_parent(
+    trigger: crate::geometry::Rect,
+    placement: PopupPlacement,
+    parent: Option<PopupHandle>,
+    builder: impl FnOnce(
+        PopupHandle,
+        &mut crate::widget::BuildContext,
+    ) -> Box<dyn crate::widget::Widget>
+    + 'static,
+) -> PopupHandle {
     let mut ctx =
         crate::widget::BuildContext::new(Rc::new(RefCell::new(crate::widget::StateMap::new())));
     let handle = NEXT_POPUP_HANDLE.with(|c| {
@@ -335,6 +354,7 @@ pub fn show_popup_with(
             spec,
             view: Box::new(view),
             handle,
+            parent: parent.map(|p| p.0),
         });
     });
     request_rebuild();
@@ -345,6 +365,9 @@ pub fn show_popup_with(
 ///
 /// 说明：Popup 层通过 `PENDING_POPUP_HIDE` 按 handle 精确移除；`LayerCmd::Hide`
 /// 仅用于单实例的 Modal/Overlay，对 Popup 无意义，故不推送（避免冗余命令）。
+///
+/// 关闭是**级联**的：若该 popup 拥有子 popup（如父菜单拥有展开的子菜单），
+/// 其整棵子树会一并收起（由 Runtime 在消费队列时调用 `LayerStack::close_popup`）。
 pub fn hide_popup(handle: PopupHandle) {
     PENDING_POPUP_HIDE.with(|c| {
         c.borrow_mut().push(handle.0.0);

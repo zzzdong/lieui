@@ -220,6 +220,12 @@ pub struct LayerStack {
     default_overlay_handle: Cell<Option<LayerHandle>>,
     /// 默认 Modal 句柄（单实例语义，兼容旧 show_modal/hide_modal）
     default_modal_handle: Cell<Option<LayerHandle>>,
+
+    // ========== Popup 生命周期 ==========
+    /// Popup 父子归属：子 popup → 父 popup（菜单子菜单、右键菜单套菜单等）
+    popup_parent: RefCell<std::collections::HashMap<LayerHandle, LayerHandle>>,
+    /// Popup 父子归属：父 popup → 直接子 popup 列表
+    popup_children: RefCell<std::collections::HashMap<LayerHandle, Vec<LayerHandle>>>,
 }
 
 impl LayerStack {
@@ -233,6 +239,8 @@ impl LayerStack {
             content_handle: Cell::new(None),
             default_overlay_handle: Cell::new(None),
             default_modal_handle: Cell::new(None),
+            popup_parent: RefCell::new(std::collections::HashMap::new()),
+            popup_children: RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -271,6 +279,11 @@ impl LayerStack {
 
     /// 与 `push` 相同，但使用调用方预先生成的 `LayerHandle`（窗口间句柄由全局命令携带）。
     /// 若传入的句柄序号不小于当前 `next_handle`，则同步推进，避免后续自增冲突。
+    ///
+    /// `parent` 为 `Some` 时登记 Popup 父子归属：子 popup 关闭时会级联关闭所有子孙，
+    /// 父 popup 关闭时也会级联关闭其整棵子树（见 `close_popup`）。菜单子菜单、
+    /// 右键菜单套菜单等均通过此参数建立归属关系。
+    #[allow(clippy::too_many_arguments)]
     pub fn push_with_handle(
         &mut self,
         kind: LayerKind,
@@ -279,6 +292,7 @@ impl LayerStack {
         focus: FocusPolicy,
         opts: LayerOptions,
         handle: LayerHandle,
+        parent: Option<LayerHandle>,
     ) -> LayerHandle {
         let id = self.tree.create_subtree_from_node(&view);
         if handle.0 >= self.next_handle.get() {
@@ -298,16 +312,64 @@ impl LayerStack {
             flip: opts.flip,
         };
         self.entries.borrow_mut().push(entry);
+        if let Some(p) = parent {
+            self.popup_parent.borrow_mut().insert(handle, p);
+            self.popup_children
+                .borrow_mut()
+                .entry(p)
+                .or_default()
+                .push(handle);
+        }
         handle
     }
 
-    /// 移除一条目（ElementTree.remove + entries 删除）
+    /// 移除一条目（ElementTree.remove + entries 删除）。
+    /// 同时清理 popup 归属关系，但不级联子孙（级联请用 `close_popup`）。
     pub fn remove(&mut self, handle: LayerHandle) {
         let mut es = self.entries.borrow_mut();
         if let Some(pos) = es.iter().position(|e| e.handle == handle) {
             let e = es.remove(pos);
             self.tree.remove(e.root_id);
         }
+        drop(es);
+        self.popup_parent.borrow_mut().remove(&handle);
+        if let Some(p) = self.popup_parent.borrow().get(&handle).copied()
+            && let Some(children) = self.popup_children.borrow_mut().get_mut(&p)
+        {
+            children.retain(|c| *c != handle);
+        }
+        self.popup_children.borrow_mut().remove(&handle);
+    }
+
+    // ========== Popup 生命周期 ==========
+
+    /// 返回某 popup 的所有子孙（含子、孙……），按任意顺序收集。
+    pub fn popup_descendants(&self, handle: LayerHandle) -> Vec<LayerHandle> {
+        let children_map = self.popup_children.borrow();
+        let mut out = Vec::new();
+        let mut stack: Vec<LayerHandle> = children_map
+            .get(&handle)
+            .cloned()
+            .unwrap_or_default();
+        while let Some(h) = stack.pop() {
+            out.push(h);
+            if let Some(ch) = children_map.get(&h) {
+                stack.extend(ch.iter().copied());
+            }
+        }
+        out
+    }
+
+    /// 关闭 popup 并**级联关闭其整棵子树**（所有子孙）。
+    ///
+    /// 这是 popup 生命周期的唯一标准关闭入口：菜单项点击、点击外部、hover 离开、
+    /// 右键重复打开，最终都汇聚到此处，保证父子菜单不会残留为孤儿 popup。
+    pub fn close_popup(&mut self, handle: LayerHandle) {
+        let descendants = self.popup_descendants(handle);
+        for d in descendants {
+            self.remove(d);
+        }
+        self.remove(handle);
     }
 
     pub fn set_visible(&self, handle: LayerHandle, v: bool) {
@@ -538,7 +600,8 @@ impl LayerStack {
             .map(|e| e.z())
             .unwrap_or(-1);
 
-        let mut dismissed_handles: Vec<LayerHandle> = Vec::new();
+        let mut dismissed_handles: std::collections::HashSet<LayerHandle> =
+            std::collections::HashSet::new();
 
         for entry in &entries {
             if !entry.visible.get() {
@@ -554,17 +617,15 @@ impl LayerStack {
 
             // 未命中本条目：FocusPolicy::Dismissable + dismiss_on_outside_click = true → 标记待 dismiss
             if entry.focus == FocusPolicy::Dismissable && entry.dismiss_on_outside_click {
-                dismissed_handles.push(entry.handle);
+                dismissed_handles.insert(entry.handle);
             }
         }
 
-        // 末命中任何条目时，对标记的条目执行 dismiss（点击外部关闭 Popup）
+        // 末命中任何条目时，对标记的条目执行 dismiss（点击外部关闭 Popup）。
+        // 走 `close_popup` 级联关闭整棵子树：父 popup 被点外关闭时，其所有子菜单
+        //（子 popup）一并收起，避免残留孤儿 popup。用 HashSet 去重防止父子同被标记时重复关闭。
         for h in &dismissed_handles {
-            self.remove(*h);
-        }
-        if !dismissed_handles.is_empty() {
-            // 通知渲染器需要重绘
-            // 通过 set_visible 触发效果
+            self.close_popup(*h);
         }
 
         None

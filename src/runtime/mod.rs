@@ -135,6 +135,7 @@ impl Runtime {
                         spec,
                         view,
                         handle,
+                        parent,
                     } => match kind {
                         LayerKind::Modal => {
                             let id = self.layers.tree.create_subtree_from_node(&view);
@@ -152,14 +153,25 @@ impl Runtime {
                                 spec.focus,
                                 spec.opts,
                                 handle,
+                                parent,
                             );
                         }
                     },
                 }
             }
-            // 同帧处理 Popup 关闭队列：按句柄精确移除（多实例 Popup 需要）。
-            for h in state::take_popup_hides() {
-                self.layers.remove(crate::core::layers::LayerHandle(h));
+            self.needs_layout = true;
+        }
+
+        // 同帧处理 Popup 关闭队列：按句柄精确移除（多实例 Popup 需要）。
+        // 走 `close_popup` 级联关闭整棵子树，保证菜单父子一同收起。
+        // 注意：此处理必须**独立于**上面的 `pending_layers` 显示流程 —— 否则在
+        // 「仅有 hide 请求、无新 show 命令」的情况下（例如子菜单鼠标移开后调用
+        // `hide_popup`），关闭队列会被跳过，导致 Popup 永远残留、无法关闭。
+        let popup_hides = state::take_popup_hides();
+        if !popup_hides.is_empty() {
+            for h in popup_hides {
+                self.layers
+                    .close_popup(crate::core::layers::LayerHandle(h));
             }
             self.needs_layout = true;
         }

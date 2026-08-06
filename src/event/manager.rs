@@ -430,8 +430,12 @@ impl EventManager {
             .unwrap_or_default();
 
         if new_target != self.hovered {
-            Self::set_hovered_state(tree, self.hovered, false);
-            Self::set_hovered_state(tree, new_target, true);
+            // 注意：不要在这里直接 set_hovered_state(self.hovered, false) /
+            // set_hovered_state(new_target, true)。hover 状态必须由下方
+            // hovered_listeners 的集合差集来管理，否则当一个节点在 old/new
+            // path 上同时出现（例如鼠标从父容器进入其子节点）时，先被清
+            // 除的 hovered 不会被差集恢复，导致该节点 hover 高亮在整块区域
+            // 上只剩最内层命中那一小块才生效。
             self.hovered = new_target;
             effects.request_render();
         }
