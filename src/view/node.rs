@@ -254,6 +254,7 @@ pub fn listeners_sig_eq(a: &[Listener], b: &[Listener]) -> bool {
 pub enum NodeType {
     Text,
     Image,
+    SharedSurface,
     Div,
 }
 
@@ -273,6 +274,14 @@ pub enum ViewNode {
         key: Option<String>,
         listeners: Vec<Listener>,
     },
+    /// 共享像素表面：由高频组件（terminal）自持 buffer，通过脏区增量提交，
+    /// 不经 rebuild 全链路。Compositor 只合屏其脏区。
+    SharedSurface {
+        surface: std::rc::Rc<crate::render::surface::SharedSurface>,
+        layout: FlexStyle,
+        key: Option<String>,
+        listeners: Vec<Listener>,
+    },
     Div {
         layout: FlexStyle,
         paint: PaintStyle,
@@ -287,6 +296,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { .. } => NodeType::Text,
             ViewNode::Image { .. } => NodeType::Image,
+            ViewNode::SharedSurface { .. } => NodeType::SharedSurface,
             ViewNode::Div { .. } => NodeType::Div,
         }
     }
@@ -295,6 +305,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { .. } => "text",
             ViewNode::Image { .. } => "image",
+            ViewNode::SharedSurface { .. } => "shared_surface",
             ViewNode::Div { .. } => "div",
         }
     }
@@ -303,6 +314,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { key, .. }
             | ViewNode::Image { key, .. }
+            | ViewNode::SharedSurface { key, .. }
             | ViewNode::Div { key, .. } => key.as_deref(),
         }
     }
@@ -311,6 +323,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { key, .. }
             | ViewNode::Image { key, .. }
+            | ViewNode::SharedSurface { key, .. }
             | ViewNode::Div { key, .. } => *key = Some(k),
         }
     }
@@ -319,6 +332,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { listeners, .. }
             | ViewNode::Image { listeners, .. }
+            | ViewNode::SharedSurface { listeners, .. }
             | ViewNode::Div { listeners, .. } => listeners.push(l),
         }
     }
@@ -340,6 +354,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { layout, .. }
             | ViewNode::Image { layout, .. }
+            | ViewNode::SharedSurface { layout, .. }
             | ViewNode::Div { layout, .. } => layout,
         }
     }
@@ -352,6 +367,10 @@ impl ViewNode {
             }
             ViewNode::Image { style, .. } => {
                 FixedMeasure::new(IntrinsicSize::new(style.width as f32, style.height as f32))
+                    .measure(constraint)
+            }
+            ViewNode::SharedSurface { surface, .. } => {
+                FixedMeasure::new(IntrinsicSize::new(surface.width() as f32, surface.height() as f32))
                     .measure(constraint)
             }
             ViewNode::Div { layout, .. } => {
@@ -407,6 +426,20 @@ impl ViewNode {
                     ..
                 },
             ) => a == x && b == y && l1 == r1 && listeners_sig_eq(l2, r2),
+            (
+                SharedSurface {
+                    surface: a,
+                    layout: l1,
+                    listeners: l2,
+                    ..
+                },
+                SharedSurface {
+                    surface: x,
+                    layout: r1,
+                    listeners: r2,
+                    ..
+                },
+            ) => Rc::ptr_eq(a, x) && l1 == r1 && listeners_sig_eq(l2, r2),
             (
                 Div {
                     layout: l1,
@@ -481,6 +514,20 @@ impl ViewNode {
                 },
             ) => Arc::ptr_eq(a, x) && b == y && l1 == r1 && listeners_sig_eq(l2, r2),
             (
+                SharedSurface {
+                    surface: a,
+                    layout: l1,
+                    listeners: l2,
+                    ..
+                },
+                SharedSurface {
+                    surface: x,
+                    layout: r1,
+                    listeners: r2,
+                    ..
+                },
+            ) => Rc::ptr_eq(a, x) && l1 == r1 && listeners_sig_eq(l2, r2),
+            (
                 Div {
                     layout: l1,
                     paint: p1,
@@ -503,6 +550,7 @@ impl ViewNode {
         match self {
             ViewNode::Text { listeners, .. }
             | ViewNode::Image { listeners, .. }
+            | ViewNode::SharedSurface { listeners, .. }
             | ViewNode::Div { listeners, .. } => listeners,
         }
     }
@@ -529,6 +577,7 @@ impl ViewNode {
                 style.hover_color.is_some() || style.pressed_color.is_some()
             }
             ViewNode::Image { .. } => false,
+            ViewNode::SharedSurface { .. } => false,
         }
     }
 }

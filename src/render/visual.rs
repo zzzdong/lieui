@@ -148,6 +148,14 @@ pub enum VisualElement {
         /// 圆角半径（像素），0 表示不裁剪。
         border_radius: f32,
     },
+    /// 共享像素表面：携带 surface 在窗口中的矩形，由 compositor 按脏区合屏。
+    /// 不直接进入 vello 光栅化，而是由 compositor 从 surface buffer 拷贝脏区。
+    SharedSurface {
+        id: crate::render::surface::SurfaceId,
+        bounds: KRect,
+        width: u32,
+        height: u32,
+    },
     Group {
         children: Vec<LayeredElement>,
         transform: Option<Transform>,
@@ -190,6 +198,7 @@ impl VisualElement {
                 ))
             }
             Self::Image { bounds, .. } => Some(*bounds),
+            Self::SharedSurface { bounds, .. } => Some(*bounds),
             Self::Group { .. } => None,
         }
     }
@@ -324,6 +333,12 @@ impl Clone for VisualElement {
                 opacity: *opacity,
                 fit: *fit,
                 border_radius: *border_radius,
+            },
+            Self::SharedSurface { id, bounds, width, height } => Self::SharedSurface {
+                id: *id,
+                bounds: *bounds,
+                width: *width,
+                height: *height,
             },
             Self::Group {
                 children,

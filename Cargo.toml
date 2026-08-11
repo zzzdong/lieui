@@ -13,7 +13,7 @@ categories = ["gui"]
 
 [dependencies]
 log = "0.4"
-vello_cpu = "0.1"
+vello_cpu = "0.2"
 kurbo = "0.13.1"
 parley = "0.11.0"
 slotmap = "1.0"
@@ -23,7 +23,7 @@ arboard = "3.4"
 image = "0.25"
 
 # Inspector（CDP，feature-gated）
-tungstenite = { version = "0.24", optional = true }
+tungstenite = { version = "0.30", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 

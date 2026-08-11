@@ -293,7 +293,8 @@ impl ElementTree {
             match &mut e.node {
                 ViewNode::Div { listeners: l, .. }
                 | ViewNode::Text { listeners: l, .. }
-                | ViewNode::Image { listeners: l, .. } => *l = listeners.clone(),
+                | ViewNode::Image { listeners: l, .. }
+                | ViewNode::SharedSurface { listeners: l, .. } => *l = listeners.clone(),
             }
             *e.listeners.borrow_mut() = listeners;
         }
@@ -505,6 +506,17 @@ fn without_children(n: &ViewNode) -> ViewNode {
         } => ViewNode::Image {
             data: std::sync::Arc::clone(data),
             style: *style,
+            layout: layout.clone(),
+            key: key.clone(),
+            listeners: listeners.clone(),
+        },
+        ViewNode::SharedSurface {
+            surface,
+            layout,
+            key,
+            listeners,
+        } => ViewNode::SharedSurface {
+            surface: std::rc::Rc::clone(surface),
             layout: layout.clone(),
             key: key.clone(),
             listeners: listeners.clone(),

@@ -457,6 +457,9 @@ impl VelloRenderer {
             VisualElement::Group { .. } => {
                 // Group 由 render_element 处理，这里不应直接遇到。
             }
+            VisualElement::SharedSurface { .. } => {
+                // 共享表面由 compositor 单独合屏，不走 vello 光栅化。
+            }
         }
     }
 }

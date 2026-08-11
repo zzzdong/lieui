@@ -559,6 +559,27 @@ impl Runtime {
                 )
                 .with_id(id.as_ffi()),
             );
+        } else if let crate::view::node::ViewNode::SharedSurface { surface, .. } = node_ref {
+            // 共享表面：由 compositor 按脏区合屏，不走 vello 光栅化。
+            // 这里只登记 surface 在窗口中的矩形（含 id），供 compositor 合屏时定位。
+            let r = computed.rect();
+            elements.push(
+                crate::render::visual::LayeredElement::new(
+                    crate::render::visual::VisualElement::SharedSurface {
+                        id: surface.id,
+                        bounds: crate::render::visual::KRect::new(
+                            r.x as f64,
+                            r.y as f64,
+                            (r.x + r.width) as f64,
+                            (r.y + r.height) as f64,
+                        ),
+                        width: surface.width(),
+                        height: surface.height(),
+                    },
+                    z_index,
+                )
+                .with_id(id.as_ffi()),
+            );
         } else if let crate::view::node::ViewNode::Div { paint, .. } = node_ref {
             let bg = if state.pressed && paint.pressed_background.is_some() {
                 paint.pressed_background
