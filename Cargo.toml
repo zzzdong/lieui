@@ -1,6 +1,6 @@
 [package]
 name = "lieui"
-version = "0.2.0-beta.1"
+version = "0.3"
 edition = "2024"
 description = "A Rust GUI library with C/S architecture and builder-driven UI"
 authors = ["zzzdong <kuwater@163.com>"]
@@ -12,47 +12,4 @@ keywords = ["gui", "ui", "vello", "winit", "cross-platform"]
 categories = ["gui"]
 
 [dependencies]
-log = "0.4"
-vello_cpu = "0.1"
-kurbo = "0.13.1"
-parley = "0.11.0"
-slotmap = "1.0"
-winit = "0.30"
-softbuffer = "0.4"
-arboard = "3.4"
-image = "0.25"
 
-# Inspector（CDP，feature-gated）
-tungstenite = { version = "0.24", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-
-[features]
-default = []
-inspector = ["dep:tungstenite", "dep:serde", "dep:serde_json"]
-
-[profile.dev]
-opt-level = 1
-
-[profile.dev.package."*"]
-opt-level = 2
-
-[[example]]
-name = "hello"
-path = "examples/hello.rs"
-
-[[example]]
-name = "counter"
-path = "examples/counter.rs"
-
-[[example]]
-name = "pdfkit"
-path = "examples/pdfkit.rs"
-
-[[example]]
-name = "window"
-path = "examples/window.rs"
-
-[[example]]
-name = "gallery"
-path = "examples/gallery.rs"
