@@ -1,0 +1,21 @@
+# 链接器配置 —— 目标是把「结构改动」的增量链接时间压到 5s 内（设计 §1.2.1）
+#
+# ⚠ Windows / MSVC：本机默认走 link.exe，且 stable 工具链无法切换到 rust-lld
+#   （`-Clinker-features=+lld` 仍是 unstable）。如需启用 lld-link：
+#     1. 安装 LLVM（winget install -e --id LLVM.LLVM）或 VS 的 “C++ Clang tools” 组件
+#     2. 把下面 [target.x86_64-pc-windows-msvc] 段的注释打开
+#   未安装时**不要**打开，否则会因找不到 linker 而构建失败。
+
+# [target.x86_64-pc-windows-msvc]
+# linker = "lld-link"
+# rustflags = ["-C", "link-arg=/lldmingw"]  # 仅在与 MinGW 混用时才需要
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/llvm/bin/ld64.lld"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/opt/llvm/bin/ld64.lld"]

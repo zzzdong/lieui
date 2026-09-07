@@ -34,7 +34,7 @@ lieui/                              workspace 根
 ├── rust-toolchain.toml             固定工具链版本
 ├── crates/
 │   ├── lieui-core/                 内核：节点树 · 属性 · 响应式 · reconcile · 帧管线
-│   ├── lieui-layout/               布局：taffy 集成
+│   ├── lieui-layout/               布局：Taitank 风格 Flex 引擎（树无关，移植自 main 分支）
 │   ├── lieui-text/                 文本：parley 集成
 │   ├── lieui-render/               渲染抽象：DisplayList · RenderBackend · BackendCaps
 │   ├── lieui-render-vello/         后端实现：vello_cpu · vello_hybrid
@@ -87,8 +87,7 @@ vello_common     = "0.2"
 peniko           = "0.4"
 kurbo            = "0.11"
 # 文本 / 布局
-parley           = "0.7"
-taffy            = "0.7"
+parley           = "0.11"
 # 平台 / 无障碍
 winit            = "0.30"
 accesskit        = "0.17"
@@ -116,8 +115,13 @@ codegen-units = 16
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-# Windows: rust-lld；macOS: lld（需 -C link-arg=-fuse-ld=/path/to/ld64.lld）
+# Windows: 默认 link.exe（stable 工具链的 -Clinker-features=+lld 仍为 unstable，无法启用 rust-lld）；
+#          如需启用 lld-link 见文件内注释
+# macOS: lld（需 -C link-arg=-fuse-ld=/path/to/ld64.lld）
 ```
+
+> 实测（本机 x86_64-pc-windows-msvc，i7）：noop 168ms / 结构改动 1.2s / 叶子改动 1.5s / cold 56s，
+> 均满足「样式 ≤200ms、结构 ≤5s」目标。完整数据见 `docs/m1-build-times.md`。
 
 ### 1.2.2 Feature flags
 
@@ -1036,18 +1040,18 @@ fn p2_layout(&mut self) {
     for window in &mut self.windows {
         if !window.layout_dirty { continue; }
 
-        // ① parley 两段式测度（只测度脏节点）
+        // ① parley 两段式测度（只测度脏节点，命中缓存直接返回）
         for node in window.dirty_text_nodes() {
             self.text.measure(window.id, node, &window.props);
         }
 
-        // ② taffy 求解（从重排边界开始，不整窗重算）
+        // ② Taitank Flex 求解：从重排边界开始，不整窗重算
+        //    LayoutHost 通过 LayoutTree trait 向引擎提供 style / 子节点 / 文本测度，
+        //    最多跑两轮（第 2 轮修正首帧无历史 avail 的百分比尺寸）。
         for boundary in window.layout_boundaries() {
-            window.taffy.compute_layout_with_measure(boundary, /* … */);
+            window.run_layout(&mut self.text);
         }
 
-        // ③ 回写 LayoutStore
-        window.layout.apply_from_taffy(&window.taffy);
         window.layout_dirty = false;
     }
 }
@@ -1200,40 +1204,48 @@ fn reuse(&mut self, node: NodeId, desc: &ElementDesc) {
 
 ## 3.3 布局（lieui-layout）
 
+> **M1 变更**：原计划用 taffy，改为移植本地 `main` 分支的 Taitank 风格 Flex 引擎（见 §7.2 M1 任务说明）。
+> 引擎**树无关**：通过 `LayoutTree` trait 向宿主获取样式/子节点/文本测度，宿主自行缓存。
+
 ```rust
 // lieui-layout/src/lib.rs
-pub struct LayoutEngine {
-    taffy: TaffyTree<MeasureContext>,   // 每窗口一个
+pub struct LayoutEngine;   // 纯函数式：build_flex + 递归 layout，无每窗口状态
+
+/// 引擎回调宿主（实现方持有 props 解析缓存与文本测度缓存）
+pub trait LayoutTree {
+    fn style_of(&mut self, node: u64) -> FlexStyle;
+    fn collect_children(&mut self, node: u64, out: &mut Vec<u64>);
+    fn measure(&mut self, node: u64, max_width: Option<f32>) -> Option<(f32, f32)>;
+    fn is_text(&mut self, node: u64) -> bool;
+    fn scroll_offset(&mut self, node: u64) -> (f32, f32);
 }
 
-/// taffy 的 measure 回调上下文
-pub struct MeasureContext<'a> {
-    tree:  &'a Tree,
-    props: &'a PropertyStore,
-    text:  &'a TextService,
-    cache: &'a LayoutCache,
+pub fn compute_layout(host: &mut impl LayoutTree, root: u64,
+                      avail: (f32, f32), origin: (f32, f32)) -> LayoutOutput;
+```
+
+```rust
+// lieui-core/src/layout.rs —— 宿主实现
+struct LayoutHost<'a> {
+    tree: &'a Tree,
+    props: &'a mut PropertyStore,
+    text: &'a mut TextService,
+    last: &'a LayoutStore,   // 上一帧结果（用于百分比修正 / 重排边界复现）
+    viewport: (f32, f32),
 }
 
-impl taffy::LayoutPartialTree for MeasureContext<'_> { /* … */ }
-
-/// parley 测度：两段式（先测度再布局）
-pub fn measure_text(
-    ctx: &MeasureContext, node: NodeId, known: Size<Option<f32>>,
-) -> Size<f32> {
-    let key = MeasureKey {
-        text_hash: ctx.text.hash_of(node),
-        style_hash: ctx.props.style_hash(node),
-        wrap: ctx.props.wrap_mode(node),
-        max_width: known.width,
-    };
-    if let Some(size) = ctx.cache.get(&key) { return size; }   // 缓存命中
-    let size = ctx.text.measure(node, known);
-    ctx.cache.insert(key, size);
-    size
+impl LayoutTree for LayoutHost<'_> {
+    fn style_of(&mut self, n) -> FlexStyle { /* 解析 4 层属性 + 本地缓存 */ }
+    fn collect_children(&mut self, n, out) { /* 填充 out，避免回调重入冲突 */ }
+    fn measure(&mut self, n, max_width) -> Option<(f32,f32)> {
+        // 构造 TextSpec 调用 parley 两段式：break_all_lines 缓存 + align 缓存
+    }
 }
 ```
 
-**重排边界**：布局相关属性变化时，脏标记只冒泡到**最近的布局边界**（通常是滚动容器、显式尺寸容器或窗口根），P2 只重算边界内子树。
+**重排边界**：布局相关属性变化时，脏标记只冒泡到**最近的布局边界**（宽高均确定的节点 / 滚动容器 / 窗口根），P2 只重算边界内子树；因 `ComputedLayout` 回显了 `local_x/local_y` 与 `avail_w/avail_h`，边界子树可在不重算祖先的前提下复现完全相同的输入。
+
+**百分比尺寸**：首帧无历史 avail 时退化为 Auto，并触发至多第 2 轮 pass 修正（`unresolved_percent`）。
 
 ```rust
 pub fn mark_layout_dirty(&mut self, node: NodeId) {
@@ -1704,7 +1716,6 @@ pub struct Window {
     pub props: PropertyStore,
     pub states: StateStore,
     pub buffers: TextBuffers,
-    pub taffy: LayoutEngine,
     pub layout: LayoutStore,
     pub dl: DisplayList,
     pub listeners: ListenerTable,
@@ -2254,13 +2265,20 @@ lieui/
 
 ### M1 布局
 
-| # | 任务 | 验收 |
-|---|---|---|
-| 1 | taffy 集成 + 重排边界 | 改单文本节点不触发整窗重排（计数器断言） |
-| 2 | parley 两段式测度 | 测度缓存命中率 > 90% |
-| 3 | 文本布局缓存 | 相同 (text, style, wrap) 不重复测度 |
-| 4 | **量编译时间** | **样式改动 ≤200ms / 结构改动 ≤5s 有数据** |
-| 5 | mold / lld 接入 | 链接时间下降可量化 |
+| # | 任务 | 验收 | 状态 |
+|---|---|---|---|
+| 1 | 布局引擎集成 + 重排边界 | 改单文本节点不触发整窗重排（计数器断言） | ✅ |
+| 2 | 文本两段式测度 | 测度缓存命中率 > 90% | ✅ |
+| 3 | 文本布局缓存 | 相同 (text, style, wrap) 不重复测度 | ✅ |
+| 4 | **量编译时间** | **样式改动 ≤200ms / 结构改动 ≤5s 有数据** | ✅ |
+| 5 | mold / lld 接入 | 链接时间下降可量化 | ⚠️ 部分（见下） |
+
+> **M1 与原计划不一致的点**（详见 `docs/M1-changelog.md`）：
+> - **布局引擎选型变更**：原计划用 `taffy`，改为移植本地 `main` 分支的 Taitank 风格 Flex 引擎（`crates/lieui-layout`，零依赖、树无关）。原因：用户临时决策 + 更贴合「重排边界 / 两段式测度」的可控实现。
+> - **parley 版本**：`0.7` → `0.11`（`Brush` 为空结构体 `()`，颜色由绘制层取；API 名称与原计划 `0.7` 不同）。
+> - **重排边界实现**：不依赖 taffy 的 partial tree，而是 `ComputedLayout` 回显 `local_x/local_y` + `avail_w/avail_h`，使边界子树能在不重算祖先的前提下复现相同输入；百分比尺寸用「至多 2 轮 pass」修正首帧无历史 avail 的情况。
+> - **Windows 链接器**：stable 工具链的 `-Clinker-features=+lld` 仍为 unstable，且本机无 `lld-link`，故 Windows 段暂不启用 rust-lld，仅配置 Linux mold + macOS lld。
+> - **`Window.taffy` 字段已移除**：布局状态函数式化（`LayoutEngine` 无每窗口状态）。
 
 ### M2 信号响应式（★ 第一周做 leptos 决策）
 
@@ -2320,7 +2338,7 @@ lieui/
 | vello_cpu | 0.2.x | `render`/`render_with`、`Resources`、filter 支持度；**预期被重设计** |
 | vello_hybrid | 0.1.x（M7） | Mask/filter/blend 限制 |
 | parley | 0.7.x | `editing`/`cursor` 模块路径、`Alignment` 变体名 |
-| taffy | 0.7.x | 布局语义、measure 回调签名 |
+| taffy | —（已弃用） | 原计划用于布局，M1 改为移植 main 分支的 Taitank 风格 Flex 引擎，见 §3.3 |
 | winit | 0.30.x | `ApplicationHandler`、IME 接口 |
 | accesskit | 0.17.x | 节点模型、`TreeUpdate` |
 | slotmap / smallvec / bitflags | 稳定 | — |

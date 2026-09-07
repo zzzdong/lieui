@@ -1,0 +1,12 @@
+[package]
+name = "lieui-text"
+description = "Text measurement and layout for lieui, based on parley"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+parley.workspace = true

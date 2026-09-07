@@ -1,0 +1,14 @@
+[package]
+name = "lieui-core"
+description = "lieui kernel: node tree, properties, frame pipeline"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+lieui-layout = { workspace = true }
+lieui-text   = { workspace = true }
+bitflags     = { workspace = true }

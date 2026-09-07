@@ -1,0 +1,12 @@
+[package]
+name = "lieui"
+description = "lieui facade crate: re-exports and prelude"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+lieui-core = { workspace = true }

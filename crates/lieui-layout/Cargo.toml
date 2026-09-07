@@ -1,0 +1,11 @@
+[package]
+name = "lieui-layout"
+description = "Taitank-style Flexbox layout engine for lieui (tree-agnostic, no external layout dependency)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]

@@ -1,15 +1,32 @@
-[package]
-name = "lieui"
-version = "0.3"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
 edition = "2024"
-description = "A Rust GUI library with C/S architecture and builder-driven UI"
 authors = ["zzzdong <kuwater@163.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zzzdong/lieui"
 homepage = "https://github.com/zzzdong/lieui"
-documentation = "https://docs.rs/lieui"
-keywords = ["gui", "ui", "vello", "winit", "cross-platform"]
-categories = ["gui"]
 
-[dependencies]
+[workspace.dependencies]
+lieui-core   = { path = "crates/lieui-core",   version = "0.1.0" }
+lieui-layout = { path = "crates/lieui-layout", version = "0.1.0" }
+lieui-text   = { path = "crates/lieui-text",   version = "0.1.0" }
+lieui        = { path = "crates/lieui",        version = "0.1.0" }
 
+bitflags = "2.6"
+parley   = "0.11"
+ron      = "0.8"
+
+# ── 编译速度：dev 下保留基本优化，依赖全量优化 ──
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
