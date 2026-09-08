@@ -12,6 +12,7 @@ use vello_cpu::{
 use crate::render::renderer::Renderer;
 use crate::render::visual::{LayeredElement, Stroke, VisualElement};
 use crate::view::paint::ImageFit;
+use std::collections::HashMap;
 
 /// 光栅化工作线程数。
 ///
@@ -36,8 +37,11 @@ pub struct VelloRenderer {
     pixmap: Pixmap,
     /// 光栅化工作线程数（`0` = 自动）。
     num_threads: u16,
-    /// 上一帧各元素的 `(签名, 包围盒)`，用于帧间比较得出 UI 脏区。
-    prev_signatures: Vec<(u64, Rect)>,
+    /// 上一帧各元素的 `(签名, 包围盒)`，按 `element_id` 索引，用于帧间比较得出 UI 脏区。
+    ///
+    /// 用 `ElementId`（无 id 时为 `None`）而非下标做 key，避免元素顺序 / 数量变化导致的
+    /// 下标错位、整屏退化。
+    prev_signatures: HashMap<Option<u64>, (u64, Rect)>,
     /// 本帧 UI 脏区（由 `update_ui_dirty` 计算）。
     ui_dirty: Vec<crate::geometry::Rect>,
     /// 本帧 UI 是否整屏脏（退化为全量更新）。
@@ -73,7 +77,7 @@ impl VelloRenderer {
             height: h,
             pixmap: Pixmap::new(w, h),
             num_threads,
-            prev_signatures: Vec::new(),
+            prev_signatures: HashMap::new(),
             ui_dirty: Vec::new(),
             ui_full: true,
         }
@@ -137,42 +141,38 @@ impl VelloRenderer {
             self.prev_signatures.clear();
             return;
         }
-        let mut full = elements.len() != self.prev_signatures.len();
+        let mut full = false;
         let mut dirty: Vec<crate::geometry::Rect> = Vec::new();
-        for (i, el) in elements.iter().enumerate() {
+        // 本帧签名表（按 ElementId 索引）；同时用于判断"本帧消失的元素"。
+        let mut cur: HashMap<Option<u64>, (u64, Rect)> = HashMap::with_capacity(elements.len());
+        for el in elements {
+            let id = el.element_id;
             let sig = el.signature();
-            let cur = el.element.bounding_rect();
-            let changed = self
-                .prev_signatures
-                .get(i)
-                .is_none_or(|(prev_sig, _)| *prev_sig != sig);
-            if !changed {
-                continue;
+            let rect = el.element.bounding_rect().unwrap_or(Rect::ZERO);
+            let changed = match self.prev_signatures.get(&id) {
+                Some((prev_sig, _)) => *prev_sig != sig,
+                None => true, // 新增元素
+            };
+            if changed {
+                match el.element.bounding_rect() {
+                    Some(r) => dirty.push(krect_to_rect(r)),
+                    // 无法定位矩形（Group 等）：退化为整屏，避免漏更新。
+                    None => full = true,
+                }
+                // 上一帧该元素的旧矩形也要重画（内容消失/移动后需要擦除）。
+                if let Some((_, prev_rect)) = self.prev_signatures.get(&id) {
+                    dirty.push(krect_to_rect(*prev_rect));
+                }
             }
-            match cur {
-                Some(r) => dirty.push(krect_to_rect(r)),
-                // 无法定位矩形（Group 等）：退化为整屏，避免漏更新。
-                None => full = true,
-            }
-            // 上一帧该位置的旧矩形也要重画（内容消失/移动后需要擦除）。
-            if let Some((_, prev_rect)) = self.prev_signatures.get(i) {
+            cur.insert(id, (sig, rect));
+        }
+        // 本帧消失的元素（上帧有、本帧无）→ 其旧矩形需重画（擦除残影）。
+        for (id, (_, prev_rect)) in self.prev_signatures.iter() {
+            if !cur.contains_key(id) {
                 dirty.push(krect_to_rect(*prev_rect));
             }
         }
-        // 上一帧多出来的元素（本帧消失）→ 其区域需重画。
-        for (_, prev_rect) in self.prev_signatures.iter().skip(elements.len()) {
-            dirty.push(krect_to_rect(*prev_rect));
-        }
-
-        self.prev_signatures = elements
-            .iter()
-            .map(|el| {
-                (
-                    el.signature(),
-                    el.element.bounding_rect().unwrap_or(Rect::ZERO),
-                )
-            })
-            .collect();
+        self.prev_signatures = cur;
         self.ui_full = full;
         self.ui_dirty = if full { Vec::new() } else { dirty };
     }
@@ -643,7 +643,8 @@ mod tests {
                     style: FillStrokeStyle::new().with_fill(Color::RED),
                 },
                 0,
-            ),
+            )
+            .with_id(0),
             LayeredElement::new(
                 VisualElement::RoundedRect {
                     rect: KRect::new(10.0, 10.0, 40.0, 40.0),
@@ -653,7 +654,8 @@ mod tests {
                         .with_stroke(Color::new(0, 0, 0), 2.0),
                 },
                 1,
-            ),
+            )
+            .with_id(1),
             LayeredElement::new(
                 VisualElement::Group {
                     children: vec![LayeredElement::new(
@@ -667,7 +669,8 @@ mod tests {
                     clip_rect: Some(KRect::new(0.0, 0.0, 20.0, 20.0)),
                 },
                 2,
-            ),
+            )
+            .with_id(2),
         ]
     }
 
@@ -719,14 +722,15 @@ mod tests {
         let mut r = VelloRenderer::new(64, 64);
         let mut els = sample_elements();
         r.update_ui_dirty(&els);
-        // 改第一个矩形的颜色。
+        // 改第一个矩形的颜色（保持 id=0，只签名变）。
         els[0] = LayeredElement::new(
             VisualElement::Rect {
                 rect: KRect::new(2.0, 2.0, 30.0, 30.0),
                 style: FillStrokeStyle::new().with_fill(Color::new(10, 20, 30)),
             },
             0,
-        );
+        )
+        .with_id(0);
         r.update_ui_dirty(&els);
         assert!(!r.ui_dirty_full());
         let dirty = r.ui_dirty();
@@ -745,11 +749,21 @@ mod tests {
         let mut r = VelloRenderer::new(64, 64);
         let els = sample_elements();
         r.update_ui_dirty(&els);
-        // 1) 数量变化
+        // 1) 数量变化：按 ElementId 精确标脏消失元素的旧矩形，不再整屏退化。
         r.update_ui_dirty(&els[..1]);
-        assert!(r.ui_dirty_full(), "element count change must force full");
+        assert!(
+            !r.ui_dirty_full(),
+            "count change must NOT force full with id-keyed cache"
+        );
+        let dirty = r.ui_dirty();
+        assert!(
+            dirty
+                .iter()
+                .any(|d| d.x <= 10.0 && d.y <= 10.0 && d.width >= 28.0),
+            "removed element (id=1) old rect should be dirty, got {dirty:?}"
+        );
 
-        // 2) Group（无包围盒）内容变化
+        // 2) Group（无包围盒）内容变化 → 退化为整屏（避免漏更新）。
         let mut els2 = sample_elements();
         r.update_ui_dirty(&els2);
         els2[2] = LayeredElement::new(
@@ -765,7 +779,8 @@ mod tests {
                 clip_rect: Some(KRect::new(0.0, 0.0, 20.0, 20.0)),
             },
             2,
-        );
+        )
+        .with_id(2);
         r.update_ui_dirty(&els2);
         assert!(
             r.ui_dirty_full(),

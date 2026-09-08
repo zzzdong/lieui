@@ -227,6 +227,7 @@ fn composite_frame(
     ui_dirty: &[Rect],
 ) -> Vec<Rect> {
     let (w, h) = window_size;
+    let _span = crate::perf::Span::start("composite");
     if w == 0 || h == 0 {
         return Vec::new();
     }
@@ -797,6 +798,7 @@ impl ApplicationHandler<()> for Application {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let _frame_t0 = std::time::Instant::now();
                 let viewport = (
                     ctx.runtime.viewport.width as u32,
                     ctx.runtime.viewport.height as u32,
@@ -814,6 +816,10 @@ impl ApplicationHandler<()> for Application {
                 }
                 // 否则：只有 SharedSurface 脏区，已由 `composite_surfaces_only`
                 // 完成合屏与部分上屏，跳过了 vello 全屏光栅化。
+
+                if crate::perf::enabled() {
+                    record_frame_render(_frame_t0.elapsed());
+                }
             }
             _ => {}
         }
@@ -852,6 +858,71 @@ impl ApplicationHandler<()> for Application {
 // ============================================================================
 // Application 私有方法
 // ============================================================================
+
+/// 帧渲染耗时聚合（仅 `LIEUI_PERF=1` 启用时记录/打印，避免生产噪声）。
+///
+/// 这里计的是从 `RedrawRequested` 进入、到合屏+上屏完成的墙钟，**不含**动画
+/// 定时器的等待间隔——这才是真正衡量脏区合屏成本的指标（perf_surface 基准里的
+/// `avg_frame` 测的是节拍，不能代表渲染耗时）。
+fn record_frame_render(dt: std::time::Duration) {
+    use std::sync::Mutex;
+    struct S {
+        frames: u64,
+        total: std::time::Duration,
+    }
+    static ST: Mutex<S> = Mutex::new(S { frames: 0, total: std::time::Duration::ZERO });
+    let mut s = ST.lock().unwrap();
+    s.frames += 1;
+    s.total += dt;
+    if s.frames >= 120 {
+        let avg = s.total.as_secs_f64() * 1000.0 / s.frames as f64;
+        eprintln!("[lieui-perf] frame-render  avg={:.2}ms  (n={})", avg, s.frames);
+        *s = S { frames: 0, total: std::time::Duration::ZERO };
+    }
+}
+
+/// 上屏阶段统计：观察 `age()==0`（后端缓冲区未定义）与 `full`（退化全量）的频率。
+///
+/// 若 `age0%` 长期接近 100%，说明后端不保证保留上一帧内容，脏区优化在上屏阶段
+/// 会持续失效——这是评审 P0·验证要定位的关键项。
+fn record_blit(age: u32, full: bool, regions: usize, damage_ratio: f32) {
+    use std::sync::Mutex;
+    struct B {
+        n: u64,
+        age0: u64,
+        full: u64,
+        regions: f64,
+        ratio: f64,
+    }
+    static ST: Mutex<B> = Mutex::new(B {
+        n: 0,
+        age0: 0,
+        full: 0,
+        regions: 0.0,
+        ratio: 0.0,
+    });
+    let mut s = ST.lock().unwrap();
+    s.n += 1;
+    if age == 0 {
+        s.age0 += 1;
+    }
+    if full {
+        s.full += 1;
+    }
+    s.regions += regions as f64;
+    s.ratio += damage_ratio as f64;
+    if s.n >= 120 {
+        eprintln!(
+            "[lieui-perf] blit  age0={:.0}% full={:.0}% avg_regions={:.1} avg_damage={:.1}%  (n={})",
+            s.age0 as f64 / s.n as f64 * 100.0,
+            s.full as f64 / s.n as f64 * 100.0,
+            s.regions / s.n as f64,
+            s.ratio / s.n as f64 * 100.0,
+            s.n
+        );
+        *s = B { n: 0, age0: 0, full: 0, regions: 0.0, ratio: 0.0 };
+    }
+}
 
 impl Application {
     /// 创建一个窗口并初始化上下文。
@@ -1024,6 +1095,7 @@ impl WindowContext {
 
     /// 把本帧合成得到的脏区上屏（临时取走 backing，避免整帧 clone；blit 后回填）。
     fn blit_damage(&mut self, damage: &[Rect]) {
+        let _span = crate::perf::Span::start("blit");
         if damage.is_empty() {
             return;
         }
@@ -1158,6 +1230,10 @@ impl WindowContext {
         // 缓冲区内容未定义、无脏区信息、或脏区已接近全屏 → 整帧重写 + 全量 present。
         let full =
             buf.age() == 0 || damage.is_empty() || damage_area(damage) >= buf_len as f32 * 0.7;
+        if crate::perf::enabled() {
+            let ratio = damage_area(damage) / buf_len as f32;
+            record_blit(buf.age() as u32, full, damage.len(), ratio);
+        }
         if full {
             let copy_len = (buf_len * 4).min(data.len());
             {

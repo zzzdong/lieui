@@ -21,6 +21,16 @@ use std::rc::Rc;
 // 模块内沿用短名。
 use self::rect_intersect as intersect;
 
+/// surface 位置/尺寸变化是否超过抖动容忍阈值（与 `surfaces_changed_from` 保持同一阈值）。
+///
+/// 亚像素抖动（<0.5px）视为"未变化"，避免每帧把全屏 surface 矩形标脏导致全屏合成。
+fn rect_changed_approx(a: &Rect, b: &Rect) -> bool {
+    (a.x - b.x).abs() > 0.5
+        || (a.y - b.y).abs() > 0.5
+        || (a.width - b.width).abs() > 0.5
+        || (a.height - b.height).abs() > 0.5
+}
+
 /// 一个待合屏的共享表面在窗口中的定位信息。
 #[derive(Debug, Clone, Copy)]
 pub struct SurfaceEntry {
@@ -166,12 +176,9 @@ impl Compositor {
             return true;
         }
         entries.iter().any(|e| {
-            self.prev_surface_rects.get(&e.id).is_none_or(|prev| {
-                (prev.x - e.rect.x).abs() > 0.5
-                    || (prev.y - e.rect.y).abs() > 0.5
-                    || (prev.width - e.rect.width).abs() > 0.5
-                    || (prev.height - e.rect.height).abs() > 0.5
-            })
+            self.prev_surface_rects
+                .get(&e.id)
+                .is_none_or(|prev| rect_changed_approx(prev, &e.rect))
         })
     }
 
@@ -189,15 +196,7 @@ impl Compositor {
             .prev_surface_rects
             .iter()
             .filter_map(|(id, prev)| {
-                let changed = match current.get(id) {
-                    Some(now) => {
-                        (now.x - prev.x).abs() > 0.5
-                            || (now.y - prev.y).abs() > 0.5
-                            || (now.width - prev.width).abs() > 0.5
-                            || (now.height - prev.height).abs() > 0.5
-                    }
-                    None => true,
-                };
+                let changed = current.get(id).map_or(true, |now| rect_changed_approx(prev, now));
                 changed.then_some(*prev)
             })
             .collect();
@@ -205,8 +204,13 @@ impl Compositor {
             self.add_dirty(r);
         }
         // 新矩形：新出现或位置/尺寸变化 → 标脏（重新合屏）。
+        // 用与"旧矩形标脏"相同的 0.5 抖动容忍，避免亚像素抖动触发全屏标脏。
         for e in entries {
-            if self.prev_surface_rects.get(&e.id) != Some(&e.rect) {
+            let changed = self
+                .prev_surface_rects
+                .get(&e.id)
+                .map_or(true, |prev| rect_changed_approx(prev, &e.rect));
+            if changed {
                 self.add_dirty(e.rect);
             }
         }

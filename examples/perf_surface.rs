@@ -4,15 +4,22 @@
 //!
 //! 用法：
 //! ```text
-//! cargo run --release --example perf_surface            # 小脏区（每次 1200x20）
-//! cargo run --release --example perf_surface -- full     # 整屏脏区（每次 1200x840）
-//! LIEUI_PERF=1 cargo run --release --example perf_surface  # 额外输出 lieui 分阶段耗时
+//! cargo run --release --example perf_surface                  # 小脏区（每次 1200x20）
+//! cargo run --release --example perf_surface -- full           # 整屏脏区（每次 1200x840）
+//! LIEUI_PERF=1 cargo run --release --example perf_surface     # 额外输出 lieui 分阶段耗时 + 帧渲染聚合
+//! LIEUI_PERF=1 cargo run --release --example perf_surface -- --frames=300  # 跑 300 帧后退出，聚合统计稳定落盘
 //! ```
 //!
-//! 关注指标：
-//! - `avg_frame`：动画回调的平均间隔（越接近 16ms 表示越跟得上 60FPS）。
-//! - `avg_surface_write`：组件自己写像素 + 标记脏区的耗时。
-//! - 两个模式的 `avg_frame` 差值即为"脏区合屏 + 部分上屏"省下的开销。
+//! 关注指标（注意区分两套计时）：
+//! - `avg_frame`（本基准输出）：动画回调的平均间隔，≈16ms 表示跟得上 60FPS。
+//!   它含动画定时器等待，**不代表渲染耗时**——请勿用它对标脏区成本。
+//! - `avg_surface_write`（本基准输出）：组件自己写像素 + 标记脏区的耗时。
+//! - **真实渲染耗时**请跑 `LIEUI_PERF=1`，看 stderr 的 `[lieui-perf] frame-render`
+//!   （从 `RedrawRequested` 进入、到上屏完成的墙钟，不含节拍等待）：
+//!   - `frame-render avg` 即每帧实际渲染成本；小脏区稳态应 <1~2ms。
+//!   - `composite` / `blit` 两行是合屏与上屏的分段耗时。
+//!   - `blit age0%` 长期≈100% 说明后端不保留上一帧内容，脏区在上屏阶段失效。
+//! - 两个模式（small / full）的 `frame-render avg` 差值即为脏区省下的开销。
 
 use lieui::animation::Animation;
 use lieui::geometry::Rect;
@@ -30,7 +37,18 @@ const ROW_H: u32 = 20;
 const REPORT_EVERY: u32 = 120;
 
 fn main() {
-    let full = std::env::args().nth(1).as_deref() == Some("full");
+    let mut full = false;
+    let mut frames_limit: Option<u32> = None;
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "full" => full = true,
+            _ => {
+                if let Some(v) = a.strip_prefix("--frames=") {
+                    frames_limit = v.parse::<u32>().ok();
+                }
+            }
+        }
+    }
     let mode = if full { "full" } else { "small" };
 
     let surface: Rc<SharedSurface> = SharedSurface::new(SURF_W, SURF_H);
@@ -71,6 +89,12 @@ fn main() {
         anim_surface.damage(Rect::new(0.0, y0 as f32, SURF_W as f32, h as f32));
         write_total += t0.elapsed();
         frame += 1;
+        if let Some(lim) = frames_limit {
+            if frame >= lim {
+                println!("[{mode}] reached --frames={lim}, exiting");
+                std::process::exit(0);
+            }
+        }
 
         if frame.is_multiple_of(REPORT_EVERY) {
             let elapsed = since.elapsed();
