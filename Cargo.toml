@@ -13,7 +13,8 @@ categories = ["gui"]
 
 [dependencies]
 log = "0.4"
-vello_cpu = "0.2"
+vello_cpu = { version = "0.2" }
+
 kurbo = "0.13.1"
 parley = "0.11.0"
 slotmap = "1.0"
@@ -28,7 +29,11 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]
-default = []
+default = ["parallel"]
+# 启用 vello_cpu 的多线程光栅化（内部按 region 切分到 rayon 线程池）。
+# 线程数可用环境变量 `LIEUI_RENDER_THREADS` 覆盖：`0`（默认）= 自动（核数-1，上限 8），
+# `1` = 强制单线程。大屏/复杂场景收益明显，极小场景可设 1 规避调度开销。
+parallel = ["vello_cpu/multithreading"]
 inspector = ["dep:tungstenite", "dep:serde", "dep:serde_json"]
 
 [profile.dev]
@@ -56,3 +61,11 @@ path = "examples/window.rs"
 [[example]]
 name = "gallery"
 path = "examples/gallery.rs"
+
+[[example]]
+name = "shared_surface"
+path = "examples/shared_surface.rs"
+
+[[example]]
+name = "perf_surface"
+path = "examples/perf_surface.rs"

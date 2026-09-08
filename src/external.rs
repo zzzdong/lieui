@@ -72,10 +72,10 @@ pub(crate) fn set_proxy(proxy: winit::event_loop::EventLoopProxy<()>) {
 ///
 /// 注意：必须在 `Application::run` 之后才有效；在此之前调用是 no-op。
 pub fn wake() {
-    if let Some(cell) = PROXY.get() {
-        if let Some(proxy) = cell.lock().unwrap().as_ref() {
-            let _ = proxy.send_event(());
-        }
+    if let Some(cell) = PROXY.get()
+        && let Some(proxy) = cell.lock().unwrap().as_ref()
+    {
+        let _ = proxy.send_event(());
     }
 }
 

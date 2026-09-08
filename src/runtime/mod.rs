@@ -81,6 +81,14 @@ impl Runtime {
         self.needs_render = true;
     }
 
+    /// 是否需要重新生成渲染树（layout 或 render 任一被请求）。
+    ///
+    /// 事件循环用它区分"UI 内容真的变了"（需要重新光栅化）与
+    /// "只有 SharedSurface 有脏区"（只需合屏 + 部分上屏）。
+    pub fn needs_visual_update(&self) -> bool {
+        self.needs_layout || self.needs_render
+    }
+
     pub fn frame(&mut self, wid: winit::window::WindowId) -> Vec<LayeredElement> {
         if (state::take_rebuild_requested(wid) || self.pending_view_tree.is_some())
             && let Some(vt) = self.pending_view_tree.take()
@@ -170,8 +178,7 @@ impl Runtime {
         let popup_hides = state::take_popup_hides();
         if !popup_hides.is_empty() {
             for h in popup_hides {
-                self.layers
-                    .close_popup(crate::core::layers::LayerHandle(h));
+                self.layers.close_popup(crate::core::layers::LayerHandle(h));
             }
             self.needs_layout = true;
         }

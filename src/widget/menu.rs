@@ -306,7 +306,11 @@ impl Widget for MenuItem {
             .spacing(8.0)
             .align_items(FlexAlign::Center)
             .width(160.0)
-            .child(Text::new(self.label.clone()).font_size(14.0).color(t.menu.item_text));
+            .child(
+                Text::new(self.label.clone())
+                    .font_size(14.0)
+                    .color(t.menu.item_text),
+            );
 
         let row = if let Some(hint) = &self.hint {
             row.child(
@@ -320,7 +324,9 @@ impl Widget for MenuItem {
 
         let on_click = self.on_click.clone();
         let close_handle = self.close_handle;
-        let hover = self.hover_background.unwrap_or(t.menu.item_hover_background);
+        let hover = self
+            .hover_background
+            .unwrap_or(t.menu.item_hover_background);
         let mut c = Container::new().child(row);
         c = c.padding(6.0);
         c = c.hover_background(hover);
@@ -348,8 +354,7 @@ impl Widget for MenuItem {
 }
 
 /// 菜单分隔线。
-pub struct MenuSeparator {
-}
+pub struct MenuSeparator {}
 
 impl MenuSeparator {
     pub fn new() -> Self {
@@ -461,7 +466,11 @@ impl Widget for Submenu {
             .spacing(8.0)
             .align_items(FlexAlign::Center)
             .width(160.0)
-            .child(Text::new(self.label.clone()).font_size(14.0).color(t.menu.item_text))
+            .child(
+                Text::new(self.label.clone())
+                    .font_size(14.0)
+                    .color(t.menu.item_text),
+            )
             .child(
                 Text::new("▶".to_string())
                     .font_size(10.0)
@@ -475,7 +484,10 @@ impl Widget for Submenu {
         let pending = self.pending.clone();
         let mut c = Container::new().child(row);
         c = c.padding(6.0);
-        c = c.hover_background(self.hover_background.unwrap_or(t.menu.item_hover_background));
+        c = c.hover_background(
+            self.hover_background
+                .unwrap_or(t.menu.item_hover_background),
+        );
         // 鼠标进入子菜单主行：
         // 1) 先执行 pending —— 关闭上一个子菜单遗留的二级菜单（延迟到此刻才真正关，
         //    因此「主行 → 二级菜单」的进入路径不会误关，二级的 on_mouse_enter 会取消它）。

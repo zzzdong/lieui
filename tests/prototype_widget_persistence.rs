@@ -242,7 +242,10 @@ fn widget_tree_persists_across_projection() {
     // Button 未 hover → 灰
     assert_eq!(div_bg(&div_children(&e1.root)[1]), "gray");
     // Slider 值 0.5
-    assert_eq!(div_children(&div_children(&e1.root)[2])[0], ViewNode::Text("0.5".into()));
+    assert_eq!(
+        div_children(&div_children(&e1.root)[2])[0],
+        ViewNode::Text("0.5".into())
+    );
 
     // 直接修改持久 widget 的字段（方案 B 核心能力：不改树，只改字段）
     // 通过 trait object 拿到底层具体类型 —— 注意：真实里需要 downcast 或通过回调。
@@ -258,7 +261,10 @@ fn widget_tree_persists_across_projection() {
     let s2 = Slider::new(0.8);
     let wrapper: Rc<dyn Widget> = Rc::new(Column::new(0.0).child(s2));
     let e2 = project(wrapper.as_ref());
-    assert_eq!(div_children(&div_children(&e2.root)[0])[0], ViewNode::Text("0.8".into()));
+    assert_eq!(
+        div_children(&div_children(&e2.root)[0])[0],
+        ViewNode::Text("0.8".into())
+    );
 }
 
 #[test]
@@ -309,9 +315,15 @@ fn nested_tree_structure_stable_no_diff_needed() {
     // 内层 spacing=4
     assert_eq!(div_bg(&div_children(&e.root)[0]), "column(spacing=4)");
     // 内层叶子
-    assert_eq!(div_children(&div_children(&e.root)[0])[0], ViewNode::Text("leaf".into()));
+    assert_eq!(
+        div_children(&div_children(&e.root)[0])[0],
+        ViewNode::Text("leaf".into())
+    );
     // 内层兄弟按钮
-    assert_eq!(div_children(&div_children(&e.root)[1])[0], ViewNode::Text("b".into()));
+    assert_eq!(
+        div_children(&div_children(&e.root)[1])[0],
+        ViewNode::Text("b".into())
+    );
 }
 
 // ============================================================================
@@ -342,12 +354,18 @@ impl App {
 fn user_mutates_widget_field_directly() {
     let app = App::new();
     let v0 = app.render();
-    assert_eq!(div_children(&div_children(&v0.root)[0])[0], ViewNode::Text("0.3".into()));
+    assert_eq!(
+        div_children(&div_children(&v0.root)[0])[0],
+        ViewNode::Text("0.3".into())
+    );
 
     // 用户直接改组件字段（这就是 State<T>/use_state 想给的能力，但更简单）
     app.slider.set(0.9);
 
     let v1 = app.render();
-    assert_eq!(div_children(&div_children(&v1.root)[0])[0], ViewNode::Text("0.9".into()));
+    assert_eq!(
+        div_children(&div_children(&v1.root)[0])[0],
+        ViewNode::Text("0.9".into())
+    );
     // 证明状态归 widget 实例，没有散在 StateMap
 }

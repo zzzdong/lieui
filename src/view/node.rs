@@ -369,10 +369,11 @@ impl ViewNode {
                 FixedMeasure::new(IntrinsicSize::new(style.width as f32, style.height as f32))
                     .measure(constraint)
             }
-            ViewNode::SharedSurface { surface, .. } => {
-                FixedMeasure::new(IntrinsicSize::new(surface.width() as f32, surface.height() as f32))
-                    .measure(constraint)
-            }
+            ViewNode::SharedSurface { surface, .. } => FixedMeasure::new(IntrinsicSize::new(
+                surface.width() as f32,
+                surface.height() as f32,
+            ))
+            .measure(constraint),
             ViewNode::Div { layout, .. } => {
                 use crate::layout::types::{Dimension as LayoutDimension, is_defined};
                 let w = layout.dim[LayoutDimension::Width as usize];

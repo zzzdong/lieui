@@ -28,7 +28,9 @@ thread_local! {
     static SURFACE_REGISTRY: Registry = const { RefCell::new(None) };
 }
 
-fn with_registry<R>(f: impl FnOnce(&mut HashMap<SurfaceId, std::rc::Weak<SharedSurface>>) -> R) -> R {
+fn with_registry<R>(
+    f: impl FnOnce(&mut HashMap<SurfaceId, std::rc::Weak<SharedSurface>>) -> R,
+) -> R {
     SURFACE_REGISTRY.with(|r| {
         let mut guard = r.borrow_mut();
         let map = guard.get_or_insert_with(HashMap::new);
@@ -37,8 +39,17 @@ fn with_registry<R>(f: impl FnOnce(&mut HashMap<SurfaceId, std::rc::Weak<SharedS
 }
 
 /// 按 id 查找一个存活的共享表面。返回 `Some` 仅当该 surface 仍被持有。
+///
+/// 若注册表中的 `Weak` 已失效（surface 被释放），会顺手移除该条目，避免
+/// 长生命周期进程里注册表只增不减。
 pub fn resolve_surface(id: SurfaceId) -> Option<Rc<SharedSurface>> {
-    with_registry(|map| map.get(&id).and_then(|w| w.upgrade()))
+    with_registry(|map| match map.get(&id).and_then(|w| w.upgrade()) {
+        Some(s) => Some(s),
+        None => {
+            map.remove(&id);
+            None
+        }
+    })
 }
 
 /// 注册表面（构造时自动调用）。
@@ -59,6 +70,9 @@ pub fn unregister_surface(id: SurfaceId) {
 ///
 /// 由高频组件（如 terminal）自持。RGBA8 像素缓冲由组件自己维护，
 /// 通过 [`SharedSurface::damage`] 标记变化矩形，由 compositor 消费脏区合屏。
+///
+/// **像素格式约定**：buffer 写入 **straight（非预乘）RGBA8**。compositor 合屏时
+/// 会按 src-over 转预乘并与 UI 通道（premul）混合；alpha=255 走 memcpy 快速路径。
 pub struct SharedSurface {
     pub id: SurfaceId,
     /// RGBA8 像素缓冲（行优先，`width * height * 4` 字节）。
@@ -133,7 +147,10 @@ impl SharedSurface {
         if x1 <= x0 || y1 <= y0 {
             return;
         }
-        self.dirty.lock().unwrap().push(Rect::new(x0, y0, x1 - x0, y1 - y0));
+        self.dirty
+            .lock()
+            .unwrap()
+            .push(Rect::new(x0, y0, x1 - x0, y1 - y0));
         self.touched.set(true);
     }
 
@@ -164,6 +181,22 @@ impl SharedSurface {
     /// 加锁取得 buffer 的可变写访问（供组件绘制像素）。
     pub fn lock_buffer(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
         self.buffer.lock().unwrap()
+    }
+}
+
+impl Drop for SharedSurface {
+    /// 释放时自动注销，避免注册表残留无效 `Weak` 条目。
+    ///
+    /// 这里用 `try_with` 容错：surface 可能在 thread_local 已销毁的阶段被 drop
+    /// （线程退出），此时静默跳过注销。
+    fn drop(&mut self) {
+        let _ = SURFACE_REGISTRY.try_with(|r| {
+            if let Ok(mut guard) = r.try_borrow_mut()
+                && let Some(map) = guard.as_mut()
+            {
+                map.remove(&self.id);
+            }
+        });
     }
 }
 

@@ -14,9 +14,12 @@ use winit::keyboard::{Key as WinitKey, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::event::{EventEffects, HitTestResult, MouseButton};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::render::VelloRenderer;
+use crate::render::compositor::{Compositor, SurfaceEntry, rect_intersect};
 use crate::render::renderer::Renderer as _;
+use crate::render::surface::SharedSurface;
+use crate::render::visual::{LayeredElement, VisualElement};
 use crate::runtime::Runtime;
 use crate::state;
 use crate::widget::{BuildContext, StateMap, Widget};
@@ -77,6 +80,9 @@ type WidgetBuilder = Box<dyn Fn(&mut BuildContext) -> Box<dyn Widget>>;
 /// 第二参数是一个「请求真正关闭」的回调：集成方在自行弹出的确认对话框被用户
 /// 确认后调用它即可关闭窗口；该调用绕过守卫，不会再次触发 `CloseAction::Cancel`。
 type CloseGuard = Box<dyn Fn(&Runtime, &dyn Fn()) -> CloseAction>;
+
+/// `ExternalEvent::Data` 的处理回调类型（UI 线程执行，可自由使用 Rc 状态）。
+type ExternalDataHandler = Box<dyn FnMut(Box<dyn std::any::Any + Send>)>;
 
 /// 窗口规格：配置 + 构建函数 + 关闭守卫，在 `Application::new` / `.window()` 时收集。
 struct WindowSpec {
@@ -151,6 +157,166 @@ fn map_winit_key(key: &WinitKey) -> crate::event::Key {
     }
 }
 
+/// 脏区总面积（像素²），用于判断"是否值得只上屏脏区"。
+fn damage_area(rects: &[Rect]) -> f32 {
+    rects
+        .iter()
+        .map(|r| r.width.max(0.0) * r.height.max(0.0))
+        .sum()
+}
+
+/// 把 `[x0,x1) × [y0,y1)` 区间的 RGBA8 字节打包为 softbuffer 的 BGRA u32。
+fn pack_rows(dst: &mut [u32], bw: usize, data: &[u8], x0: usize, y0: usize, x1: usize, y1: usize) {
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    for py in y0..y1 {
+        let row = py * bw;
+        let src = (row + x0) * 4;
+        let len = (x1 - x0) * 4;
+        if src + len > data.len() {
+            break;
+        }
+        for px in 0..(x1 - x0) {
+            let o = src + px * 4;
+            dst[row + x0 + px] =
+                (data[o + 2] as u32) | ((data[o + 1] as u32) << 8) | ((data[o] as u32) << 16);
+        }
+    }
+}
+
+/// 把 lieui 的 `Rect` 转成 softbuffer 的 damage 矩形（越界返回 `None`）。
+fn to_softbuffer_rect(r: Rect, bw: usize, bh: usize) -> Option<softbuffer::Rect> {
+    let x = r.x.max(0.0).floor() as u32;
+    let y = r.y.max(0.0).floor() as u32;
+    let x1 = ((r.x + r.width).ceil().max(0.0) as u32).min(bw as u32);
+    let y1 = ((r.y + r.height).ceil().max(0.0) as u32).min(bh as u32);
+    Some(softbuffer::Rect {
+        x,
+        y,
+        width: NonZeroU32::new(x1.saturating_sub(x))?,
+        height: NonZeroU32::new(y1.saturating_sub(y))?,
+    })
+}
+
+/// `collect_surface_info` 的返回类型：`(表面列表, 定位条目, UI 遮挡者(矩形, z))`。
+type SurfaceInfo = (Vec<Rc<SharedSurface>>, Vec<SurfaceEntry>, Vec<(Rect, i32)>);
+
+/// 把 UI 通道与 SharedSurface 按脏区合成进 compositor，返回本帧的上屏脏区。
+///
+/// 流程：
+/// 1. 解析出 SharedSurface 的定位（矩形 + z）与可能盖在 surface 之上的 UI 元素
+///    （弹窗 / Tooltip，z 更高）。
+/// 2. `sync_surfaces` 与上一帧比对，把"移动 / 缩放 / 消失"的旧矩形标脏，
+///    由 UI 像素回填，避免残影。
+/// 3. `Compositor::composite` 只对合并后的脏区做：UI 像素铺底 → 按 z 升序
+///    合成 surface → 回填 z 更高的 UI 元素。脏区外像素保持上一帧内容。
+///
+/// `ui_pixmap` 为 UI 通道像素（premul RGBA8 字节）；传空切片表示"UI 本帧未
+/// 重画"，此时跳过 UI 铺底（backing 中已是上一帧的 UI 像素）。
+/// `ui_full_dirty` 表示 UI 通道整屏重画（全量 rebuild / 尺寸变化）。
+///
+/// 独立为自由函数是为了让调用方能同时持有 `renderer.pixmap_bytes()` 的借用与
+/// `&mut compositor`（不同字段），避免 `&mut self` 的整体借用冲突。
+fn composite_frame(
+    compositor: &mut Compositor,
+    window_size: (u32, u32),
+    ui_pixmap: &[u8],
+    elements: &[LayeredElement],
+    ui_full_dirty: bool,
+    ui_dirty: &[Rect],
+) -> Vec<Rect> {
+    let (w, h) = window_size;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    // 1. 同步 backing 尺寸（尺寸变化时整屏重来）。
+    if compositor.width != w || compositor.height != h {
+        compositor.resize(w.max(1), h.max(1), [240, 240, 240, 255]);
+    }
+    // 2. 收集 surface 定位与 UI 遮挡者。
+    let (surfaces, entries, occluders) = collect_surface_info(elements);
+    // 3. 位置/尺寸变化 → 旧区域标脏（防残影）；UI 脏区 → 加入本帧脏区。
+    compositor.sync_surfaces(&entries);
+    if ui_full_dirty {
+        compositor.dirty_all();
+    } else {
+        for r in ui_dirty {
+            compositor.add_dirty(*r);
+        }
+    }
+    compositor.composite(ui_pixmap, &surfaces, &entries, &occluders)
+}
+
+/// 从渲染元素中解析出 SharedSurface 的定位，以及可能盖在 surface 之上的 UI 元素。
+///
+/// 返回的遮挡者用于在合成 surface 之后重新拷回 UI 像素，保证 z 更高的弹窗 /
+/// Tooltip 不被 surface 盖住。
+fn collect_surface_info(elements: &[LayeredElement]) -> SurfaceInfo {
+    let mut surfaces: Vec<Rc<SharedSurface>> = Vec::new();
+    let mut entries: Vec<SurfaceEntry> = Vec::new();
+    let mut min_z: Option<i32> = None;
+    for el in elements {
+        if let VisualElement::SharedSurface { id, bounds, .. } = &el.element {
+            let Some(surf) = crate::render::surface::resolve_surface(*id) else {
+                continue;
+            };
+            let rect = Rect::new(
+                bounds.x0 as f32,
+                bounds.y0 as f32,
+                (bounds.x1 - bounds.x0) as f32,
+                (bounds.y1 - bounds.y0) as f32,
+            );
+            let z = el.z_index();
+            min_z = Some(min_z.map_or(z, |m| m.min(z)));
+            entries.push(SurfaceEntry { id: *id, rect, z });
+            surfaces.push(surf);
+        }
+    }
+    // 只保留 z 高于最低 surface 且与 surface 区域相交的 UI 元素（通常是浮层）。
+    let mut occluders: Vec<(Rect, i32)> = Vec::new();
+    if let Some(min_z) = min_z {
+        let mut ui: Vec<(Rect, i32)> = Vec::new();
+        for el in elements {
+            collect_ui_rects(el, &mut ui);
+        }
+        for (r, z) in ui {
+            if z <= min_z {
+                continue;
+            }
+            if entries.iter().any(|e| rect_intersect(e.rect, r).is_some()) {
+                occluders.push((r, z));
+            }
+        }
+    }
+    (surfaces, entries, occluders)
+}
+
+/// 递归收集非 surface 叶子元素的矩形（Group 会被展开，因为它的浮层子元素也要参与遮挡）。
+fn collect_ui_rects(el: &LayeredElement, out: &mut Vec<(Rect, i32)>) {
+    match &el.element {
+        VisualElement::SharedSurface { .. } => {}
+        VisualElement::Group { children, .. } => {
+            for c in children {
+                collect_ui_rects(c, out);
+            }
+        }
+        other => {
+            if let Some(b) = other.bounding_rect() {
+                out.push((
+                    Rect::new(
+                        b.x0 as f32,
+                        b.y0 as f32,
+                        (b.x1 - b.x0) as f32,
+                        (b.y1 - b.y0) as f32,
+                    ),
+                    el.z_index(),
+                ));
+            }
+        }
+    }
+}
+
 fn map_winit_modifiers(m: winit::keyboard::ModifiersState) -> crate::event::Modifiers {
     crate::event::Modifiers {
         shift: m.shift_key(),
@@ -177,7 +343,7 @@ pub struct Application {
     /// 外部消息源：跨线程把事件投递进 UI。事件循环被唤醒后逐个 poll。
     external_sources: Vec<Box<dyn crate::external::ExternalSource>>,
     /// `ExternalEvent::Data` 的处理回调（UI 线程执行，可自由使用 Rc 状态）。
-    external_data_handler: Option<Box<dyn FnMut(Box<dyn std::any::Any + Send>)>>,
+    external_data_handler: Option<ExternalDataHandler>,
     /// 窗口尺寸变化回调（UI 线程执行）。参数：(窗口逻辑尺寸宽, 高)。
     resize_handler: Option<Box<dyn FnMut(u32, u32)>>,
 }
@@ -442,11 +608,8 @@ impl ApplicationHandler<()> for Application {
                 if s.width > 0 && s.height > 0 && (s.width, s.height) != ctx.window_size {
                     ctx.window_size = (s.width, s.height);
                     ctx.renderer.resize(s.width as u16, s.height as u16);
-                    ctx.compositor = crate::render::Compositor::new(
-                        s.width.max(1),
-                        s.height.max(1),
-                        [240, 240, 240, 255],
-                    );
+                    ctx.compositor
+                        .resize(s.width.max(1), s.height.max(1), [240, 240, 240, 255]);
                     // 通知外部（如 terminal）窗口尺寸变化，重新计算网格/重建 surface。
                     if let Some(h) = resize_handler.as_mut() {
                         h(s.width, s.height);
@@ -643,14 +806,14 @@ impl ApplicationHandler<()> for Application {
                 if !ctx.rendered_once || ctx.surface.is_none() || rebuild_requested || size_mismatch
                 {
                     ctx.build_and_render(size_mismatch, rebuild_requested);
-                } else {
-                    // 仅重绘路径：`request_redraw()`（如 SharedSurface 脏区更新）只置位了
-                    // 全局 redraw 标记，并不会置位 runtime.needs_render。这里补一次
-                    // `request_render()`，确保 `frame_visual_update` 生成渲染树，
-                    // 从而 `present_frame` 能把 SharedSurface 的脏区合成上屏。
+                } else if ctx.runtime.needs_visual_update() || !ctx.composite_surfaces_only() {
+                    // UI 内容有变化，或本帧没有 surface 脏区（只是 `request_redraw()`
+                    // 请求重画 UI）→ 重新生成渲染树并光栅化（保持旧语义）。
                     ctx.runtime.request_render();
                     ctx.render_visuals();
                 }
+                // 否则：只有 SharedSurface 脏区，已由 `composite_surfaces_only`
+                // 完成合屏与部分上屏，跳过了 vello 全屏光栅化。
             }
             _ => {}
         }
@@ -729,7 +892,7 @@ impl Application {
         let rt = Runtime::new(viewport);
 
         let renderer = VelloRenderer::new(s.width as u16, s.height as u16);
-        let compositor = crate::render::Compositor::new(
+        let compositor = Compositor::new(
             s.width.max(1),
             s.height.max(1),
             [240, 240, 240, 255], // 与 VelloRenderer 背景一致
@@ -825,8 +988,23 @@ impl WindowContext {
         if elements.is_empty() {
             return;
         }
-        let pix = self.renderer.render(&elements);
-        self.present_frame(&elements, pix.data());
+        // 先算 UI 脏区（与上一帧元素签名比较），再光栅化、最后只合脏区上屏。
+        self.renderer.update_ui_dirty(&elements);
+        let ui_full = self.renderer.ui_dirty_full();
+        self.renderer.render(&elements);
+        let damage = {
+            let ui = self.renderer.pixmap_bytes();
+            let ui_dirty = self.renderer.ui_dirty();
+            composite_frame(
+                &mut self.compositor,
+                self.window_size,
+                ui,
+                &elements,
+                ui_full,
+                ui_dirty,
+            )
+        };
+        self.blit_damage(&damage);
         self.update_ime_state();
         self.rendered_once = true;
     }
@@ -844,123 +1022,70 @@ impl WindowContext {
         }
     }
 
+    /// 把本帧合成得到的脏区上屏（临时取走 backing，避免整帧 clone；blit 后回填）。
+    fn blit_damage(&mut self, damage: &[Rect]) {
+        if damage.is_empty() {
+            return;
+        }
+        let backing = std::mem::take(&mut self.compositor.backing);
+        self.blit_to_window(&backing, damage);
+        self.compositor.backing = backing;
+    }
+
     fn render_visuals(&mut self) {
         let elements = self.runtime.frame_visual_update();
         if elements.is_empty() {
             return;
         }
-        let pix = self.renderer.render(&elements);
-        self.present_frame(&elements, pix.data());
+        self.renderer.update_ui_dirty(&elements);
+        let ui_full = self.renderer.ui_dirty_full();
+        self.renderer.render(&elements);
+        let damage = {
+            let ui = self.renderer.pixmap_bytes();
+            let ui_dirty = self.renderer.ui_dirty();
+            composite_frame(
+                &mut self.compositor,
+                self.window_size,
+                ui,
+                &elements,
+                ui_full,
+                ui_dirty,
+            )
+        };
+        self.blit_damage(&damage);
         self.update_ime_state();
     }
 
-    /// 把 UI pixmap 与各 SharedSurface 合屏后上屏。
+    /// 只做 SharedSurface 合屏：不跑光栅化，仅重建渲染树取定位后增量上屏。
     ///
-    /// 流程：
-    /// 1. 先把 UI pixmap 整体复制进 compositor backing（SharedSurface 在 UI 通道内是不透明占位，
-    ///    会被背景色填充，故此处直接覆盖即可）。
-    /// 2. 从渲染元素里取出 `VisualElement::SharedSurface`，按 id 解析真实表面，
-    ///    由 compositor 把其脏区合成到 backing 之上（覆盖 UI 通道里的占位背景色）。
-    /// 3. 上屏时只用 backing 的最终像素。
+    /// 适用于"UI 内容未变、只有 surface 有脏区"的高频刷新（terminal 光标闪烁等）：
+    /// 省掉 vello 全屏光栅化这一最贵的阶段。
     ///
-    /// 这是"进程内 compositor"的落点：SharedSurface 的高频增量更新不再触发
-    /// UI 全量 rebuild/光栅化，只需在合屏阶段增量覆盖脏区。
-    fn present_frame(&mut self, elements: &[crate::render::visual::LayeredElement], ui_pixmap: &[vello_cpu::color::PremulRgba8]) {
+    /// 返回 `false` 表示"本帧没有可增量处理的内容"，调用方应退回完整重绘路径。
+    fn composite_surfaces_only(&mut self) -> bool {
+        let elements = self.runtime.frame_render_only();
+        if elements.is_empty() {
+            return false;
+        }
+        let (surfaces, entries, occluders) = collect_surface_info(&elements);
+        // surface 位置/尺寸变化时需要 UI 像素回填旧区域 → 退回完整渲染路径。
+        if self.compositor.surfaces_changed_from(&entries) {
+            return false;
+        }
         let (w, h) = self.window_size;
         if w == 0 || h == 0 {
-            return;
+            return false;
         }
-        // 1. 同步 compositor backing 尺寸。
-        if self.compositor.width != w || self.compositor.height != h {
-            self.compositor = crate::render::Compositor::new(
-                w.max(1),
-                h.max(1),
-                [240, 240, 240, 255],
-            );
+        self.compositor.sync_surfaces(&entries);
+        // UI 本帧未重画：传空切片跳过 UI 铺底，只把 surface 脏区合上去。
+        let damage = self
+            .compositor
+            .composite(&[], &surfaces, &entries, &occluders);
+        if damage.is_empty() {
+            return false;
         }
-        // 2. 收集并定位 SharedSurface 覆盖的区域（矩形列表）。
-        let mut surfaces: Vec<std::rc::Rc<crate::render::surface::SharedSurface>> = Vec::new();
-        let mut surface_rects: Vec<(
-            crate::render::surface::SurfaceId,
-            crate::geometry::Rect,
-        )> = Vec::new();
-        for el in elements {
-            if let crate::render::visual::VisualElement::SharedSurface { id, bounds, .. } = &el.element
-            {
-                if let Some(surf) = crate::render::surface::resolve_surface(*id) {
-                    surfaces.push(surf);
-                    surface_rects.push((
-                        *id,
-                        crate::geometry::Rect::new(
-                            bounds.x0 as f32,
-                            bounds.y0 as f32,
-                            (bounds.x1 - bounds.x0) as f32,
-                            (bounds.y1 - bounds.y0) as f32,
-                        ),
-                    ));
-                }
-            }
-        }
-
-        // 3. 把 UI pixmap 拷入 backing，但**跳过 SharedSurface 覆盖的区域**。
-        //
-        // 关键：surface 像素必须在 backing 中持久保留。若每帧无条件用 UI pixmap
-        // 覆盖整个 backing，那么当 surface 没有新脏区时（`take_dirty` 为空），
-        // surface 区域就会被 UI 背景色覆盖，导致白屏。因此这里只把 UI 像素写入
-        // surface 之外的部分，surface 自身像素由 `composite_surface` 持久维护。
-        {
-            let ww = self.compositor.width as usize;
-            let wh = self.compositor.height as usize;
-            let backing = &mut self.compositor.backing;
-            for py in 0..wh {
-                let row_start = py * ww;
-                // 找出本行被 surface 覆盖的 x 区间集合（按像素块跳过）。
-                // surface 数量少、尺寸大，这里用"逐像素排除"成本可接受（终端 surface 铺满时几乎全跳过）。
-                let covered = |px: usize| {
-                    surface_rects.iter().any(|(_, r)| {
-                        (px as f32) >= r.x
-                            && (px as f32) < r.x + r.width
-                            && (py as f32) >= r.y
-                            && (py as f32) < r.y + r.height
-                    })
-                };
-                // 若整行都不被覆盖，直接整行块拷（常见于 surface 之外区域）。
-                let any_covered = surface_rects
-                    .iter()
-                    .any(|(_, r)| (py as f32) >= r.y && (py as f32) < r.y + r.height);
-                if !any_covered {
-                    let di = row_start * 4;
-                    for (dst_chunk, p) in backing[di..di + ww * 4]
-                        .chunks_exact_mut(4)
-                        .zip(ui_pixmap[row_start..row_start + ww].iter())
-                    {
-                        dst_chunk.copy_from_slice(&[p.r, p.g, p.b, p.a]);
-                    }
-                } else {
-                    for px in 0..ww {
-                        if !covered(px) {
-                            let src = row_start + px;
-                            let p = &ui_pixmap[src];
-                            let di = src * 4;
-                            backing[di..di + 4].copy_from_slice(&[p.r, p.g, p.b, p.a]);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. 合成 SharedSurface：只更新有脏区的表面（无新脏区则保留 backing 里
-        //    已有的 surface 像素，不会被 UI 覆盖）。
-        for s in &surfaces {
-            if let Some(&(_, rect)) = surface_rects.iter().find(|(id, _)| *id == s.id) {
-                self.compositor
-                    .composite_surface(s, (rect.x, rect.y));
-            }
-        }
-
-        // 5. 上屏 backing 的最终像素（拷贝到局部，避免与 &mut self 冲突）。
-        let backing = self.compositor.backing.clone();
-        self.blit_to_window(&backing);
+        self.blit_damage(&damage);
+        true
     }
 
     /// 根据当前焦点与布局结果更新 IME 的启用状态及候选窗位置。
@@ -1002,11 +1127,12 @@ impl WindowContext {
         }
     }
 
-    /// 把 raw RGBA8（每像素 4 字节）逐像素打包进 softbuffer 帧缓冲并上屏。
+    /// 把 raw RGBA8（每像素 4 字节）打包进 softbuffer 帧缓冲，并**只上屏 `damage` 区域**。
     ///
-    /// 相比旧的 `&[PremulRgba8]` 入口，本函数直接消费 compositor backing 的
-    /// raw RGBA8 字节，避免中间转换，且为后续"只上屏脏区"留出改造点。
-    fn blit_to_window(&mut self, data: &[u8]) {
+    /// - `buffer.age() == 0` 表示后端给出的缓冲区内容未定义，必须整帧重写；
+    ///   否则只重写脏区（softbuffer 明确保留上一帧内容）。
+    /// - 上屏走 `present_with_damage`，让窗口系统只提交变化区域。
+    fn blit_to_window(&mut self, data: &[u8], damage: &[Rect]) {
         if !self.ensure_surface() {
             return;
         }
@@ -1029,19 +1155,42 @@ impl WindowContext {
             return;
         }
         let buf_len = bw * bh;
-        let byte_len = buf_len * 4;
-        let copy_len = byte_len.min(data.len());
-        let dst = &mut buf[..buf_len];
-        // 逐像素打包：softbuffer 期望 BGRA（低字节蓝）。raw RGBA8 → BGRA8。
-        for (d, px) in dst[..copy_len / 4].iter_mut().zip(data[..copy_len].chunks_exact(4)) {
-            let r = px[0];
-            let g = px[1];
-            let b = px[2];
-            *d = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
+        // 缓冲区内容未定义、无脏区信息、或脏区已接近全屏 → 整帧重写 + 全量 present。
+        let full =
+            buf.age() == 0 || damage.is_empty() || damage_area(damage) >= buf_len as f32 * 0.7;
+        if full {
+            let copy_len = (buf_len * 4).min(data.len());
+            {
+                let dst = &mut buf[..buf_len];
+                pack_rows(dst, bw, data, 0, 0, bw, bh);
+                const CLEAR: u32 = 0x00F0F0F0;
+                dst[copy_len / 4..].fill(CLEAR);
+            }
+            let _ = buf.present();
+            return;
         }
-        const CLEAR: u32 = 0x00F0F0F0;
-        dst[copy_len / 4..].fill(CLEAR);
-        let _ = buf.present();
+        {
+            let dst = &mut buf[..buf_len];
+            for r in damage {
+                let x0 = r.x.max(0.0).floor() as usize;
+                let y0 = r.y.max(0.0).floor() as usize;
+                let x1 = (r.x + r.width).ceil().min(bw as f32).max(0.0) as usize;
+                let y1 = (r.y + r.height).ceil().min(bh as f32).max(0.0) as usize;
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                pack_rows(dst, bw, data, x0, y0, x1, y1);
+            }
+        }
+        let rects: Vec<softbuffer::Rect> = damage
+            .iter()
+            .filter_map(|r| to_softbuffer_rect(*r, bw, bh))
+            .collect();
+        if rects.is_empty() {
+            let _ = buf.present();
+        } else {
+            let _ = buf.present_with_damage(&rects);
+        }
     }
 
     fn ensure_surface(&mut self) -> bool {

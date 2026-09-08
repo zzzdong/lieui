@@ -5,38 +5,196 @@
 
 use vello_cpu::kurbo::{Affine, BezPath, Circle, Rect, Shape, Stroke as KurboStroke};
 use vello_cpu::peniko::color::AlphaColor;
-use vello_cpu::{CompositeMode, Pixmap, RasterizerSettings, RenderContext, Resources};
+use vello_cpu::{
+    CompositeMode, Pixmap, RasterizerSettings, RenderContext, RenderSettings, Resources,
+};
 
 use crate::render::renderer::Renderer;
 use crate::render::visual::{LayeredElement, Stroke, VisualElement};
 use crate::view::paint::ImageFit;
+
+/// 光栅化工作线程数。
+///
+/// - `LIEUI_RENDER_THREADS` 未设置 → `0`（由 vello 自动决定：核数-1，上限 8）。
+/// - 设为 `1` 可强制单线程（小场景下规避线程池调度开销）。
+/// - 未启用 `parallel` feature 时恒为 `0`（`RenderSettings::num_threads` 不生效）。
+pub fn render_threads_from_env() -> u16 {
+    std::env::var("LIEUI_RENDER_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(0)
+}
 
 pub struct VelloRenderer {
     ctx: RenderContext,
     resources: Resources,
     width: u16,
     height: u16,
+    /// 跨帧复用的像素缓冲：避免每帧 `Pixmap::new` 的分配与清零。
+    ///
+    /// 同时是"局部光栅化"的前提——脏区外的像素在帧间被保留。
+    pixmap: Pixmap,
+    /// 光栅化工作线程数（`0` = 自动）。
+    num_threads: u16,
+    /// 上一帧各元素的 `(签名, 包围盒)`，用于帧间比较得出 UI 脏区。
+    prev_signatures: Vec<(u64, Rect)>,
+    /// 本帧 UI 脏区（由 `update_ui_dirty` 计算）。
+    ui_dirty: Vec<crate::geometry::Rect>,
+    /// 本帧 UI 是否整屏脏（退化为全量更新）。
+    ui_full: bool,
+}
+
+/// 是否启用 UI 脏区探测（`LIEUI_UI_DIRTY=0` 关闭，等价旧行为）。
+fn ui_dirty_enabled() -> bool {
+    std::env::var("LIEUI_UI_DIRTY").map_or(true, |v| v.trim() != "0")
+}
+
+/// kurbo 矩形 → lieui 矩形。
+fn krect_to_rect(r: Rect) -> crate::geometry::Rect {
+    crate::geometry::Rect::new(
+        r.x0 as f32,
+        r.y0 as f32,
+        r.width() as f32,
+        r.height() as f32,
+    )
 }
 
 impl VelloRenderer {
     pub fn new(w: u16, h: u16) -> Self {
+        Self::with_threads(w, h, render_threads_from_env())
+    }
+
+    /// 用指定的光栅化线程数创建渲染器（`0` = 由 vello 自动决定）。
+    pub fn with_threads(w: u16, h: u16, num_threads: u16) -> Self {
         Self {
-            ctx: RenderContext::new(w, h),
+            ctx: Self::make_context(w, h, num_threads),
             resources: Resources::new(),
             width: w,
             height: h,
+            pixmap: Pixmap::new(w, h),
+            num_threads,
+            prev_signatures: Vec::new(),
+            ui_dirty: Vec::new(),
+            ui_full: true,
         }
     }
+
+    /// 构造渲染上下文：`parallel` feature 下把线程数传给 vello。
+    fn make_context(w: u16, h: u16, num_threads: u16) -> RenderContext {
+        #[cfg(feature = "parallel")]
+        {
+            RenderContext::new_with(
+                w,
+                h,
+                RenderSettings {
+                    num_threads,
+                    ..Default::default()
+                },
+            )
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = num_threads;
+            RenderContext::new(w, h)
+        }
+    }
+
     pub fn resize(&mut self, w: u16, h: u16) {
         self.width = w;
         self.height = h;
-        self.ctx = RenderContext::new(w, h);
+        self.ctx = Self::make_context(w, h, self.num_threads);
+        if self.pixmap.width() != w || self.pixmap.height() != h {
+            self.pixmap.resize(w, h);
+        }
+        // 尺寸变化后所有历史签名失效，下一帧整屏重来。
+        self.prev_signatures.clear();
+        self.ui_full = true;
+        self.ui_dirty.clear();
     }
     pub fn width(&self) -> u16 {
         self.width
     }
     pub fn height(&self) -> u16 {
         self.height
+    }
+
+    /// 光栅化工作线程数（`0` = 自动）。
+    pub fn num_threads(&self) -> u16 {
+        self.num_threads
+    }
+
+    /// 比较本帧与上一帧的元素签名，算出 **UI 通道的脏区**。
+    ///
+    /// - `ui_dirty_full() == true`：结构变化（数量/顺序差异大、Group 变化），整屏重来。
+    /// - 否则 `ui_dirty()` 给出变化元素的矩形并集（含上一帧的旧矩形，用于擦除）。
+    ///
+    /// 保守原则：任何"无法定位矩形"的变化（如 Group、无边界元素）一律退化为整屏，
+    /// 宁可多画也不可漏更新。可用 `LIEUI_UI_DIRTY=0` 关闭（等价旧行为：整屏脏）。
+    pub fn update_ui_dirty(&mut self, elements: &[LayeredElement]) {
+        if !ui_dirty_enabled() {
+            self.ui_full = true;
+            self.ui_dirty.clear();
+            self.prev_signatures.clear();
+            return;
+        }
+        let mut full = elements.len() != self.prev_signatures.len();
+        let mut dirty: Vec<crate::geometry::Rect> = Vec::new();
+        for (i, el) in elements.iter().enumerate() {
+            let sig = el.signature();
+            let cur = el.element.bounding_rect();
+            let changed = self
+                .prev_signatures
+                .get(i)
+                .is_none_or(|(prev_sig, _)| *prev_sig != sig);
+            if !changed {
+                continue;
+            }
+            match cur {
+                Some(r) => dirty.push(krect_to_rect(r)),
+                // 无法定位矩形（Group 等）：退化为整屏，避免漏更新。
+                None => full = true,
+            }
+            // 上一帧该位置的旧矩形也要重画（内容消失/移动后需要擦除）。
+            if let Some((_, prev_rect)) = self.prev_signatures.get(i) {
+                dirty.push(krect_to_rect(*prev_rect));
+            }
+        }
+        // 上一帧多出来的元素（本帧消失）→ 其区域需重画。
+        for (_, prev_rect) in self.prev_signatures.iter().skip(elements.len()) {
+            dirty.push(krect_to_rect(*prev_rect));
+        }
+
+        self.prev_signatures = elements
+            .iter()
+            .map(|el| {
+                (
+                    el.signature(),
+                    el.element.bounding_rect().unwrap_or(Rect::ZERO),
+                )
+            })
+            .collect();
+        self.ui_full = full;
+        self.ui_dirty = if full { Vec::new() } else { dirty };
+    }
+
+    /// UI 通道本帧是否整屏脏。
+    pub fn ui_dirty_full(&self) -> bool {
+        self.ui_full
+    }
+
+    /// UI 通道本帧的脏区（仅在 `ui_dirty_full() == false` 时有意义）。
+    pub fn ui_dirty(&self) -> &[crate::geometry::Rect] {
+        &self.ui_dirty
+    }
+
+    /// 上一帧光栅化结果的像素（premul RGBA8，行优先）。
+    pub fn pixmap(&self) -> &Pixmap {
+        &self.pixmap
+    }
+
+    /// 上一帧光栅化结果的字节视图，供合屏直接消费（免逐像素转换）。
+    pub fn pixmap_bytes(&self) -> &[u8] {
+        self.pixmap.data_as_u8_slice()
     }
 
     fn cv(c: &crate::geometry::Color) -> AlphaColor<vello_cpu::color::Srgb> {
@@ -55,17 +213,21 @@ impl VelloRenderer {
 }
 
 impl Renderer for VelloRenderer {
-    fn render(&mut self, elements: &[LayeredElement]) -> Pixmap {
+    /// 光栅化并返回**内部持久 pixmap** 的引用（跨帧复用，避免每帧重新分配）。
+    fn render(&mut self, elements: &[LayeredElement]) -> &Pixmap {
         let w = self.width;
         let h = self.height;
-        let mut pix = Pixmap::new(w, h);
+        // 跨帧复用缓冲：仅尺寸变化时才重建（pixmap 同时是局部光栅化的载体）。
+        if self.pixmap.width() != w || self.pixmap.height() != h {
+            self.pixmap.resize(w, h);
+        }
 
         // 背景填充（最低层，之后每层都以 SrcOver 合成到其上）。
         self.ctx
             .set_paint(AlphaColor::from_rgba8(240, 240, 240, 255));
         self.ctx.fill_rect(&Rect::new(0.0, 0.0, w as f64, h as f64));
         self.ctx.flush();
-        self.ctx.render(&mut pix, &mut self.resources);
+        self.ctx.render(&mut self.pixmap, &mut self.resources);
         // 清空命令列表，避免后续层级重复绘制背景。
         self.ctx.reset();
 
@@ -90,7 +252,7 @@ impl Renderer for VelloRenderer {
             // 将该层矢量元素以 SrcOver 合成到 pix，再 blit 该层图像。
             self.ctx.flush();
             self.ctx.render_with(
-                &mut pix,
+                &mut self.pixmap,
                 &mut self.resources,
                 RasterizerSettings {
                     composite_mode: CompositeMode::SrcOver,
@@ -98,12 +260,12 @@ impl Renderer for VelloRenderer {
                 },
             );
             for (img, clip) in &images {
-                Self::blit_image(&mut pix, img, *clip);
+                Self::blit_image(&mut self.pixmap, img, *clip);
             }
             // 清空命令列表，下一 z 层只携带自身的绘制命令。
             self.ctx.reset();
         }
-        pix
+        &self.pixmap
     }
 }
 
@@ -471,6 +633,152 @@ mod tests {
     use crate::render::renderer::Renderer;
     use crate::render::visual::{FillStrokeStyle, KRect, LayeredElement, VisualElement};
     use std::sync::Arc;
+
+    /// 构造一组覆盖多种图元的元素，用于渲染器级别的一致性/复用测试。
+    fn sample_elements() -> Vec<LayeredElement> {
+        vec![
+            LayeredElement::new(
+                VisualElement::Rect {
+                    rect: KRect::new(2.0, 2.0, 30.0, 30.0),
+                    style: FillStrokeStyle::new().with_fill(Color::RED),
+                },
+                0,
+            ),
+            LayeredElement::new(
+                VisualElement::RoundedRect {
+                    rect: KRect::new(10.0, 10.0, 40.0, 40.0),
+                    radius: 6.0,
+                    style: FillStrokeStyle::new()
+                        .with_fill(Color::new(0, 0, 255))
+                        .with_stroke(Color::new(0, 0, 0), 2.0),
+                },
+                1,
+            ),
+            LayeredElement::new(
+                VisualElement::Group {
+                    children: vec![LayeredElement::new(
+                        VisualElement::Rect {
+                            rect: KRect::new(0.0, 0.0, 60.0, 60.0),
+                            style: FillStrokeStyle::new().with_fill(Color::new(0, 255, 0)),
+                        },
+                        0,
+                    )],
+                    transform: None,
+                    clip_rect: Some(KRect::new(0.0, 0.0, 20.0, 20.0)),
+                },
+                2,
+            ),
+        ]
+    }
+
+    /// 持久 pixmap：跨帧复用同一块缓冲（避免每帧分配 + 清零）。
+    #[test]
+    fn pixmap_buffer_is_reused_across_frames() {
+        let mut renderer = VelloRenderer::new(64, 64);
+        let elements = sample_elements();
+        renderer.render(&elements);
+        let first = renderer.pixmap().data().as_ptr();
+        renderer.render(&elements);
+        let second = renderer.pixmap().data().as_ptr();
+        assert_eq!(
+            first, second,
+            "pixmap buffer should be reused instead of reallocated every frame"
+        );
+    }
+
+    /// 多线程光栅化必须与单线程结果逐像素一致。
+    #[test]
+    fn thread_count_does_not_change_output() {
+        let elements = sample_elements();
+        let mut single = VelloRenderer::with_threads(64, 64, 1);
+        let mut multi = VelloRenderer::with_threads(64, 64, 4);
+        let a = single.render(&elements).data().to_vec();
+        let b = multi.render(&elements).data().to_vec();
+        assert_eq!(a.len(), b.len());
+        assert!(
+            a.iter().zip(&b).all(|(x, y)| x == y),
+            "single-threaded and multi-threaded rasterization must match"
+        );
+    }
+
+    /// 帧间无变化 → UI 不产生脏区（可整帧跳过上屏）。
+    #[test]
+    fn ui_dirty_is_empty_when_nothing_changed() {
+        let mut r = VelloRenderer::new(64, 64);
+        let els = sample_elements();
+        r.update_ui_dirty(&els);
+        assert!(r.ui_dirty_full(), "first frame must be a full update");
+        r.update_ui_dirty(&els);
+        assert!(!r.ui_dirty_full());
+        assert!(r.ui_dirty().is_empty(), "unchanged frame has no dirty rect");
+    }
+
+    /// 单个元素变化 → 脏区覆盖该元素（新旧矩形都要覆盖，便于擦除）。
+    #[test]
+    fn ui_dirty_covers_changed_element() {
+        let mut r = VelloRenderer::new(64, 64);
+        let mut els = sample_elements();
+        r.update_ui_dirty(&els);
+        // 改第一个矩形的颜色。
+        els[0] = LayeredElement::new(
+            VisualElement::Rect {
+                rect: KRect::new(2.0, 2.0, 30.0, 30.0),
+                style: FillStrokeStyle::new().with_fill(Color::new(10, 20, 30)),
+            },
+            0,
+        );
+        r.update_ui_dirty(&els);
+        assert!(!r.ui_dirty_full());
+        let dirty = r.ui_dirty();
+        assert!(!dirty.is_empty());
+        assert!(
+            dirty
+                .iter()
+                .any(|d| d.x <= 2.0 && d.y <= 2.0 && d.width >= 28.0),
+            "dirty should cover the changed rect, got {dirty:?}"
+        );
+    }
+
+    /// 元素数量变化 / Group 变化 → 退化为整屏（宁可多画不可漏更新）。
+    #[test]
+    fn ui_dirty_degrades_to_full_on_structural_change() {
+        let mut r = VelloRenderer::new(64, 64);
+        let els = sample_elements();
+        r.update_ui_dirty(&els);
+        // 1) 数量变化
+        r.update_ui_dirty(&els[..1]);
+        assert!(r.ui_dirty_full(), "element count change must force full");
+
+        // 2) Group（无包围盒）内容变化
+        let mut els2 = sample_elements();
+        r.update_ui_dirty(&els2);
+        els2[2] = LayeredElement::new(
+            VisualElement::Group {
+                children: vec![LayeredElement::new(
+                    VisualElement::Rect {
+                        rect: KRect::new(0.0, 0.0, 55.0, 55.0),
+                        style: FillStrokeStyle::new().with_fill(Color::new(0, 255, 0)),
+                    },
+                    0,
+                )],
+                transform: None,
+                clip_rect: Some(KRect::new(0.0, 0.0, 20.0, 20.0)),
+            },
+            2,
+        );
+        r.update_ui_dirty(&els2);
+        assert!(
+            r.ui_dirty_full(),
+            "group change without bounding box must force full"
+        );
+    }
+
+    /// 线程数配置应被记录（便于排查并行是否生效）。
+    #[test]
+    fn thread_count_is_configurable() {
+        assert_eq!(VelloRenderer::with_threads(8, 8, 3).num_threads(), 3);
+        assert_eq!(VelloRenderer::with_threads(8, 8, 0).num_threads(), 0);
+    }
 
     #[test]
     fn group_clip_rect_crops_children() {

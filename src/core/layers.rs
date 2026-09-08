@@ -347,10 +347,7 @@ impl LayerStack {
     pub fn popup_descendants(&self, handle: LayerHandle) -> Vec<LayerHandle> {
         let children_map = self.popup_children.borrow();
         let mut out = Vec::new();
-        let mut stack: Vec<LayerHandle> = children_map
-            .get(&handle)
-            .cloned()
-            .unwrap_or_default();
+        let mut stack: Vec<LayerHandle> = children_map.get(&handle).cloned().unwrap_or_default();
         while let Some(h) = stack.pop() {
             out.push(h);
             if let Some(ch) = children_map.get(&h) {

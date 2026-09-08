@@ -242,10 +242,7 @@ fn click_callback_mutates_widget_field_and_reprojection_reflects() {
 
     // 第一帧：count=0
     let e1 = project(&*counter);
-    assert_eq!(
-        div_children(&e1.root)[0],
-        ViewNode::Text("count=0".into())
-    );
+    assert_eq!(div_children(&e1.root)[0], ViewNode::Text("count=0".into()));
 
     // 模拟用户点击（框架命中 ViewNode.on_click 为 true 的节点 → 调 widget 的回调）
     // 关键：回调是通过 Rc<Counter> 捕获的，点击改的是**同一实例**的字段
@@ -253,19 +250,13 @@ fn click_callback_mutates_widget_field_and_reprojection_reflects() {
 
     // 第二帧：重新投影，count=1
     let e2 = project(&*counter);
-    assert_eq!(
-        div_children(&e2.root)[0],
-        ViewNode::Text("count=1".into())
-    );
+    assert_eq!(div_children(&e2.root)[0], ViewNode::Text("count=1".into()));
 
     // 多点击几次
     counter.click();
     counter.click();
     let e3 = project(&*counter);
-    assert_eq!(
-        div_children(&e3.root)[0],
-        ViewNode::Text("count=3".into())
-    );
+    assert_eq!(div_children(&e3.root)[0], ViewNode::Text("count=3".into()));
 }
 
 #[test]
@@ -329,12 +320,18 @@ fn shared_rc_gives_stable_instance_identity_for_callbacks() {
     let tree_slider: Rc<dyn Widget> = slider.clone();
     let root: Rc<dyn Widget> = Rc::new(Column::new().child_rc(tree_slider));
     let e1 = project(root.as_ref());
-    assert_eq!(div_children(&div_children(&e1.root)[0])[0], ViewNode::Text("0.5".into()));
+    assert_eq!(
+        div_children(&div_children(&e1.root)[0])[0],
+        ViewNode::Text("0.5".into())
+    );
 
     // 用户通过保留的 Rc<Slider> 改值 → 重新投影
     slider.set_value(0.9);
     let e2 = project(root.as_ref());
-    assert_eq!(div_children(&div_children(&e2.root)[0])[0], ViewNode::Text("0.9".into()));
+    assert_eq!(
+        div_children(&div_children(&e2.root)[0])[0],
+        ViewNode::Text("0.9".into())
+    );
 }
 
 #[test]
@@ -351,7 +348,11 @@ fn full_interaction_loop_counter_and_slider() {
     slider.set_on_change(move |v| lv.set(v));
     let slider_widget: Rc<dyn Widget> = slider.clone();
 
-    let root: Rc<dyn Widget> = Rc::new(Column::new().child_rc(counter_widget).child_rc(slider_widget));
+    let root: Rc<dyn Widget> = Rc::new(
+        Column::new()
+            .child_rc(counter_widget)
+            .child_rc(slider_widget),
+    );
 
     // 初始
     let e = project(root.as_ref());

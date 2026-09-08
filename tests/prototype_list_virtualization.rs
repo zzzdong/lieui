@@ -25,7 +25,10 @@ use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq)]
 enum ViewNode {
     Text(String),
-    Div { children: Vec<ViewNode>, key: Option<String> },
+    Div {
+        children: Vec<ViewNode>,
+        key: Option<String>,
+    },
 }
 
 trait Widget {
@@ -270,7 +273,11 @@ fn item_count_change_rebuilds_window_but_reuses_instances() {
     assert_eq!(list.cache.borrow().len(), 4);
 
     // 用户在 row0 输入
-    list.cache.borrow().peek(0).unwrap().type_text("row0 edited");
+    list.cache
+        .borrow()
+        .peek(0)
+        .unwrap()
+        .type_text("row0 edited");
 
     // item_count 从 1000 减到 2（列表项增删）
     list.item_count = 2;
