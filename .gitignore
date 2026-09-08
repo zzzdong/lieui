@@ -1,2 +1,4 @@
 /target
 /Cargo.lock
+.commit_msg.txt
+
