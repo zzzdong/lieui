@@ -556,10 +556,10 @@ impl Widget for Submenu {
             let pending_for_leave = pending.clone();
             let open_for_leave = open.clone();
             move |_ctx| {
-                if let Some(h) = open_for_leave.borrow().clone() {
-                    if let Some(p) = &pending_for_leave {
-                        *p.borrow_mut() = Some(h);
-                    }
+                if let Some(h) = *open_for_leave.borrow()
+                    && let Some(p) = &pending_for_leave
+                {
+                    *p.borrow_mut() = Some(h);
                 }
             }
         });
@@ -626,7 +626,7 @@ impl Widget for ContextMenu {
                 }
                 if let Some(&Event::MouseDown { x, y, .. }) = ctx.event() {
                     // 重复右键：先关闭上一次打开的菜单（级联关其子树），避免残留。
-                    if let Some(old) = last_for_open.get().clone().take() {
+                    if let Some(old) = *last_for_open.get() {
                         hide_popup(old);
                     }
                     let anchor = crate::geometry::Rect::new(x, y, 1.0, 1.0);

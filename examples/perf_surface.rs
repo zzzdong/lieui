@@ -89,11 +89,11 @@ fn main() {
         anim_surface.damage(Rect::new(0.0, y0 as f32, SURF_W as f32, h as f32));
         write_total += t0.elapsed();
         frame += 1;
-        if let Some(lim) = frames_limit {
-            if frame >= lim {
-                println!("[{mode}] reached --frames={lim}, exiting");
-                std::process::exit(0);
-            }
+        if let Some(lim) = frames_limit
+            && frame >= lim
+        {
+            println!("[{mode}] reached --frames={lim}, exiting");
+            std::process::exit(0);
         }
 
         if frame.is_multiple_of(REPORT_EVERY) {

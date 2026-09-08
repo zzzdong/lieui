@@ -870,14 +870,23 @@ fn record_frame_render(dt: std::time::Duration) {
         frames: u64,
         total: std::time::Duration,
     }
-    static ST: Mutex<S> = Mutex::new(S { frames: 0, total: std::time::Duration::ZERO });
+    static ST: Mutex<S> = Mutex::new(S {
+        frames: 0,
+        total: std::time::Duration::ZERO,
+    });
     let mut s = ST.lock().unwrap();
     s.frames += 1;
     s.total += dt;
     if s.frames >= 120 {
         let avg = s.total.as_secs_f64() * 1000.0 / s.frames as f64;
-        eprintln!("[lieui-perf] frame-render  avg={:.2}ms  (n={})", avg, s.frames);
-        *s = S { frames: 0, total: std::time::Duration::ZERO };
+        eprintln!(
+            "[lieui-perf] frame-render  avg={:.2}ms  (n={})",
+            avg, s.frames
+        );
+        *s = S {
+            frames: 0,
+            total: std::time::Duration::ZERO,
+        };
     }
 }
 
@@ -920,7 +929,13 @@ fn record_blit(age: u32, full: bool, regions: usize, damage_ratio: f32) {
             s.ratio / s.n as f64 * 100.0,
             s.n
         );
-        *s = B { n: 0, age0: 0, full: 0, regions: 0.0, ratio: 0.0 };
+        *s = B {
+            n: 0,
+            age0: 0,
+            full: 0,
+            regions: 0.0,
+            ratio: 0.0,
+        };
     }
 }
 

@@ -196,7 +196,9 @@ impl Compositor {
             .prev_surface_rects
             .iter()
             .filter_map(|(id, prev)| {
-                let changed = current.get(id).map_or(true, |now| rect_changed_approx(prev, now));
+                let changed = current
+                    .get(id)
+                    .is_none_or(|now| rect_changed_approx(prev, now));
                 changed.then_some(*prev)
             })
             .collect();
@@ -209,7 +211,7 @@ impl Compositor {
             let changed = self
                 .prev_surface_rects
                 .get(&e.id)
-                .map_or(true, |prev| rect_changed_approx(prev, &e.rect));
+                .is_none_or(|prev| rect_changed_approx(prev, &e.rect));
             if changed {
                 self.add_dirty(e.rect);
             }
