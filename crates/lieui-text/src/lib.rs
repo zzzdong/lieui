@@ -4,19 +4,26 @@
 //! 1. 不再依赖 `crate::view::paint::TextStyle`，改为本 crate 的 [`TextSpec`]（只含测度/整形字段）；
 //! 2. `create_text_layout` / `apply_plain_editor_style` / `create_plain_editor` 增加 `color` 参数
 //!    （原实现从 `TextStyle.color` 取，现在由绘制层显式给）；
-//! 3. 颜色类型改从 `lieui-geom` 引入。
-//!
-//! 遗留（M2 处理，见 docs/operation-log.md）：字体/排版上下文与测度缓存仍是 thread_local，
-//! v3 目标是收敛成显式的 `TextService` 对象。
+//! 3. 颜色类型改从 `lieui-geom` 引入；
+//! 4. **参考 lievisual 0.2 的文本引擎**（2026-10）：
+//!    - **进程级共享字体集合**（`CollectionOptions::shared`）：注册的字体对所有线程（含后启线程）
+//!      可见，不再静默回退到系统默认字体；
+//!    - **`line_height` 真正生效**：parley 0.11 有 `StyleProperty::LineHeight`（`FontSizeRelative`），
+//!      旧注释"parley 无此属性、由上层处理"是错的——现在测度/排版/编辑器三处一致应用；
+//!    - **CSS 字体族列表**：`font_family` 支持 `"Segoe UI, sans-serif"` 形式的回退链；
+//!    - **字体注册增强**：[`FontSource`]（路径/内存）+ family 名覆盖 + 绑定 generic family
+//!      （如把注册字体挂到 `monospace`）。
 
 pub mod spec;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use parley::{
     Alignment, AlignmentOptions, FontContext, LayoutContext, editing::PlainEditor,
-    style::{FontFamily, FontFamilyName, FontWeight as ParleyFontWeight, StyleProperty},
+    style::{FontFamily, FontFamilyName, FontWeight as ParleyFontWeight, LineHeight, StyleProperty},
 };
 
 use lieui_geom::Color;
@@ -29,8 +36,33 @@ pub type TextLayout = parley::Layout<Color>;
 /// 单样式文本编辑器类型（用于 Input 等可编辑文本）。
 pub type PlainTextEditor = PlainEditor<Color>;
 
+// ─────────────────── 进程级共享字体集合（参考 lievisual） ───────────────────
+
+/// 进程级字体集合（`shared: true` ⇒ 每个线程的 FontContext 克隆共享同一份注册状态）。
+fn global_font_collection() -> &'static Mutex<parley::fontique::Collection> {
+    static GLOBAL: OnceLock<Mutex<parley::fontique::Collection>> = OnceLock::new();
+    GLOBAL.get_or_init(|| {
+        Mutex::new(parley::fontique::Collection::new(parley::fontique::CollectionOptions {
+            shared: true,
+            ..Default::default()
+        }))
+    })
+}
+
+/// 从共享集合构造线程本地的 FontContext。
+fn new_font_context() -> FontContext {
+    let collection = global_font_collection()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    FontContext {
+        collection,
+        source_cache: parley::fontique::SourceCache::default(),
+    }
+}
+
 thread_local! {
-    pub static FONT_CONTEXT: RefCell<FontContext> = RefCell::new(FontContext::default());
+    pub static FONT_CONTEXT: RefCell<FontContext> = RefCell::new(new_font_context());
     pub static LAYOUT_CONTEXT: RefCell<LayoutContext<Color>> = RefCell::new(LayoutContext::new());
 }
 
@@ -50,6 +82,25 @@ fn parley_weight(w: &FontWeight) -> ParleyFontWeight {
     }
 }
 
+/// 解析 CSS `font-family` 列表（如 `"Segoe UI, sans-serif"`）为 parley 字体族；
+/// 不是合法列表时退化为单一命名族（与旧行为一致）。
+fn font_family_prop(raw: &str) -> FontFamily<'_> {
+    let families: Vec<FontFamilyName> = FontFamilyName::parse_css_list(raw)
+        .filter_map(Result::ok)
+        .collect();
+    if families.is_empty() {
+        FontFamily::named(raw)
+    } else {
+        FontFamily::List(families.into())
+    }
+}
+
+/// 绝对行高 → parley 的字号相对行高（parley 只接受倍率形式）。
+fn parley_line_height(lh: f64, font_size: f64) -> LineHeight {
+    let factor = (lh / font_size.max(1e-6)) as f32;
+    LineHeight::FontSizeRelative(factor)
+}
+
 fn apply_text_style(
     builder: &mut parley::RangedBuilder<Color>,
     spec: &TextSpec,
@@ -57,8 +108,14 @@ fn apply_text_style(
 ) {
     builder.push_default(StyleProperty::FontSize(spec.font_size as f32));
     builder.push_default(StyleProperty::Brush(color));
-    builder.push_default(StyleProperty::FontFamily(FontFamily::named(&spec.font_family)));
+    builder.push_default(StyleProperty::FontFamily(font_family_prop(&spec.font_family)));
     builder.push_default(StyleProperty::FontWeight(parley_weight(&spec.font_weight)));
+    if let Some(lh) = spec.line_height {
+        builder.push_default(StyleProperty::LineHeight(parley_line_height(
+            lh,
+            spec.font_size,
+        )));
+    }
 }
 
 fn map_text_align(a: TextAlign) -> Alignment {
@@ -139,16 +196,36 @@ fn measure_cache_key(text: &str, spec: &TextSpec) -> MeasureKey {
     )
 }
 
+/// `StyleSet::insert` 要求 `StyleProperty<'static>`：把 CSS 字体族列表复制为 `'static`。
+fn static_font_family(raw: &str) -> FontFamily<'static> {
+    let families: Vec<FontFamilyName<'static>> = FontFamilyName::parse_css_list(raw)
+        .filter_map(Result::ok)
+        .map(|f| match f {
+            FontFamilyName::Named(c) => FontFamilyName::Named(Cow::Owned(c.into_owned())),
+            FontFamilyName::Generic(g) => FontFamilyName::Generic(g),
+        })
+        .collect();
+    if families.is_empty() {
+        FontFamily::Single(FontFamilyName::Named(Cow::Owned(raw.to_string())))
+    } else {
+        FontFamily::List(families.into())
+    }
+}
+
 /// 将规格与颜色应用到 `PlainEditor` 的默认样式。
 pub fn apply_plain_editor_style(editor: &mut PlainTextEditor, spec: &TextSpec, color: Color) {
     let styles = editor.edit_styles();
     styles.insert(StyleProperty::FontSize(spec.font_size as f32));
     styles.insert(StyleProperty::Brush(color));
     // `StyleSet::insert` 要求 `StyleProperty<'static>`，因此把字体名复制为 'static。
-    styles.insert(StyleProperty::FontFamily(FontFamily::Single(
-        FontFamilyName::Named(Cow::Owned(spec.font_family.clone())),
-    )));
+    styles.insert(StyleProperty::FontFamily(static_font_family(&spec.font_family)));
     styles.insert(StyleProperty::FontWeight(parley_weight(&spec.font_weight)));
+    if let Some(lh) = spec.line_height {
+        styles.insert(StyleProperty::LineHeight(parley_line_height(
+            lh,
+            spec.font_size,
+        )));
+    }
 }
 
 /// 用给定规格创建并配置 `PlainEditor`。
@@ -200,25 +277,71 @@ pub fn editor_layout_size(
     })
 }
 
-/// 注册自定义字体字节（.ttf / .otf / .woff 等），返回可用的 family 名称列表。
-pub fn register_font_bytes(bytes: Vec<u8>) -> Vec<String> {
-    FONT_CONTEXT.with(|fc| {
-        let mut fc = fc.borrow_mut();
-        let blob = parley::fontique::Blob::from(bytes);
-        let registered = fc.collection.register_fonts(blob, None);
-        registered
-            .into_iter()
-            .filter_map(|(fid, _)| fc.collection.family_name(fid).map(|s| s.to_string()))
-            .collect()
-    })
+// ─────────────────── 字体注册（参考 lievisual：共享集合 + 覆盖 + generic 绑定） ───────────────────
+
+/// 字体来源（[`register_font_source`] 用）。
+#[derive(Debug, Clone)]
+pub enum FontSource {
+    /// 从文件读取。
+    Path(PathBuf),
+    /// 内存字节（`include_bytes!` / 网络下载均可）。
+    Memory(Vec<u8>),
 }
 
-/// 从字体文件读取并注册，等价于 `register_font_bytes(std::fs::read(path)?)`。
+/// 注册自定义字体到**进程级共享集合**（所有线程可见，含后启线程），返回可用 family 名。
+///
+/// - `family_override`：覆盖字体内嵌的 family 名（同一份字体可以不同名字注册多次）；
+/// - `generic_family`：把字体挂到某个 generic family（如 `Monospace`），此后
+///   `font_family: "monospace"` 会命中它。
+pub fn register_font_source(
+    source: FontSource,
+    family_override: Option<&str>,
+    generic_family: Option<parley::fontique::GenericFamily>,
+) -> Result<Vec<String>, String> {
+    let blob = match source {
+        FontSource::Path(path) => {
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("读取字体失败 {path:?}: {e}"))?;
+            parley::fontique::Blob::new(std::sync::Arc::new(bytes))
+        }
+        FontSource::Memory(bytes) => parley::fontique::Blob::new(std::sync::Arc::new(bytes)),
+    };
+    let override_info = family_override.map(|name| parley::fontique::FontInfoOverride {
+        family_name: Some(name),
+        ..Default::default()
+    });
+
+    let mut collection = global_font_collection()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let registered: Vec<_> = collection.register_fonts(blob, override_info);
+    let names: Vec<String> = registered
+        .iter()
+        .filter_map(|(fid, _)| collection.family_name(*fid).map(str::to_string))
+        .collect();
+    if let Some(generic) = generic_family {
+        let ids = registered.into_iter().map(|(fid, _)| fid);
+        collection.append_generic_families(generic, ids);
+    }
+    drop(collection);
+    // 触碰一次线程本地上下文，让 fontique 的懒同步立即生效（而非等下一次查询）
+    with_text_contexts(|fc, _| {
+        let _ = fc.collection.family_names().count();
+    });
+    Ok(names)
+}
+
+/// 注册自定义字体字节（.ttf / .otf / .woff 等），返回可用的 family 名称列表。
+pub fn register_font_bytes(bytes: Vec<u8>) -> Vec<String> {
+    register_font_source(FontSource::Memory(bytes), None, None).unwrap_or_default()
+}
+
+/// 从字体文件读取并注册，等价于 `register_font_source(FontSource::Path(..), ..)`。
 pub fn register_font_file<P: AsRef<std::path::Path>>(path: P) -> Vec<String> {
-    match std::fs::read(path.as_ref()) {
-        Ok(bytes) => register_font_bytes(bytes),
+    match register_font_source(FontSource::Path(path.as_ref().to_path_buf()), None, None) {
+        Ok(names) => names,
         Err(e) => {
-            eprintln!("[lieui] 加载字体失败 {:?}: {e}", path.as_ref());
+            eprintln!("[lieui] {e}");
             Vec::new()
         }
     }
@@ -302,5 +425,66 @@ mod tests {
         assert_eq!(align_to_utf8_boundary(s, 1), 0, "1 落在汉字中间 ⇒ 回退");
         assert_eq!(align_to_utf8_boundary(s, 3), 3);
         assert_eq!(align_to_utf8_boundary(s, 999), s.len());
+    }
+
+    /// 参考 lievisual：parley 0.11 有 `StyleProperty::LineHeight`（`FontSizeRelative`），
+    /// `spec.line_height` 必须真正影响测度（旧实现只是把它放进缓存键，是 no-op）。
+    #[test]
+    fn line_height_is_applied_to_measurement() {
+        let base = TextSpec {
+            font_size: 16.0,
+            ..Default::default()
+        };
+        let (_, h0) = TextEngine::measure_text("hello", &base);
+        let taller = TextSpec {
+            font_size: 16.0,
+            line_height: Some(32.0),
+            ..Default::default()
+        };
+        let (_, h1) = TextEngine::measure_text("hello", &taller);
+        assert!(h1 > h0, "line_height 应生效：{h0} → {h1}");
+        assert!((h1 - 32.0).abs() < 1.0, "单行行高应≈32（2×字号）：{h1}");
+    }
+
+    /// `font_family` 支持 CSS 回退链：第一个字体不存在时落到后续 generic family。
+    #[test]
+    fn font_family_list_is_accepted() {
+        let s = TextSpec {
+            font_size: 16.0,
+            font_family: "NoSuchFontXYZ, sans-serif".to_string(),
+            ..Default::default()
+        };
+        let (w, h) = TextEngine::measure_text("hello", &s);
+        assert!(w > 0.0 && h > 0.0, "回退链应能解析出字体：{w}×{h}");
+    }
+
+    /// 注册增强：family 名覆盖 + generic family 绑定（共享集合 ⇒ 本线程立即可测）。
+    #[test]
+    fn register_with_family_override_and_generic_binding() {
+        // Material Icons 字体由主 crate 内嵌；这里直接拿仓库里的同一份文件测 API
+        let bytes = include_bytes!("../../../src/assets/MaterialIcons-Regular.ttf");
+        let names = register_font_source(
+            FontSource::Memory(bytes.to_vec()),
+            Some("LieTestIcons"),
+            Some(parley::fontique::GenericFamily::Fantasy),
+        )
+        .expect("内存字体注册不应失败");
+        assert!(
+            names.iter().any(|n| n == "LieTestIcons"),
+            "覆盖的 family 名应出现在注册结果里：{names:?}"
+        );
+
+        // 覆盖名可直接用于排版（图标字形 1em 见方 ⇒ 宽度≈字号）
+        let spec = TextSpec::new(20.0)
+            .font_family("LieTestIcons")
+            .wrap(false);
+        let (w, _) = TextEngine::measure_text("\u{e5cd}", &spec);
+        assert!(w > 0.0, "按覆盖名测度图标字形：{w}");
+        assert!((w - 20.0).abs() < 2.0, "图标字形 advance≈字号：{w}");
+
+        // generic 绑定：font_family 写 "fantasy" 也应能解析（落到注册的图标字体）
+        let s2 = TextSpec::new(14.0).font_family("fantasy");
+        let (w2, h2) = TextEngine::measure_text("hello", &s2);
+        assert!(w2 > 0.0 && h2 > 0.0, "fantasy 应命中注册字体：{w2}×{h2}");
     }
 }

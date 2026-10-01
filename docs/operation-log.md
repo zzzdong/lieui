@@ -1014,3 +1014,58 @@ Radio 的组互斥**不遍历兄弟、不发命令**：点击只把本项 `value
 clone_on_copy / unnecessary_fallible_conversions ×2），均在本次改动之外的一行修复。
 
 验证：`cargo test --lib` 266 全绿；`cargo clippy --lib --examples` 0 警告。
+
+## M5+ 图标显示支持（2026-10-01）
+
+**结论**：图标 = **图标字体里的一个字符**，整套支持零新绘制原语——注册字体进文本引擎 +
+名称查码点，之后测度/布局/绘制/hover 变色全部复用文本管线。
+
+- **`src/icon.rs`（新）**：`ensure_icon_font()`（幂等注册内嵌的 Material Icons TTF，记录真实
+  family 名）/ `icon_char(name)`（查内嵌 codepoints 表，~2200 个名称全覆盖；未知名称回退
+  占位字形 □）/ `icon_spec(size)`（图标字体 + 不换行的 `TextSpec`）。字体与 codepoints
+  表从 `assets/` 移入 `src/assets/`（`include_bytes!`/`include_str!` 内嵌）——发布自包含，
+  `Cargo.toml` 的 `exclude` 相应去掉 `/assets`。
+- **`view.rs`**：新增 `icon(name)`（= 设了图标字体的 `Kind::Text`，默认 20px，主题文字色）
+  与 `icon_button(name)`（`Kind::Button` + 图标字形，交互与 `button` 完全一致）；
+  `button` 的主题烘焙抽成 `bake_button_style` 共享。
+- **gallery**：新增「图标」演示段（icon_button 一排 + 不同字号/变色的 icon 一排）。
+
+**设计取舍**：不做 `IconName` 枚举（2200 个 variant 会拖慢编译），用字符串名称 + 运行时查表；
+未知名称显示 □ 而不是 panic——图标缺失不该炸 UI。
+
+**测试** +6：码点解析（close=e5cd / settings=e8b8 / add=e145）、未知名回退、常用子集存在性、
+字体注册后图标字形可测度、`icon` DSL 产出（Text + 图标字体 + 不换行）、`icon_button` 产出
+（Button tag + 图标 label）。
+
+验证：`cargo test --lib` 273 全绿；`cargo clippy --lib --examples` 0 警告；gallery 编译通过。
+
+## lieui-text / lieui-geom 参考 lievisual 改进（2026-10-01）
+
+对照 `../lievisual 0.2` 的 `text/engine.rs` 与 `geometry.rs`，取其精华、按 GUI 场景取舍：
+
+**lieui-text（4 项，源自 lievisual 引擎的成熟做法）**：
+1. **`line_height` 真正生效**（最有价值的修复）：旧注释称"parley 0.11 无此 StyleProperty、由上层
+   处理"是错的——lievisual 证明有 `StyleProperty::LineHeight(FontSizeRelative)`。现在测度 /
+   排版 / PlainEditor 三处一致应用（行高换算 `lh / font_size` 为倍率）。旧实现里它只是缓存键的
+   一部分，是 **no-op**。
+2. **进程级共享字体集合**：`Collection::new(CollectionOptions { shared: true })` 全局持有，各线程
+   `FontContext` 克隆之——注册的字体对所有线程（含后启线程）可见，不再静默回退系统默认。
+3. **CSS 字体族列表**：`font_family: "Segoe UI, sans-serif"` 按 `FontFamilyName::parse_css_list`
+   解析为回退链（编辑器样式用 'static 复制版；解析失败退化为单一命名族，兼容旧行为）。
+4. **注册增强**：`FontSource`（Path/Memory）+ `register_font_source(source, family_override,
+   generic_family)`——family 名覆盖 + 把注册字体挂到 generic family（如 `monospace`）；
+   旧 `register_font_bytes` / `register_font_file` 签名不变，改为其上的便捷封装。
+
+**lieui-geom**（补齐实用面；**明确不移植 kurbo f64 直通**——UI 布局/命中/上屏全链路是 f32
+逻辑像素，kurbo 直通是矢量场景的价值）：
+- `Color`：`Eq`/`Hash`（可作映射键）、`rgb()`、`to_hex()`（不透明 `#rrggbb` / 带 alpha
+  `#rrggbbaa`）、`with_alpha()`、`lerp()`（动画用）；文档注明 8-bit 直存的无损理由（同 lievisual）。
+- `Rect`：`from_points`（对角点归一化）、`translate`、`inflate_xy`（`inflate` 变为其同值特例）。
+- `Point`：`distance`、`lerp`。
+
+**测试** +9（geom 4 / text 5）：hex 往返、派生色与插值端点、HashMap 键、点构造归一化、
+平移/非对称外扩、距离与插值；line_height 生效（16px + lh 32 ⇒ 高≈32）、字体族列表回退、
+family 覆盖 + generic 绑定（用仓库内 Material Icons 字体实测：覆盖名可排版、图标字形
+advance≈字号）。
+
+验证：`cargo test --workspace` 291 全绿（273+6+4+8）；clippy 0 警告。

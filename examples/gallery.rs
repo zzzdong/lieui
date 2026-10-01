@@ -16,7 +16,8 @@
 //! 9. **滚动区**（滚轮 / 拖动滚动条）；
 //! 10. **自绘波形**（`CustomNode`：自绘 + 自己的状态机）；
 //! 11. **图片**（程序生成的渐变位图，contain 缩放）；
-//! 12. **Tab 焦点迁移**（框架默认行为，键盘聚焦画焦点框）。
+//! 12. **图标**（Material Icons 字体：`icon` / `icon_button`）；
+//! 13. **Tab 焦点迁移**（框架默认行为，键盘聚焦画焦点框）。
 
 use std::rc::Rc;
 
@@ -74,6 +75,7 @@ struct Gallery {
     combo_open: Signal<bool>,
     combo_choice: Signal<String>,
     open_menu: Signal<String>,
+    sub_open: Signal<bool>,
     last_action: Signal<String>,
     wave: CustomCell,
     photo: std::sync::Arc<ImageData>,
@@ -86,6 +88,7 @@ impl Gallery {
         v.button(name)
             .key(format!("menu-{name}"))
             .on_tap(act1(me, |s, m: String| {
+                s.sub_open.set(false); // 切换/关闭菜单 ⇒ 子菜单一并收起
                 s.open_menu
                     .set(if s.open_menu.get() == m { String::new() } else { m });
             }, m));
@@ -103,11 +106,23 @@ impl Gallery {
             p.on(EventKind::Dismissed, move |_| {
                 if mine.open_menu.get() == owned {
                     mine.open_menu.set(String::new());
+                    mine.sub_open.set(false);
                 }
             });
             for item in items {
                 let it = Rc::clone(me);
                 let label = item.to_string();
+                if item.ends_with("▸") {
+                    // 子菜单锚点：本项是下一级弹层的锚（`item-{菜单}-{项}`）
+                    let sk = format!("item-{name}-{item}");
+                    p.text(item.to_string())
+                        .hover_background(me.rt.theme().control_hover)
+                        .radius(3.0)
+                        .width(110.0)
+                        .key(sk)
+                        .on_tap(act(&it, |s| s.sub_open.set(!s.sub_open.get())));
+                    continue;
+                }
                 p.text(item.to_string())
                     .hover_background(me.rt.theme().control_hover)
                     .radius(3.0)
@@ -115,6 +130,29 @@ impl Gallery {
                     .on_tap(move || {
                         it.last_action.set(label.clone());
                         it.open_menu.set(String::new());
+                    });
+            }
+        });
+    }
+
+    /// 子菜单弹层：锚点在上层弹层内的项（嵌套锚定层，`Placement::RightOf`）
+    fn submenu_popup(me: &Rc<Self>, v: &mut ViewBuf, menu: &str, item: &str, subs: &[&str]) {
+        if me.open_menu.get() != menu || !me.sub_open.get() {
+            return;
+        }
+        let key = format!("item-{menu}-{item}");
+        v.popup_at(key.as_str(), Placement::RightOf, |p| {
+            for sub in subs {
+                let it = Rc::clone(me);
+                let label = sub.to_string();
+                p.text(sub.to_string())
+                    .hover_background(me.rt.theme().control_hover)
+                    .radius(3.0)
+                    .width(110.0)
+                    .on_tap(move || {
+                        it.last_action.set(label.clone());
+                        it.open_menu.set(String::new());
+                        it.sub_open.set(false);
                     });
             }
         });
@@ -248,6 +286,29 @@ impl ViewModel for Gallery {
             s.text("下拉选择").font_size(16.0);
             Gallery::combo_anchor(self, s);
 
+            // ── 图标（Material Icons 字体，名称即 codepoints 表里的名字）──
+            self.divider(s);
+            s.text("图标（icon / icon_button）").font_size(16.0);
+            s.row(|r| {
+                r.gap(6.0);
+                r.align_items(FlexAlign::Center);
+                for name in ["home", "search", "settings", "add", "delete", "close", "refresh"] {
+                    r.icon_button(name)
+                        .on_tap(act1(self, |s, n: String| s.last_action.set(format!("图标 {n}")), name.to_string()));
+                }
+            });
+            s.row(|r| {
+                r.gap(16.0);
+                r.align_items(FlexAlign::Center);
+                r.icon("favorite").color(self.rt.theme().accent).font_size(28.0);
+                r.icon("star").font_size(24.0);
+                r.icon("info").font_size(20.0);
+                r.icon("menu").font_size(16.0);
+                r.text("不同字号（28/24/20/16），可 .color 变色")
+                    .font_size(13.0)
+                    .color(self.rt.theme().text_secondary);
+            });
+
             // ── 输入框 ──
             self.divider(s);
             s.text("输入框（中文 IME / Ctrl+A·C·V / 方向键选区）").font_size(16.0);
@@ -284,7 +345,8 @@ impl ViewModel for Gallery {
 
         // ── 弹层（锚点在内容里，层根在内容之外声明）──
         Gallery::menu_popup(self, v, "文件", &["新建", "打开", "保存"]);
-        Gallery::menu_popup(self, v, "编辑", &["撤销", "重做", "查找…"]);
+        Gallery::menu_popup(self, v, "编辑", &["撤销", "重做", "查找 ▸"]);
+        Gallery::submenu_popup(self, v, "编辑", "查找 ▸", &["查找内容", "查找下一个", "替换…"]);
         Gallery::combo_popup(self, v);
     }
 }
@@ -321,6 +383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         combo_open: Signal::new(&rt, false),
         combo_choice: Signal::new(&rt, String::new()),
         open_menu: Signal::new(&rt, String::new()),
+        sub_open: Signal::new(&rt, false),
         last_action: Signal::new(&rt, String::new()),
         wave: custom::cell(Wave { taps: 0 }),
         rt: rt.clone(),

@@ -37,6 +37,7 @@ pub mod custom;
 pub mod event;
 pub mod focus;
 pub mod hit;
+pub mod icon;
 pub mod input;
 pub mod layout;
 #[cfg(feature = "winit")]
@@ -90,6 +91,7 @@ pub mod prelude {
     pub use crate::cmd::CmdBuf;
     pub use crate::custom::{self, CustomCell, CustomNode};
     pub use crate::event::{Ctx, Event, EventKind, EventView, PointerButton, PointerId};
+    pub use crate::icon::{icon_char, icon_font_family};
     pub use crate::input::InputEvent;
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};

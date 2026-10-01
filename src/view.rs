@@ -235,25 +235,55 @@ impl ViewBuf {
         let idx = self.push_desc(KindDesc::Button {
             label: label.to_string(),
         });
+        // 开箱可用：主题烘焙的底色/hover/pressed + 圆角（`.background(..)` 链式覆盖仍可赢）
+        self.bake_button_style(idx);
+        DescRef { v: self, idx }
+    }
+
+    /// 图标（**Material Icons** 字体；`name` 见 codepoints 表，如 `"close"`/`"settings"`）。
+    ///
+    /// 本质是"图标字体里的一个字符"——测度/布局/绘制/hover 变色全部复用文本管线，
+    /// 字体在首次使用时自动注册（`crate::icon`）。字号默认 20，链式 `.font_size(..)` 可改。
+    pub fn icon(&mut self, name: impl AsRef<str>) -> DescRef<'_> {
+        let idx = self.push_desc(KindDesc::Text(
+            crate::icon::icon_char(name.as_ref()).to_string(),
+        ));
         {
-            // 开箱可用：主题烘焙的底色/hover/pressed + 圆角（`.background(..)` 覆盖仍可赢）
             let t = *self.theme();
             let n = self.node_mut(idx);
-            n.paint = PaintStyle::new()
-                .background(t.control)
-                .hover_background(t.control_hover)
-                .pressed_background(t.control_pressed)
-                .radius(t.control_radius);
             n.text.color = t.text;
-            n.layout = n
-                .layout
-                .clone()
-                .padding_left(10.0)
-                .padding_right(10.0)
-                .padding_top(6.0)
-                .padding_bottom(6.0);
+            n.text.spec = crate::icon::icon_spec(20.0);
         }
         DescRef { v: self, idx }
+    }
+
+    /// 图标按钮：icon 字形 + 按钮交互（`.on_tap` 等与 [`Self::button`] 相同）。
+    pub fn icon_button(&mut self, name: impl AsRef<str>) -> DescRef<'_> {
+        let idx = self.push_desc(KindDesc::Button {
+            label: crate::icon::icon_char(name.as_ref()).to_string(),
+        });
+        self.bake_button_style(idx);
+        self.node_mut(idx).text.spec = crate::icon::icon_spec(20.0);
+        DescRef { v: self, idx }
+    }
+
+    /// `button` / `icon_button` 共享的主题烘焙（底色/hover/pressed + 圆角 + 文字色 + 内边距）
+    fn bake_button_style(&mut self, idx: u32) {
+        let t = *self.theme();
+        let n = self.node_mut(idx);
+        n.paint = PaintStyle::new()
+            .background(t.control)
+            .hover_background(t.control_hover)
+            .pressed_background(t.control_pressed)
+            .radius(t.control_radius);
+        n.text.color = t.text;
+        n.layout = n
+            .layout
+            .clone()
+            .padding_left(10.0)
+            .padding_right(10.0)
+            .padding_top(6.0)
+            .padding_bottom(6.0);
     }
 
     /// 复选框：默认 18×18（没有文本可测度 ⇒ 否则尺寸为 0）
@@ -911,6 +941,51 @@ impl<'a> DescRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_creates_icon_font_text() {
+        let mut v = ViewBuf::new();
+        v.begin();
+        v.column(|c| {
+            c.icon("close");
+            c.icon("no-such-icon");
+        });
+        let root = &v.nodes[v.roots[0].node as usize];
+        let a = &v.nodes[root.children[0] as usize];
+        let b = &v.nodes[root.children[1] as usize];
+        match &a.kind {
+            KindDesc::Text(s) => assert_eq!(s, "\u{e5cd}", "close = e5cd"),
+            _ => panic!("icon 应是 Text"),
+        }
+        assert_eq!(a.text.spec.font_family.as_str(), crate::icon::ICON_FONT_FAMILY);
+        assert!(!a.text.spec.wrap, "图标不换行");
+        assert_eq!(a.text.spec.font_size, 20.0);
+        match &b.kind {
+            KindDesc::Text(s) => assert_eq!(s.as_str(), "□"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn icon_button_is_a_button_with_icon_glyph() {
+        let mut v = ViewBuf::new();
+        v.begin();
+        v.column(|c| {
+            c.icon_button("settings");
+        });
+        let root = &v.nodes[v.roots[0].node as usize];
+        let a = &v.nodes[root.children[0] as usize];
+        assert_eq!(
+            a.kind.tag(),
+            crate::track::KindTag::Button,
+            "icon_button 走按钮交互"
+        );
+        match &a.kind {
+            KindDesc::Button { label } => assert_eq!(label, "\u{e8b8}"),
+            _ => panic!(),
+        }
+        assert_eq!(a.text.spec.font_family, crate::icon::ICON_FONT_FAMILY);
+    }
 
     #[test]
     fn builds_a_nested_tree_with_content_root() {

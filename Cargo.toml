@@ -2,11 +2,16 @@
 name = "lieui"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zzzdong/lieui"
-description = "简易 GUI 库：retained 视图树 + R1 响应式 + 纯 CPU 渲染"
+readme = "README.md"
+description = "A retained-tree GUI toolkit in pure Rust: retained view tree + reactive signals + pure-CPU rendering"
+keywords = ["gui", "ui", "widgets", "layout", "text"]
+categories = ["gui"]
+# 打包只带源码与示例；开发文档留在仓库里（图标字体在 src/assets/ 内嵌随包发布）
+exclude = ["/docs"]
 
-# 根 crate 即主 crate（lieui）；支撑 crate 以 path 依赖放在 crates/ 下
 [workspace]
 resolver = "2"
 members = ["crates/lieui-geom", "crates/lieui-text", "crates/lieui-layout"]
@@ -14,13 +19,15 @@ members = ["crates/lieui-geom", "crates/lieui-text", "crates/lieui-layout"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zzzdong/lieui"
 
 [workspace.dependencies]
-lieui-geom = { path = "crates/lieui-geom" }
-lieui-text = { path = "crates/lieui-text" }
-lieui-layout = { path = "crates/lieui-layout" }
+# path + version 双写：发布时 crates.io 按版本解析，本地按 path 解析
+lieui-geom = { path = "crates/lieui-geom", version = "0.0.1" }
+lieui-text = { path = "crates/lieui-text", version = "0.0.1" }
+lieui-layout = { path = "crates/lieui-layout", version = "0.0.1" }
 parley = "0.11.0"
 
 [dependencies]
@@ -30,6 +37,8 @@ lieui-layout = { workspace = true }
 parley = { workspace = true }
 vello_cpu = "0.2"
 
+# 平台层（窗口 / 软渲染上屏 / 剪贴板）：关掉 default 特性即纯库形态，
+# 可自选 winit / 其他宿主接入
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 arboard = { version = "3", optional = true }
