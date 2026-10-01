@@ -94,6 +94,10 @@ struct RuntimeInner {
     requests: RequestQueue,
     /// 全局主题（设计 §3.10：`Theme` 是 App 的普通字段，无 thread_local）
     theme: RefCell<crate::theme::Theme>,
+    /// 主题模式（主题从哪来：预设 / 跟随系统 / 自定义）
+    theme_mode: Cell<crate::theme::ThemeMode>,
+    /// 操作系统的深色状态（平台层上报；`System` 模式下据此选预设）
+    system_dark: Cell<bool>,
 }
 
 /// 待处理请求槽（类型擦除；**谁放谁取**）。
@@ -193,10 +197,58 @@ impl Runtime {
         *self.inner.theme.borrow()
     }
 
-    /// 切换主题：所有窗口重跑 `view()`（描述里的颜色随新主题重新烘焙）+ 整窗重绘。
+    /// 当前主题模式（主题从哪来）
+    pub fn theme_mode(&self) -> crate::theme::ThemeMode {
+        self.inner.theme_mode.get()
+    }
+
+    /// 设定具体主题（自定义 token 集）：模式转为 `Custom`，**不再跟随系统**。
     ///
+    /// 所有窗口重跑 `view()`（描述里的颜色随新主题重新烘焙）+ 整窗重绘。
     /// 同值调用是 no-op（避免无意义的全窗重绘）。
     pub fn set_theme(&self, t: crate::theme::Theme) {
+        self.inner.theme_mode.set(crate::theme::ThemeMode::Custom);
+        self.apply_theme(t);
+    }
+
+    /// 切换主题模式：
+    /// - `Light` / `Dark`：应用内置预设；
+    /// - `System`：跟随系统（按已上报的 OS 深色状态立即应用；未上报时按浅色）；
+    /// - `Custom`：只改模式，不动生效主题。
+    pub fn set_theme_mode(&self, mode: crate::theme::ThemeMode) {
+        use crate::theme::{Theme, ThemeMode};
+        self.inner.theme_mode.set(mode);
+        let t = match mode {
+            ThemeMode::Light => Theme::light(),
+            ThemeMode::Dark => Theme::dark(),
+            ThemeMode::System => {
+                if self.inner.system_dark.get() {
+                    Theme::dark()
+                } else {
+                    Theme::light()
+                }
+            }
+            ThemeMode::Custom => return,
+        };
+        self.apply_theme(t);
+    }
+
+    /// 平台层上报操作系统的深色状态（winit `ThemeChanged` / 初始 `window.theme()`）。
+    ///
+    /// 只有 `ThemeMode::System` 会因此立即换主题；其它模式下仅记录，供之后切到
+    /// `System` 时使用。
+    pub fn set_system_dark(&self, dark: bool) {
+        use crate::theme::{Theme, ThemeMode};
+        if self.inner.system_dark.replace(dark) == dark {
+            return;
+        }
+        if self.inner.theme_mode.get() == ThemeMode::System {
+            self.apply_theme(if dark { Theme::dark() } else { Theme::light() });
+        }
+    }
+
+    /// 生效主题变更的统一入口（同值 no-op；变了 ⇒ 所有窗口重跑 view + 整窗重绘）
+    fn apply_theme(&self, t: crate::theme::Theme) {
         if *self.inner.theme.borrow() == t {
             return;
         }
@@ -389,6 +441,55 @@ mod tests {
         // 取走即清空
         assert!(rt.take_dirty(a).is_empty());
         assert!(rt.peek_dirty(b).is_empty());
+    }
+
+    // ── 主题模式 ──
+
+    #[test]
+    fn system_mode_follows_the_os_theme() {
+        use crate::theme::{Theme, ThemeMode};
+        let rt = Runtime::new();
+        let w = WindowId::new(1);
+        rt.register_window(w);
+        let _ = rt.take_dirty(w);
+
+        // 预设模式：直接应用对应 token 集
+        rt.set_theme_mode(ThemeMode::Dark);
+        assert_eq!(rt.theme(), Theme::dark());
+        assert_eq!(rt.theme_mode(), ThemeMode::Dark);
+        assert!(rt.take_dirty(w).contains(Dirty::VIEW), "换主题 ⇒ 重跑 view");
+
+        // System：先按已上报的 OS 状态（默认浅色）
+        rt.set_theme_mode(ThemeMode::System);
+        assert_eq!(rt.theme(), Theme::light());
+
+        // OS 转深色 ⇒ 自动跟随
+        rt.set_system_dark(true);
+        assert_eq!(rt.theme(), Theme::dark());
+        assert!(rt.take_dirty(w).contains(Dirty::VIEW));
+
+        // OS 转回浅色 ⇒ 再跟随
+        rt.set_system_dark(false);
+        assert_eq!(rt.theme(), Theme::light());
+
+        // 切到 Custom 后，OS 变化不再影响生效主题
+        rt.set_theme_mode(ThemeMode::Dark);
+        rt.set_theme(Theme::light());
+        assert_eq!(rt.theme_mode(), ThemeMode::Custom);
+        rt.set_system_dark(true);
+        assert_eq!(rt.theme(), Theme::light(), "自定义主题不受系统影响");
+    }
+
+    #[test]
+    fn system_mode_picks_up_an_already_reported_os_state() {
+        use crate::theme::{Theme, ThemeMode};
+        let rt = Runtime::new();
+        // 先上报 OS 深色（平台层在窗口创建前/后都可能上报）
+        rt.set_system_dark(true);
+        assert_eq!(rt.theme(), Theme::light(), "非 System 模式不跟随");
+        // 再切 System ⇒ 立即用上报值
+        rt.set_theme_mode(ThemeMode::System);
+        assert_eq!(rt.theme(), Theme::dark());
     }
 
     #[test]

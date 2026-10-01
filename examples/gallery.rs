@@ -76,6 +76,8 @@ struct Gallery {
     combo_choice: Signal<String>,
     open_menu: Signal<String>,
     sub_open: Signal<bool>,
+    /// 主题跟随系统（勾选 ⇒ `ThemeMode::System`）
+    follow_system: Signal<bool>,
     last_action: Signal<String>,
     wave: CustomCell,
     photo: std::sync::Arc<ImageData>,
@@ -236,13 +238,27 @@ impl ViewModel for Gallery {
             s.text("组件陈列馆").font_size(22.0);
             s.row(|r| {
                 r.gap(10.0);
+                r.align_items(FlexAlign::Center);
                 r.button("切换深色主题").on_tap(act(self, |s| {
+                    s.follow_system.set(false); // 手动切换 ⇒ 退出「跟随系统」
                     if s.rt.theme() == Theme::dark() {
                         s.rt.set_theme(Theme::light());
                     } else {
                         s.rt.set_theme(Theme::dark());
                     }
                 }));
+                // 跟随系统：勾选 ⇒ ThemeMode::System（OS 深浅色切换时自动换主题）
+                r.checkbox_bound(&self.follow_system).on(EventKind::Tapped, {
+                    let me = Rc::clone(self);
+                    move |_| {
+                        me.rt.set_theme_mode(if me.follow_system.get() {
+                            ThemeMode::System
+                        } else {
+                            ThemeMode::Light
+                        });
+                    }
+                });
+                r.text("跟随系统主题").font_size(13.0).color(self.rt.theme().text_secondary);
                 r.text("或悬停这里看 tooltip（悬停 0.6s 浮出，点我试试）")
                     .font_size(13.0)
                     .color(self.rt.theme().text_secondary)
@@ -400,6 +416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         combo_choice: Signal::new(&rt, String::new()),
         open_menu: Signal::new(&rt, String::new()),
         sub_open: Signal::new(&rt, false),
+        follow_system: Signal::new(&rt, false),
         last_action: Signal::new(&rt, String::new()),
         wave: custom::cell(Wave { taps: 0 }),
         rt: rt.clone(),

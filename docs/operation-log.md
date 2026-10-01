@@ -1185,3 +1185,56 @@ advance≈字号）。
 断言场景 op 序列里 thumb 的位置**在内容之后**。
 
 验证：`cargo test --workspace` 299 全绿；clippy 0 警告；pdfkit 重新编译通过。
+
+## 2026-10-01 · 主题支持完善：token 补全 + 跟随系统 + 整窗重绘
+
+M5 第六段已落地"token → 烘焙"的主题机制（`Theme` + `light()/dark()` + `Runtime::set_theme`
++ 每帧 `SceneOptions.theme` 兜底）。本轮补齐三处缺口：
+
+### 1. 三个 token 缺失项（此前硬编码在框架里）
+
+- `focus_ring`：焦点框描边（`scene::walk` 里原本是 `Color::rgba(80, 120, 220, 255)`）；
+- `backdrop`：Modal 遮罩（`LayerOpts::for_layer` 里的 `rgba(0, 0, 0, 80)` 现在只是**无主题兜底**，
+  由 `ViewBuf::layer` 用 token 覆盖）；
+- `shadow`：浮层投影（`view.rs` 弹层默认视觉里的 `rgba(0, 0, 0, 60)`）。
+
+深色下三者给了更合适的值（描边更亮、遮罩/投影更重）。
+
+### 2. 跟随系统（`ThemeMode`）
+
+`ThemeMode { Light, Dark, System, Custom }` —— 描述"主题从哪来"，与生效值 `Theme` 正交：
+
+- `Runtime::set_theme_mode(mode)`：预设模式应用对应 token 集；`System` 按已上报的 OS 状态
+  立即应用（未上报 ⇒ 浅色）；
+- `Runtime::set_system_dark(bool)`：平台层上报（winit `WindowEvent::ThemeChanged` + 窗口创建时的
+  `window.theme()`）；**只在 `System` 模式下换主题**，其余模式仅记录供之后切换使用；
+- `Runtime::set_theme(t)`：语义不变（自定义 token 集），模式转 `Custom` ⇒ 此后不再跟系统。
+
+平台接线（`platform/mod.rs`）：创建窗口后上报初始值、事件循环里转发 `ThemeChanged`。
+
+### 3. 换主题必须整窗重绘（真 bug）
+
+`set_theme` 只置 `Dirty::PAINT`、**没有登记整窗脏** ⇒ 窗口底色与"未被 token 覆盖的兜底色"
+（光标/选区/滚动条/焦点框）不会重画，留下旧底色残块。修复：`WindowCtx::frame` 的主题同步分支
+（仅在渲染器 token 快照**真的变了**时）调 `track.damage_whole_window()`。
+此前没暴露，是因为既有主题测试只在"自己重画过的那块"取样（按钮内部）。
+
+顺带：**框架自管层（tooltip）主题同步**——`align` 不会重建它，所以 `WindowCtx` 每帧
+（`update_tooltip` 开头）检查已浮出 tooltip 的底色/文字色是否与当前 token 一致，不一致就重上色并标脏。
+
+### gallery
+
+主题演示行加「跟随系统主题」开关（`checkbox_bound` + `Tapped` 里 `set_theme_mode`）；
+手动「切换深色主题」按钮会退出跟随，保持 UI 状态一致。
+
+### 测试 +5
+
+- `system_mode_follows_the_os_theme`（reactive）：预设 / System / Custom 三态与 OS 变化的行为；
+- `system_mode_picks_up_an_already_reported_os_state`：先上报 OS 深色、再切 System ⇒ 立即深色；
+- `system_theme_mode_follows_the_os_and_repaints_the_window`（app，像素级）：OS 转深色 ⇒
+  view 重跑 + 窗口底色跟随；
+- `layer_defaults_use_theme_tokens`（view）：Modal 遮罩 = `theme.backdrop`、弹层投影 = `theme.shadow`；
+- `focus_ring_uses_the_theme_token`（widgets）：焦点框描边 = `theme.focus_ring`；
+  tooltip 主题同步并入既有 `tooltip_opens_after_hover_delay_and_closes_on_leave`。
+
+验证：`cargo test --lib` 284 全绿；`cargo clippy --lib --examples` 0 警告；gallery 编译通过。

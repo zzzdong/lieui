@@ -497,7 +497,7 @@ impl SceneBuilder {
         // 节点自身内容（按 `Kind` 枚举分派，见 `widgets::draw`）
         crate::widgets::draw(&mut self.text, track, id, transform, cull, out, &opts.theme);
 
-        // 焦点框（键盘聚焦才画 —— `FocusState` 的存在意义）
+        // 焦点框（键盘聚焦才画 —— `FocusState` 的存在意义）；颜色走主题 token
         if opts.focus_ring
             && n.focus_state == FocusState::Keyboard
             && n.interaction.focused
@@ -508,7 +508,7 @@ impl SceneBuilder {
                     rect: r,
                     radius: n.paint.border_radius,
                     width: 2.0,
-                    color: Color::rgba(80, 120, 220, 255),
+                    color: opts.theme.focus_ring,
                     transform,
                 });
             }

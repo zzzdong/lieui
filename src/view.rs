@@ -575,6 +575,10 @@ impl ViewBuf {
         let rid = self.roots.len() as u32;
         let mut opts = LayerOpts::for_layer(layer);
         configure(&mut opts);
+        // Modal 遮罩走主题 token（`LayerOpts::for_layer` 里的默认值只是无主题时的兜底）
+        if matches!(layer, Layer::Modal) {
+            opts.backdrop = Some(self.theme().backdrop);
+        }
 
         // 弹层根的默认视觉：不透明底 + 边框 + 投影 + 内边距。
         // 此前是全透明的 Box——弹层内容直接叠在下层内容上，几乎不可读（M6 反馈）。
@@ -585,7 +589,7 @@ impl ViewBuf {
                 .background(t.input_background)
                 .border(1.0, t.control_border)
                 .radius(6.0)
-                .shadow(ShadowSpec::new(0.0, 4.0, 12.0, 2.0, Color::rgba(0, 0, 0, 60)));
+                .shadow(ShadowSpec::new(0.0, 4.0, 12.0, 2.0, t.shadow));
             n.layout = n
                 .layout
                 .clone()
@@ -1013,6 +1017,37 @@ mod tests {
             _ => panic!(),
         }
         assert_eq!(a.text.spec.font_family, crate::icon::ICON_FONT_FAMILY);
+    }
+
+    /// 浮层的两处"框架默认视觉"走主题 token：Modal 遮罩 = `theme.backdrop`、
+    /// 弹层投影色 = `theme.shadow`（此前是硬编码的黑）。
+    #[test]
+    fn layer_defaults_use_theme_tokens() {
+        let dark = crate::theme::Theme::dark();
+        let mut v = ViewBuf::new();
+        v.set_theme(dark);
+        v.begin();
+        v.text("anchor").key("anchor");
+        v.popup_at("anchor", Placement::Below, |p| {
+            p.text("popup");
+        });
+        v.modal(|m| {
+            m.text("modal");
+        });
+
+        let popup = v.roots.iter().find(|r| r.layer == Layer::Popup).unwrap();
+        let shadow = v.nodes[popup.node as usize]
+            .paint
+            .shadow
+            .expect("弹层根有投影");
+        assert_eq!(shadow.color, dark.shadow, "投影色 = theme.shadow");
+
+        let modal = v.roots.iter().find(|r| r.layer == Layer::Modal).unwrap();
+        assert_eq!(
+            modal.opts.backdrop,
+            Some(dark.backdrop),
+            "遮罩 = theme.backdrop"
+        );
     }
 
     #[test]

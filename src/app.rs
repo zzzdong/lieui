@@ -450,8 +450,12 @@ impl WindowCtx {
             ..Default::default()
         };
 
-        // ⓪ 主题同步：全局主题变了 ⇒ 渲染器换 token 快照。
+        // ⓪ 主题同步：全局主题变了 ⇒ 渲染器换 token 快照 + **整窗重绘**。
         // 窗口底色仅在"未显式指定"时跟随主题（`WindowConfig.background` 优先）。
+        //
+        // 为什么要整窗脏：换主题影响的不只是"自己有 paint 脏的节点"——窗口底色、以及画面里
+        // 未被 token 覆盖的兜底色（光标/选区/滚动条/焦点框等）都会变；只靠既有脏矩形会留下
+        // 旧底色的残块（此前 `set_theme` 只置 `Dirty::PAINT`，底色没被重画）。
         let theme = rt.theme();
         if self.renderer.options_mut().theme != theme {
             let bg_follows = !self.explicit_background;
@@ -460,6 +464,7 @@ impl WindowCtx {
             if bg_follows {
                 opts.background = theme.window_background;
             }
+            self.track.damage_whole_window();
         }
 
         // ① 响应式回路：任何 Signal 变更都只置 VIEW，这里统一消费一次（批处理免费）
@@ -691,8 +696,35 @@ impl WindowCtx {
         }
     }
 
+    /// 已浮出的 tooltip 同步主题配色。
+    ///
+    /// tooltip 层是**框架自管层**（`align` 不会删除它，也不会重建内容），所以主题切换后
+    /// 必须在这里补一次上色，否则它一直挂着旧主题的底色/文字色。
+    fn sync_tooltip_theme(&mut self) {
+        let theme = self.renderer.options().theme;
+        let Some(rid) = self.tooltip.as_ref().and_then(|s| s.layer) else {
+            return;
+        };
+        let Some(node) = self.track.root(rid).map(|r| r.node) else {
+            return;
+        };
+        let changed = self.track.get(node).is_some_and(|n| {
+            n.paint.background_color != Some(theme.tooltip_background)
+                || n.text.color != theme.tooltip_text
+        });
+        if !changed {
+            return;
+        }
+        if let Some(n) = self.track.get_mut(node) {
+            n.paint.background_color = Some(theme.tooltip_background);
+            n.text.color = theme.tooltip_text;
+        }
+        self.track.mark_paint_dirty(node);
+    }
+
     /// 每帧推进 tooltip 会话（到时浮出；目标失效/文本消失 ⇒ 收回）。
     pub fn update_tooltip(&mut self, now: Instant) {
+        self.sync_tooltip_theme();
         let theme = self.renderer.options().theme;
         let mut open: Option<(NodeId, String)> = None;
         let mut close: Option<crate::track::RootId> = None;
@@ -3349,6 +3381,64 @@ mod tests {
 
     // ─────────────── M5：主题 ───────────────
 
+    /// 跟随系统：OS 深色上报 ⇒ 重跑 view + 窗口底色跟随（未显式指定底色时）
+    #[test]
+    fn system_theme_mode_follows_the_os_and_repaints_the_window() {
+        use crate::theme::ThemeMode;
+
+        struct Empty;
+        impl ViewModel for Empty {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("hi");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(60.0, 40.0), Empty);
+        app.frame_all();
+        let light = Theme::light();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            let bg = pixel(ctx, 5, 35); // 文字下方
+            assert_eq!(
+                bg,
+                opaque(
+                    light.window_background.r,
+                    light.window_background.g,
+                    light.window_background.b
+                ),
+                "默认浅色底"
+            );
+        }
+
+        // 切「跟随系统」：默认浅色不变
+        rt.set_theme_mode(ThemeMode::System);
+        app.frame_all();
+        assert_eq!(rt.theme(), Theme::light());
+
+        // OS 转深色 ⇒ 底色与控件一起跟随（view 重跑）
+        rt.set_system_dark(true);
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.view_ran, "系统主题变化 ⇒ view 重跑");
+        let dark = Theme::dark();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            let bg = pixel(ctx, 5, 35);
+            assert_eq!(
+                bg,
+                opaque(
+                    dark.window_background.r,
+                    dark.window_background.g,
+                    dark.window_background.b
+                ),
+                "跟随系统 ⇒ 窗口底色变深"
+            );
+        }
+    }
+
     #[test]
     fn theme_switch_recolors_the_controls_on_the_next_frame() {
         struct Btn;
@@ -3499,6 +3589,28 @@ mod tests {
                 crate::track::AnchorTarget::Node(t) => assert_eq!(*t, target, "锚到 hover 节点"),
                 other => panic!("tooltip 锚点应为 Node：{other:?}"),
             }
+        }
+
+        // 切换主题 ⇒ 已浮出的 tooltip 也要换色（框架自管层不会被 view 重建）
+        let dark = Theme::dark();
+        rt.set_theme(dark);
+        app.frame_all();
+        app.window_ctx_mut(id).unwrap().tick(&rt, now);
+        app.frame_all();
+        {
+            let w = app.window_ctx(id).unwrap();
+            let tip_root = w
+                .track()
+                .roots_of(crate::track::Layer::Tooltip)
+                .next()
+                .expect("主题切换不影响 tooltip 的存在");
+            let n = w.track().get(tip_root.node).unwrap();
+            assert_eq!(
+                n.paint.background_color,
+                Some(dark.tooltip_background),
+                "tooltip 底色跟随主题"
+            );
+            assert_eq!(n.text.color, dark.tooltip_text, "tooltip 文字色跟随主题");
         }
 
         // 移开 ⇒ 消失（align 不得回收框架自管层——消失必须来自会话本身）

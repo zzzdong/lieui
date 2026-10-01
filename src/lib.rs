@@ -95,7 +95,7 @@ pub mod prelude {
     pub use crate::input::InputEvent;
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
-    pub use crate::theme::Theme;
+    pub use crate::theme::{Theme, ThemeMode};
     pub use crate::track::{
         AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility,
     };

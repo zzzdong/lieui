@@ -663,6 +663,7 @@ impl LayerOpts {
                 focus: FocusPolicy::Dismissable,
             },
             Layer::Modal => Self {
+                // 无主题上下文的兜底；有主题时由 `ViewBuf::layer` 用 `theme.backdrop` 覆盖
                 backdrop: Some(Color::rgba(0, 0, 0, 80)),
                 blocks_below: true,
                 dismiss_on_outside_click: false,

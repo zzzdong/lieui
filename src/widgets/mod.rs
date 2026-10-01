@@ -1809,6 +1809,40 @@ mod tests {
         assert_eq!(dots.count(), 1, "只有选中的那项画圆点");
     }
 
+    /// 焦点框颜色走主题 token（此前是硬编码的蓝）
+    #[test]
+    fn focus_ring_uses_the_theme_token() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.add_root(Layer::Content, None, root);
+        let id = node(&mut t, Kind::Button { label: "ok".into() }, 60.0, 24.0);
+        {
+            let n = t.get_mut(id).unwrap();
+            n.interaction.focused = true;
+            n.focus_state = crate::track::FocusState::Keyboard;
+        }
+        t.append_child(root, id);
+        layout(&mut t, Size::new(200.0, 200.0));
+
+        let dark = crate::theme::Theme::dark();
+        let mut o = opts();
+        o.focus_ring = true;
+        o.theme = dark;
+        let scene = SceneBuilder::new().build(&t, &o, &[], true);
+        let borders: Vec<Color> = scene
+            .ops()
+            .iter()
+            .filter_map(|op| match op {
+                Op::Border { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            borders.contains(&dark.focus_ring),
+            "焦点框用主题 token：{borders:?}"
+        );
+    }
+
     #[test]
     fn shadow_is_offset_and_expanded() {
         let mut t = Track::new();

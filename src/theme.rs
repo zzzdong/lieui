@@ -5,16 +5,26 @@
 //! - `Theme` 是 [`Runtime`](crate::reactive::Runtime) 的普通字段（无 thread_local、无属性表/继承）；
 //! - `view()` 前，框架把主题**快照**注入 `ViewBuf`，DSL 构造 widget 时把 token **烘焙**进节点样式
 //!   （用户链式覆盖仍可赢）；
-//! - 少数绘制期颜色（光标/选区/滚动条/未覆盖的 accent 兜底）走 `SceneOptions.theme`，
-//!   由渲染管线每帧带上；
-//! - 切换主题 = `Runtime::set_theme` ⇒ 所有窗口重跑 `view()` + 全屏重绘。
-//!   （设计稿 §3.10 的原文方案，无额外机制。）
+//! - 少数绘制期颜色（光标/选区/滚动条/焦点框/未覆盖的 accent 兜底）走 `SceneOptions.theme`，
+//!   由渲染管线每帧带上；弹层遮罩与投影在层根创建时取 `backdrop` / `shadow` token；
+//! - 切换主题 = 所有窗口重跑 `view()`（重新烘焙）+ **整窗重绘**（底色与兜底色都可能变）；
+//! - 框架自管层（tooltip）由 `WindowCtx` 在主题变化后补一次上色（`align` 不会重建它）。
 //!
 //! ## 用法
 //!
 //! ```ignore
 //! let rt = Runtime::new();                 // 默认 light
-//! rt.set_theme(Theme::dark());             // 全局切换：重跑 view + 整窗重绘
+//! rt.set_theme(Theme::dark());             // 自定义/预设 token 集（模式转 Custom）
+//! rt.set_theme_mode(ThemeMode::System);    // 跟随系统深浅色（平台层上报）
+//! rt.set_theme_mode(ThemeMode::Light);     // 固定浅色
+//! ```
+//!
+//! `Theme` 是**可 Copy 的普通结构**——定制主题就是改字段（如只换 accent）：
+//!
+//! ```ignore
+//! let mut t = Theme::dark();
+//! t.accent = Color::new(255, 120, 40);
+//! rt.set_theme(t);
 //! ```
 
 use lieui_geom::Color;
@@ -48,8 +58,29 @@ pub struct Theme {
     /// 悬停提示（tooltip）底色与文字
     pub tooltip_background: Color,
     pub tooltip_text: Color,
+    /// 键盘焦点框描边
+    pub focus_ring: Color,
+    /// Modal 遮罩（半透明，压在内容之上）
+    pub backdrop: Color,
+    /// 浮层投影色（半透明）
+    pub shadow: Color,
     /// 控件圆角半径
     pub control_radius: f32,
+}
+
+/// 主题模式：描述**主题从哪来**（与 [`Theme`] 的"生效值"正交）。
+///
+/// - `Light` / `Dark`：用内置预设；
+/// - `System`：跟随操作系统深色模式（平台层上报，见 `Runtime::set_system_dark`；
+///   OS 状态未知时按浅色）；
+/// - `Custom`：由 `Runtime::set_theme` 显式给出，**不受系统影响**。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ThemeMode {
+    #[default]
+    Light,
+    Dark,
+    System,
+    Custom,
 }
 
 impl Theme {
@@ -71,6 +102,9 @@ impl Theme {
             scrollbar_thumb_drag: Color::rgba(90, 90, 90, 170),
             tooltip_background: Color::rgba(0x1f, 0x29, 0x37, 0xf2),
             tooltip_text: Color::WHITE,
+            focus_ring: Color::rgba(80, 120, 220, 255),
+            backdrop: Color::rgba(0, 0, 0, 80),
+            shadow: Color::rgba(0, 0, 0, 60),
             control_radius: 4.0,
         }
     }
@@ -93,6 +127,10 @@ impl Theme {
             scrollbar_thumb_drag: Color::rgba(200, 200, 200, 170),
             tooltip_background: Color::rgba(0x0b, 0x0f, 0x14, 0xf5),
             tooltip_text: Color::new(230, 230, 230),
+            // 深色下描边更亮才看得见；遮罩/投影更重才压得住亮内容
+            focus_ring: Color::rgba(110, 150, 250, 255),
+            backdrop: Color::rgba(0, 0, 0, 120),
+            shadow: Color::rgba(0, 0, 0, 140),
             control_radius: 4.0,
         }
     }

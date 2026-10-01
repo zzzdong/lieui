@@ -244,6 +244,12 @@ impl Runner {
         };
         // IME：允许系统输入法（M5 的 Input 组件消费 Commit/Preedit）
         window.set_ime_allowed(true);
+        // 上报初始的系统深浅色（`ThemeMode::System` 据此立即选对预设）
+        if let Some(t) = window.theme() {
+            self.app
+                .runtime()
+                .set_system_dark(matches!(t, winit::window::Theme::Dark));
+        }
 
         let context = self.context.get_or_insert_with(|| {
             softbuffer::Context::new(Rc::clone(&window)).expect("softbuffer context")
@@ -586,6 +592,11 @@ impl Runner {
                     self.app.close_window(id);
                     self.destroy_window(id);
                 }
+            }
+
+            // 系统深浅色切换：`ThemeMode::System` 时立即换主题（其余模式只记录）
+            WindowEvent::ThemeChanged(t) => {
+                rt.set_system_dark(matches!(t, winit::window::Theme::Dark));
             }
 
             WindowEvent::Resized(size) => {
