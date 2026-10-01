@@ -991,3 +991,26 @@ Radio 的组互斥**不遍历兄弟、不发命令**：点击只把本项 `value
 ### 当前规模
 
 `lieui` 约 **13.1k 行**（含约 5.4k 单测）⇒ 有效实现约 7.7k 行。
+
+## M5 修复：整窗回退把脏区外元素擦成底色（2026-10-01）
+
+**症状**（gallery 实测）：拖「嵌套滚动区」滚动条时，页面其他元素整片消失（只剩滚动内容 + 底色）。
+
+**根因**：`Renderer::render` 里**场景剔除**与**光栅批次**各算各的——场景按原始脏区剔除（脏区外的
+原语全部不进绘制列表），而 `Rasterizer::rasterize` 内部的 `damage_batches` 在**碎片 >8 或面积
+>45%** 时把批次退化成整窗。嵌套滚动区 16 行内容一滚 ⇒ 每行旧∪新 32 个脏矩形 ⇒ 触发整窗回退 ⇒
+用"只剩滚动元素的场景"重画整窗 ⇒ 页面其他元素被擦成底色。行数少的滚动容器不触发（≤8 碎片），
+所以只有嵌套区（16 行）必现。
+
+**修复**（`render/mod.rs`）：批次**先**算——`damage_batches` 判定退化整窗 ⇒ 场景也不剔除
+（`scene_all`）；场景剔除矩形改用**批次反推的逻辑矩形**（floor/ceil 取整外扩），保证"实际重画的
+面积 ⊆ 场景包含的面积"，顺带消掉 1px 边缘擦除。脏区全在窗外 ⇒ 提前返回零统计。
+
+**回归测试** `render::tests::full_window_fallback_does_not_erase_elements_outside_damage`：
+滚动容器（10 行蓝条）+ 右侧红箱（与滚动脏矩形零交集），滚 20px 产生 >8 碎片 ⇒ 断言红箱像素
+不被擦、滚动内容正确位移。
+
+**顺带清零** 8 条既有 clippy 警告（needless_borrow ×2 / match_single_binding / collapsible_if ×2 /
+clone_on_copy / unnecessary_fallible_conversions ×2），均在本次改动之外的一行修复。
+
+验证：`cargo test --lib` 266 全绿；`cargo clippy --lib --examples` 0 警告。

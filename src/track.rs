@@ -1167,14 +1167,14 @@ impl Track {
     /// 会出现"滚动条动了、内容没动"。变化时同时标记 `needs_scroll_event`
     /// （帧驱动据此派发 `ScrollChanged`；Track 无事件队列，只排队，派发归 app 层）。
     pub fn set_scroll_offset(&mut self, id: NodeId, v: (f32, f32)) -> bool {
-        if let Some(n) = self.get_mut(id) {
-            if n.scroll_offset != v {
-                n.scroll_offset = v;
-                n.needs_scroll_event = true;
-                // 容器（尺寸确定 ⇒ 是边界）标记重排 ⇒ 其子树按新偏移平移
-                self.mark_layout_dirty(id);
-                return true;
-            }
+        if let Some(n) = self.get_mut(id)
+            && n.scroll_offset != v
+        {
+            n.scroll_offset = v;
+            n.needs_scroll_event = true;
+            // 容器（尺寸确定 ⇒ 是边界）标记重排 ⇒ 其子树按新偏移平移
+            self.mark_layout_dirty(id);
+            return true;
         }
         false
     }

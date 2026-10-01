@@ -338,7 +338,8 @@ impl Event {
         }
     }
 
-    /// 滚轮
+    /// 滚轮（`delta` 正 = 向上：滚轮上推 / 触控板上滑 ⇒ offset 减小，见
+    /// `input::default_wheel_scroll`）
     pub fn wheel(pos: Point, delta: (f32, f32)) -> Self {
         Event::Wheel { pos, delta }
     }

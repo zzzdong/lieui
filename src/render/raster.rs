@@ -321,8 +321,8 @@ impl Rasterizer {
         let dx = dst.x + (dst.width - dw) * 0.5;
         let dy = dst.y + (dst.height - dh) * 0.5;
 
-        let cw = usize::try_from(self.scratch.width()).unwrap_or(0);
-        let chh = usize::try_from(self.scratch.height()).unwrap_or(0);
+        let cw = usize::from(self.scratch.width());
+        let chh = usize::from(self.scratch.height());
         let x0 = dx.floor().max(0.0) as usize;
         let y0 = dy.floor().max(0.0) as usize;
         let x1 = ((dx + dw).ceil() as usize).min(cw);

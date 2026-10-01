@@ -833,7 +833,9 @@ pub(crate) fn draw(
             }
         }
 
-        Kind::Slider { value, .. } => {
+        Kind::Slider {
+            value, min, max, ..
+        } => {
             let track_h = 4.0;
             let track = Rect::new(
                 rect.x,
@@ -843,7 +845,13 @@ pub(crate) fn draw(
             );
             let accent = n.paint.background_color.unwrap_or(theme.accent);
             let knob = 12.0;
-            let x = rect.x + (rect.width - knob).max(0.0) * value.clamp(0.0, 1.0);
+            // 归一化到 min..max（0..1 范围外也能画对；max <= min 时退化到 0）
+            let t = if *max > *min {
+                ((value - *min) / (*max - *min)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let x = rect.x + (rect.width - knob).max(0.0) * t;
             push(
                 out,
                 cull,
@@ -1255,6 +1263,38 @@ mod tests {
             })
             .unwrap();
         assert!((knob.x - (100.0 - 12.0) * 0.5).abs() < 0.01, "滑块在中点：{knob:?}");
+    }
+
+    /// 回归：绘制曾把 value 硬归一化到 0..1，范围 0..10 时值 ≥1 就顶死最右
+    /// （gallery 音量滑块的症状）。0..10 范围取中点 ⇒ 滑块必须仍在中点。
+    #[test]
+    fn slider_respects_a_non_unit_range() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.add_root(Layer::Content, None, root);
+        let id = node(
+            &mut t,
+            Kind::Slider {
+                value: 5.0,
+                min: 0.0,
+                max: 10.0,
+                dragging: false,
+            },
+            100.0,
+            20.0,
+        );
+        t.append_child(root, id);
+        layout(&mut t, Size::new(200.0, 200.0));
+
+        let knob = build(&t)
+            .ops()
+            .iter()
+            .find_map(|op| match op {
+                Op::Rect { rect, radius, .. } if (*radius - 6.0).abs() < 1e-6 => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        assert!((knob.x - (100.0 - 12.0) * 0.5).abs() < 0.01, "值 5/10 ⇒ 滑块在中点：{knob:?}");
     }
 
     #[test]

@@ -190,7 +190,7 @@ impl Runtime {
 
     /// 当前主题（快照）。设计 §3.10：`Theme` 是 App 的普通字段。
     pub fn theme(&self) -> crate::theme::Theme {
-        self.inner.theme.borrow().clone()
+        *self.inner.theme.borrow()
     }
 
     /// 切换主题：所有窗口重跑 `view()`（描述里的颜色随新主题重新烘焙）+ 整窗重绘。

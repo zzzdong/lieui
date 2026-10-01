@@ -477,7 +477,7 @@ impl WindowCtx {
             }
             let offset = self.track.scroll_offset(sc_id);
             let path = vec![sc_id];
-            self.dispatch(&rt, &path, &Event::Scroll { offset });
+            self.dispatch(rt, &path, &Event::Scroll { offset });
         }
 
         // ③ 光栅化：消费脏区（只重画受影响的行带，其余像素保留上一帧）
@@ -1398,7 +1398,7 @@ mod tests {
             InputEvent::Wheel {
                 pointer: PointerId(0),
                 pos: Point::new(10.0, 50.0),
-                delta: (0.0, 60.0),
+                delta: (0.0, -60.0), // 负 = 向下滚 ⇒ offset 增大
             },
         );
         assert!(out.scrolled, "无处理器认领 ⇒ 框架默认滚动");
@@ -2992,7 +2992,7 @@ mod tests {
                 InputEvent::Wheel {
                     pointer: PointerId(0),
                     pos: Point::new(60.0, 120.0),
-                    delta: (0.0, 240.0),
+                    delta: (0.0, -240.0), // 负 = 向下滚一屏
                 },
             );
         }

@@ -314,6 +314,10 @@ fn update_hover_path(
 
 /// 滚轮的**框架默认行为**：沿命中链找最近的（可继续滚动的）滚动容器。
 ///
+/// `delta` 约定与 winit 一致：**正 y = 滚轮向上推 / 触控板向**上**滑**（Windows
+/// `WM_MOUSEWHEEL` 正值；macOS 的"自然滚动"方向由系统换算后同样落在此约定）。
+/// 向上 ⇒ 视图向内容**开头**走 ⇒ **offset 减小**，所以这里做的是 `offset -= delta`。
+///
 /// 返回是否真的滚了；到边界时继续向上找（嵌套滚动链），找不到返回 `false`
 /// ——调用方（`WindowCtx::pointer`）只在"事件未被处理"时调用它。
 pub fn default_wheel_scroll(track: &mut Track, path: &[NodeId], delta: (f32, f32)) -> bool {
@@ -330,8 +334,8 @@ pub fn default_wheel_scroll(track: &mut Track, path: &[NodeId], delta: (f32, f32
             continue;
         }
         let (ox, oy) = track.scroll_offset(id);
-        let nx = (ox + delta.0).clamp(0.0, max_x);
-        let ny = (oy + delta.1).clamp(0.0, max_y);
+        let nx = (ox - delta.0).clamp(0.0, max_x);
+        let ny = (oy - delta.1).clamp(0.0, max_y);
         if (nx - ox).abs() > 1e-4 || (ny - oy).abs() > 1e-4 {
             track.set_scroll_offset(id, (nx, ny));
             return true;
@@ -618,14 +622,18 @@ mod tests {
         let path = s.events[0].0.clone();
         assert_eq!(s.events[0].1.kind(), EventKind::PointerWheelChanged);
 
-        // 调用方在"未被处理"后执行默认行为
-        assert!(default_wheel_scroll(&mut t, &path, (0.0, 30.0)));
+        // 调用方在"未被处理"后执行默认行为（正 delta = 向上 ⇒ 顶部滚不动）
+        assert!(!default_wheel_scroll(&mut t, &path, (0.0, 30.0)), "已在顶部");
+        assert_eq!(t.scroll_offset(root), (0.0, 0.0));
+
+        // 向下滚（负 delta）⇒ offset 增大
+        assert!(default_wheel_scroll(&mut t, &path, (0.0, -30.0)));
         assert_eq!(t.scroll_offset(root), (0.0, 30.0));
 
-        // 到边界后不再滚
-        assert!(default_wheel_scroll(&mut t, &path, (0.0, 1000.0)));
+        // 到底部后不再滚
+        assert!(default_wheel_scroll(&mut t, &path, (0.0, -1000.0)));
         assert_eq!(t.scroll_offset(root), (0.0, 300.0));
-        assert!(!default_wheel_scroll(&mut t, &path, (0.0, 10.0)), "已在底部");
+        assert!(!default_wheel_scroll(&mut t, &path, (0.0, -10.0)), "已在底部");
     }
 
     #[test]

@@ -245,11 +245,9 @@ impl Runner {
         // IME：允许系统输入法（M5 的 Input 组件消费 Commit/Preedit）
         window.set_ime_allowed(true);
 
-        let context = match self.context.get_or_insert_with(|| {
+        let context = self.context.get_or_insert_with(|| {
             softbuffer::Context::new(Rc::clone(&window)).expect("softbuffer context")
-        }) {
-            c => c,
-        };
+        });
         let surface = match softbuffer::Surface::new(context, Rc::clone(&window)) {
             Ok(s) => s,
             Err(e) => {
@@ -524,10 +522,10 @@ impl Runner {
                 }
             }
             'v' => {
-                if let Some(text) = clipboard_get() {
-                    if let Some(w) = self.app.window_ctx_mut(id) {
-                        w.track_mut().input_insert(focus, &text);
-                    }
+                if let Some(text) = clipboard_get()
+                    && let Some(w) = self.app.window_ctx_mut(id)
+                {
+                    w.track_mut().input_insert(focus, &text);
                 }
             }
             _ => return false,
@@ -660,6 +658,8 @@ impl Runner {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // 符号原样透传：winit 约定正 y = 滚轮上推（各平台一致，macOS 的
+                // "自然滚动"由系统换算）。消费端见 `input::default_wheel_scroll`。
                 let d = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x * 48.0, y * 48.0),
                     MouseScrollDelta::PixelDelta(p) => {
