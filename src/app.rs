@@ -1405,10 +1405,28 @@ mod tests {
         let w = app.window_ctx(id).unwrap();
         assert_eq!(w.track().scroll_offset(root), (0.0, 60.0));
 
-        // 滚动只重绘，不重排
+        // 记一个子节点（row 5）的滚动前位置
+        let y_before = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let rows = t.children(root);
+            crate::layout::rect_of(t, rows[5]).y
+        };
+
+        // 滚动 ⇒ 边界重排（子树按新偏移平移）+ 重绘：内容真的动
         let st = app.frame_all()[0].1.clone();
-        assert!(!st.layout.ran, "滚动不触发重排");
+        assert!(st.layout.ran, "滚动触发边界重排（子树平移到新偏移）");
         assert!(st.paint_pending);
+        let y_after = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let rows = t.children(root);
+            crate::layout::rect_of(t, rows[5]).y
+        };
+        assert!(
+            (y_after - (y_before - 60.0)).abs() < 0.5,
+            "内容随偏移上移 60：{y_before} → {y_after}"
+        );
     }
 
     // ─────────────── M3：光栅化 / 脏区 ───────────────
@@ -3014,6 +3032,84 @@ mod tests {
         assert_eq!(labels.last().map(String::as_str), Some("Item 999"), "{labels:?}");
     }
 
+    #[test]
+    fn popup_layer_draws_an_opaque_surface() {
+        let (rt, mut app, _, id) = picker();
+        let btn = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .children(app.window_ctx(id).unwrap().content_root().unwrap())[0];
+
+        tap_node(&mut app, &rt, id, btn);
+        app.frame_all();
+        let popup = popup_root_of(&app, id).expect("弹层出现");
+        let pr = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), popup);
+
+        // 采样弹层的内边距区域（无内容覆盖）⇒ 应是不透明的弹层底色，而非窗口底色
+        let ctx = app.window_ctx(id).unwrap();
+        let p = pixel(ctx, (pr.x + 3.0) as u16, (pr.y + 3.0) as u16);
+        assert_eq!(
+            p,
+            opaque(
+                Theme::light().input_background.r,
+                Theme::light().input_background.g,
+                Theme::light().input_background.b
+            ),
+            "弹层底色 = 主题 input_background（不透明）：{p:?}"
+        );
+    }
+
+    #[test]
+    fn hover_repaints_the_button_with_its_hover_color() {
+        struct Btn;
+        impl ViewModel for Btn {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.button("B");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(200.0, 100.0), Btn);
+        app.frame_all();
+        let btn = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .children(app.window_ctx(id).unwrap().content_root().unwrap())[0];
+        let r = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), btn);
+        // 采样点：左缘内侧（避开圆角与文字）
+        let (sx, sy) = ((r.x + 5.0) as u16, (r.center().y) as u16);
+
+        let before = { pixel(app.window_ctx(id).unwrap(), sx, sy) };
+
+        // 指针移到按钮上 ⇒ hover 态 ⇒ 重绘为 hover 色
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos: r.center(),
+            },
+        );
+        app.frame_all();
+
+        let after = { pixel(app.window_ctx(id).unwrap(), sx, sy) };
+        let t = Theme::light();
+        assert_eq!(
+            before,
+            opaque(t.control.r, t.control.g, t.control.b),
+            "常态 = control"
+        );
+        assert_eq!(
+            after,
+            opaque(t.control_hover.r, t.control_hover.g, t.control_hover.b),
+            "hover = control_hover"
+        );
+    }
+
     // ─────────────── M6：开关 / 单选 ───────────────
 
     struct Toggles {
@@ -3269,6 +3365,85 @@ mod tests {
         assert_eq!(caret2, 0);
         assert!((scroll2 - 0.0).abs() < 0.01, "Home ⇒ 滚动回 0：{scroll2}");
         assert_eq!(vm.name.get().len(), 40);
+    }
+
+    // ─────────────── M6 修复回归：滚动平移 + 滚动容器内拖滑块 ───────────────
+
+    #[test]
+    fn scrolling_translates_the_content_on_the_next_layout() {
+        use crate::track::Layer;
+
+        let mut t = crate::track::Track::new();
+        let sc = t.create(Kind::Box, None);
+        {
+            let n = t.get_mut(sc).unwrap();
+            n.layout.dim = [200.0, 200.0];
+            n.layout.overflow_scroll = true;
+        }
+        t.add_root(Layer::Content, None, sc);
+        let child = t.create(Kind::Box, None);
+        t.get_mut(child).unwrap().layout.dim = [100.0, 400.0];
+        t.append_child(sc, child);
+        crate::layout::layout(&mut t, Size::new(400.0, 400.0));
+        let y0 = crate::layout::rect_of(&t, child).y;
+
+        // 滚动 100 ⇒ 下一次布局把子原点平移 -100
+        assert!(t.set_scroll_offset(sc, (0.0, 100.0)));
+        crate::layout::layout(&mut t, Size::new(400.0, 400.0));
+        let y1 = crate::layout::rect_of(&t, child).y;
+        assert!((y1 - (y0 - 100.0)).abs() < 0.5, "内容随偏移平移：{y0} → {y1}");
+    }
+
+    #[test]
+    fn slider_inside_scroll_container_drags() {
+        struct Holder {
+            vol: Signal<f32>,
+        }
+        impl ViewModel for Holder {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.scroll(|s| {
+                    s.width(300.0);
+                    s.height(200.0);
+                    s.slider_bound(&self.vol, 0.0, 10.0);
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Holder {
+            vol: Signal::new(&rt, 0.0),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+
+        let scroll = app.window_ctx(id).unwrap().content_root().unwrap();
+        let slider = app.window_ctx(id).unwrap().track().children(scroll)[0];
+        let r = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), slider);
+
+        // 按下并拖到滑块右端
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: r.center(),
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Move {
+                    pointer: PointerId(0),
+                    pos: Point::new(r.right() - 2.0, r.center().y),
+                },
+            );
+        }
+        assert!(vm.vol.get() > 9.0, "拖到右端 ⇒ 音量接近 10：{}", vm.vol.get());
     }
 
     #[test]

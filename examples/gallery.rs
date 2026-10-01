@@ -109,7 +109,8 @@ impl Gallery {
                 let it = Rc::clone(me);
                 let label = item.to_string();
                 p.text(item.to_string())
-                    .padding(6.0)
+                    .hover_background(me.rt.theme().control_hover)
+                    .radius(3.0)
                     .width(110.0)
                     .on_tap(move || {
                         it.last_action.set(label.clone());
@@ -144,6 +145,8 @@ impl Gallery {
                 let it = Rc::clone(me);
                 let label = opt.to_string();
                 p.text(opt.to_string())
+                    .hover_background(me.rt.theme().control_hover)
+                    .radius(3.0)
                     .padding(6.0)
                     .width(150.0)
                     .on_tap(move || {
@@ -154,11 +157,10 @@ impl Gallery {
         });
     }
 
-    /// 分区分隔线（主题色细线）
+    /// 分区分隔线（主题色细线，随内容列拉伸）
     fn divider(&self, v: &mut ViewBuf) {
         v.row(|r| {
             r.height(1.0);
-            r.width(340.0);
             r.background(self.rt.theme().control_border);
         });
     }
@@ -184,11 +186,13 @@ impl ViewModel for Gallery {
                 .color(self.rt.theme().text_secondary);
             });
 
-            // ── 可滚动主体：各组件分区 ──
+            // ── 可滚动主体：固定宽度内容列，水平居中 ──
             c.scroll(|s| {
                 s.expand(true);
+                s.align_items(FlexAlign::Center);
+                s.column(|s| {
+                s.width(360.0);
                 s.gap(16.0);
-                s.align_items(FlexAlign::Start);
 
             // ── 标题 + 主题切换 ──
             s.text("组件陈列馆").font_size(22.0);
@@ -253,7 +257,7 @@ impl ViewModel for Gallery {
             // ── 图片 ──
             self.divider(s);
             s.text("图片（程序生成，contain 缩放）").font_size(16.0);
-            s.image(self.photo.clone());
+            s.image(self.photo.clone()).width(240.0).height(120.0);
 
             // ── 自绘波形 ──
             self.divider(s);
@@ -274,6 +278,7 @@ impl ViewModel for Gallery {
             });
 
             s.text("Tab 可在按钮 / 滑块 / 复选框 / 开关 / 单选 / 输入框之间移动焦点").font_size(13.0);
+                });
             });
         });
 

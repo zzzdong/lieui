@@ -1160,16 +1160,19 @@ impl Track {
         self.get(id).map(|n| n.scroll_offset).unwrap_or((0.0, 0.0))
     }
 
-    /// 写入滚动偏移（返回是否变化）；变化的只有绘制，不需要重排。
+    /// 写入滚动偏移（返回是否变化）。
     ///
-    /// 变化时给容器标记 `needs_scroll_event` —— 帧驱动据此派发 `ScrollChanged`
-    /// （Track 无事件队列，只排队；派发归 `app` 层）。
+    /// 子原点的 -offset 平移是**布局时烘焙**的（`write_back`）——所以偏移变化必须
+    /// 标 LAYOUT（容器作为边界重排子树，子节点按新偏移重新平移），只标 PAINT
+    /// 会出现"滚动条动了、内容没动"。变化时同时标记 `needs_scroll_event`
+    /// （帧驱动据此派发 `ScrollChanged`；Track 无事件队列，只排队，派发归 app 层）。
     pub fn set_scroll_offset(&mut self, id: NodeId, v: (f32, f32)) -> bool {
         if let Some(n) = self.get_mut(id) {
             if n.scroll_offset != v {
                 n.scroll_offset = v;
                 n.needs_scroll_event = true;
-                self.mark_paint_dirty(id);
+                // 容器（尺寸确定 ⇒ 是边界）标记重排 ⇒ 其子树按新偏移平移
+                self.mark_layout_dirty(id);
                 return true;
             }
         }
@@ -2012,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_offset_change_marks_paint_only() {
+    fn scroll_offset_change_marks_layout_and_paint() {
         let mut t = Track::new();
         let id = t.create(Kind::Box, None);
         t.get_mut(id).unwrap().flags = Flags::empty();
@@ -2022,7 +2025,8 @@ mod tests {
 
         let f = t.get(id).unwrap().flags;
         assert!(f.contains(Flags::PAINT_DIRTY));
-        assert!(!f.contains(Flags::MEASURE_DIRTY), "滚动不应触发重排");
+        // 偏移平移是布局时烘焙的 ⇒ 滚动必须标重排（子树按新偏移平移）
+        assert!(f.contains(Flags::MEASURE_DIRTY), "滚动触发边界重排");
     }
 
     #[test]

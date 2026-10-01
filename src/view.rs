@@ -537,6 +537,26 @@ impl ViewBuf {
         let rid = self.roots.len() as u32;
         let mut opts = LayerOpts::for_layer(layer);
         configure(&mut opts);
+
+        // 弹层根的默认视觉：不透明底 + 边框 + 投影 + 内边距。
+        // 此前是全透明的 Box——弹层内容直接叠在下层内容上，几乎不可读（M6 反馈）。
+        if matches!(layer, Layer::Popup | Layer::Tooltip) {
+            let t = *self.theme();
+            let n = self.node_mut(node);
+            n.paint = PaintStyle::new()
+                .background(t.input_background)
+                .border(1.0, t.control_border)
+                .radius(6.0)
+                .shadow(ShadowSpec::new(0.0, 4.0, 12.0, 2.0, Color::rgba(0, 0, 0, 60)));
+            n.layout = n
+                .layout
+                .clone()
+                .padding_left(6.0)
+                .padding_right(6.0)
+                .padding_top(6.0)
+                .padding_bottom(6.0);
+        }
+
         self.roots.push(DescRoot {
             node,
             layer,
