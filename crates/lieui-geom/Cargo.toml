@@ -1,0 +1,9 @@
+[package]
+name = "lieui-geom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "lieui 的基础几何与颜色类型（零依赖）"
+
+[dependencies]

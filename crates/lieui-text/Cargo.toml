@@ -1,0 +1,11 @@
+[package]
+name = "lieui-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "lieui 的文本测度与排版（parley 封装 + 缓存）"
+
+[dependencies]
+lieui-geom = { workspace = true }
+parley = { workspace = true }

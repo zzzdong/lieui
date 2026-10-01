@@ -1,0 +1,3351 @@
+//! 窗口与帧驱动（M1 骨架：**不含 winit、不含光栅化**）。
+//!
+//! 这一层把前面几块拼起来：
+//!
+//! ```text
+//! Signal::set ──▶ Runtime.dirty[window] |= VIEW        （只置位，不立即干活）
+//!                        │
+//!           App::frame_all() / WindowCtx::frame()
+//!                        ▼
+//!   ① dirty.VIEW   → begin_view → vm.view(&mut view_buf) → end_view → align()
+//!   ② dirty.LAYOUT → （M2：脏边界重排）——  M1 只报告"待重排"
+//!   ③ dirty.PAINT  → （M3：脏区光栅化）——  M1 只取走脏矩形
+//!   ④ dirty.PRESENT→ （M3：damage 上屏）
+//! ```
+//!
+//! 多窗口（设计 §3.14）：`Runtime` / `Signal` 是 **App 级共享**；`Track` / 描述缓冲 / 脏标志
+//! 是**每窗口一套**。`App` 通过 `Rc<dyn WindowView>` 擦除，所以**不同窗口可以是不同的 `ViewModel` 类型**，
+//! 连 `App` 本身都不带泛型。
+
+use std::any::Any;
+use std::rc::Rc;
+use std::time::Instant;
+
+use lieui_geom::{Rect, Size};
+
+use lieui_geom::Point;
+
+use crate::align::{AlignStats, align};
+use crate::cmd::{CmdBuf, apply_cmds};
+use crate::event::{Ctx, DispatchOutcome, Event, EventKind, EventView};
+use crate::focus;
+use crate::hit;
+use crate::input::{self, InputEvent};
+use crate::layout::{self, LayoutStats};
+use crate::reactive::{Dirty, Runtime};
+use crate::render::{RenderStats, Renderer};
+use crate::track::{FocusState, NodeId, Track};
+use crate::view::ViewBuf;
+use crate::window::WindowId;
+
+// ───────────────────────── 窗口配置 ─────────────────────────
+
+/// 窗口配置（M4 会补 icon / position / 主题 / 字体等）
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowConfig {
+    pub title: String,
+    pub size: Size,
+    pub min_size: Option<Size>,
+    pub max_size: Option<Size>,
+    /// 窗口底色（必须**不透明**：softbuffer 无 alpha 通道）。
+    /// `None` = 跟随主题的 `window_background`（`rt.set_theme` 时随之变化）；
+    /// 显式设置的底色**优先于主题**（主题切换不再改它）。
+    pub background: Option<lieui_geom::Color>,
+    pub resizable: bool,
+    pub decorations: bool,
+    pub always_on_top: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            title: "lieui".to_string(),
+            size: Size::new(800.0, 600.0),
+            min_size: None,
+            max_size: None,
+            background: None,
+            resizable: true,
+            decorations: true,
+            always_on_top: false,
+        }
+    }
+}
+
+impl WindowConfig {
+    pub fn background(mut self, c: lieui_geom::Color) -> Self {
+        self.background = Some(c);
+        self
+    }
+}
+
+impl WindowConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn title(mut self, t: impl Into<String>) -> Self {
+        self.title = t.into();
+        self
+    }
+
+    pub fn size(mut self, w: f32, h: f32) -> Self {
+        self.size = Size::new(w, h);
+        self
+    }
+
+    pub fn min_size(mut self, w: f32, h: f32) -> Self {
+        self.min_size = Some(Size::new(w, h));
+        self
+    }
+
+    pub fn max_size(mut self, w: f32, h: f32) -> Self {
+        self.max_size = Some(Size::new(w, h));
+        self
+    }
+
+    pub fn resizable(mut self, v: bool) -> Self {
+        self.resizable = v;
+        self
+    }
+
+    pub fn decorations(mut self, v: bool) -> Self {
+        self.decorations = v;
+        self
+    }
+
+    pub fn always_on_top(mut self, v: bool) -> Self {
+        self.always_on_top = v;
+        self
+    }
+}
+
+/// 关闭请求的裁决（`GettingFocus` 那种"返回值可取消"风格，不用闭包）
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum CloseAction {
+    #[default]
+    Close,
+    Cancel,
+}
+
+// ───────────────────────── 请求队列的便捷入口 ─────────────────────────
+
+/// `Ctx` 请求关窗的载荷
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CloseWindow(pub WindowId);
+
+/// 在 `update()` / `on_tick()` 里请求开一个新窗口（真窗口由平台层在下一帧创建）。
+///
+/// ```ignore
+/// fn on_tick(self: &Rc<Self>, cx: &mut Ctx, _now: Instant) {
+///     if self.need_about.get() {
+///         self.need_about.set(false);
+///         lieui::app::open_window(cx, WindowConfig::new().title("关于").size(320.0, 200.0), About::default());
+///     }
+/// }
+/// ```
+pub fn open_window(cx: &Ctx, cfg: WindowConfig, vm: impl ViewModel) {
+    cx.request::<(WindowConfig, Rc<dyn WindowView>)>((cfg, erased(Rc::new(vm))));
+}
+
+/// 请求关闭**当前**窗口（`CloseAction::Close` 之外的显式入口）
+pub fn close_self(cx: &Ctx) {
+    cx.request(CloseWindow(cx.window()));
+}
+
+// ───────────────────────── 外部数据 ─────────────────────────
+
+/// 外部来源推给 UI 线程的数据（PTY 输出、后台任务结果……）。
+///
+/// 必须 `Send`：它要能穿过 `RepaintHandle`（`EventLoopProxy`）从别的线程回到 UI 线程。
+pub struct ExternalData(Box<dyn Any + Send>);
+
+impl ExternalData {
+    pub fn new<T: Send + 'static>(v: T) -> Self {
+        Self(Box::new(v))
+    }
+
+    pub fn downcast<T: 'static>(self) -> Option<T> {
+        self.0.downcast::<T>().ok().map(|b| *b)
+    }
+
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for ExternalData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExternalData(..)")
+    }
+}
+
+// ───────────────────────── ViewModel ─────────────────────────
+
+/// 窗口视图模型：**一个窗口一个实例**（不同窗口可以是不同类型，见 §3.14）。
+///
+/// 约束（§3.3）：
+/// 1. `view()` **不在每帧跑**——挂载一次 + 每次 `Signal` 变更后再跑一次；
+/// 2. `view()` 必须**无副作用**，内部禁止 `Signal::set`（debug 下会 panic）；
+/// 3. 视图态（hover/滚动/编辑缓冲）不归 Model，由保留树持有。
+pub trait ViewModel: 'static {
+    /// 声明式：状态 → 描述。receiver 是 `&Rc<Self>`，让闭包能捕获 `Rc<Self>` 调自己的命令方法。
+    fn view(self: &Rc<Self>, v: &mut ViewBuf);
+
+    /// 外部数据（后台线程经 `RepaintHandle` 回到 UI 线程后调用）
+    fn on_external(self: &Rc<Self>, _cx: &mut Ctx, _data: ExternalData) {}
+
+    /// 关闭请求；返回 [`CloseAction::Cancel`] 可拦截
+    fn on_close_request(self: &Rc<Self>, _cx: &mut Ctx) -> CloseAction {
+        CloseAction::Close
+    }
+
+    /// 逐帧钩子（动画）；注意 `view()` 不会因此重跑，只重绘由 `cx.damage(..)` 指定的区域
+    fn on_tick(self: &Rc<Self>, _cx: &mut Ctx, _now: Instant) {}
+}
+
+/// 对象安全的窗口视图。
+///
+/// `ViewModel::view` 的 receiver 是 `&Rc<Self>`，不能直接 `dyn`，所以加这一层薄擦除——
+/// 换来"**不同窗口可以是不同的 `ViewModel` 类型**"，以及 `App` 自身不带泛型。
+pub trait WindowView {
+    fn view_erased(&self, v: &mut ViewBuf);
+    fn on_tick(&self, cx: &mut Ctx, now: Instant);
+    fn on_external(&self, cx: &mut Ctx, data: ExternalData);
+    fn on_close_request(&self, cx: &mut Ctx) -> CloseAction;
+}
+
+/// 把 `Rc<V>` 包装成 `dyn WindowView` 的适配器。
+///
+/// 为什么需要这层包装：Rust 的 unsizing 强转 `Rc<V> → Rc<dyn Trait>` 要求 `V: Trait + Sized`，
+/// 而 `ViewModel::view` 的 receiver 是 `&Rc<Self>` —— 拿不到 `Rc` 就调不了它。
+/// 所以真正的 `WindowView` 实现挂在**持有 `Rc<V>` 的适配器**上（多一次指针跳转，可忽略）。
+struct VmAdapter<V: ViewModel>(Rc<V>);
+
+impl<V: ViewModel> WindowView for VmAdapter<V> {
+    fn view_erased(&self, v: &mut ViewBuf) {
+        V::view(&self.0, v)
+    }
+
+    fn on_tick(&self, cx: &mut Ctx, now: Instant) {
+        V::on_tick(&self.0, cx, now)
+    }
+
+    fn on_external(&self, cx: &mut Ctx, data: ExternalData) {
+        V::on_external(&self.0, cx, data)
+    }
+
+    fn on_close_request(&self, cx: &mut Ctx) -> CloseAction {
+        V::on_close_request(&self.0, cx)
+    }
+}
+
+/// 把 `Rc<VM>` 擦除成窗口视图句柄。
+///
+/// 同一个 `Rc<VM>` 可以擦除多次给多个窗口（**共享一个 VM 实例**），
+/// 也可以各建各的（每个窗口一个实例）。
+pub fn erased<V: ViewModel>(vm: Rc<V>) -> Rc<dyn WindowView> {
+    Rc::new(VmAdapter(vm))
+}
+
+// ───────────────────────── 帧统计 ─────────────────────────
+
+/// 一帧做了/该做什么（测试与调试的观测点）
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameStats {
+    /// 本帧消费掉的脏标志
+    pub dirty: Dirty,
+    /// 是否重跑了 `view()` + `align`
+    pub view_ran: bool,
+    pub align: AlignStats,
+    /// 本次重排统计（`ran == false` 表示本帧没有重排）
+    pub layout: LayoutStats,
+    /// 本帧被重新落位的锚定层数（popup / tooltip 跟随锚点）
+    pub anchored_layers: usize,
+    /// 跑完后**仍有**待重排（正常恒为 `false`）
+    pub layout_pending: bool,
+    /// 本帧是否需要重绘（消费脏区前的事实）
+    pub paint_pending: bool,
+    /// 待上屏（**M4** 由 softbuffer 消费；M3 只到"像素已就绪"）
+    pub present_pending: bool,
+    /// 本帧累积的脏矩形（M3 用它决定行带；M4 会连同一起交给 `present_with_damage`）
+    pub damage: Vec<Rect>,
+    /// 整窗脏
+    pub damage_all: bool,
+    /// 本次展开 + 光栅化统计
+    pub render: RenderStats,
+}
+
+impl FrameStats {
+    /// 这一帧有没有实际干活
+    pub fn is_idle(&self) -> bool {
+        !self.view_ran && !self.layout.ran && !self.paint_pending && !self.present_pending
+    }
+
+    /// 本帧光栅化的像素数（基准/调试用）
+    pub fn rasterized_pixels(&self) -> u64 {
+        self.render.raster.pixels
+    }
+}
+
+/// 一次指针输入的处理结果
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PointerOutcome {
+    /// 实际分发的事件条数（含 hover 进入/离开与合成的 `Tapped`）
+    pub events: usize,
+    /// 是否有任一处理器声明已处理
+    pub handled: bool,
+    /// 合成的点击目标
+    pub tapped: Option<NodeId>,
+    /// 是否触发了滚轮的框架默认滚动
+    pub scrolled: bool,
+}
+
+// ───────────────────────── 窗口运行时 ─────────────────────────
+
+/// 一个窗口的全部可变状态（每窗口一套）
+pub struct WindowCtx {
+    id: WindowId,
+    cfg: WindowConfig,
+    size: Size,
+    track: Track,
+    view_buf: ViewBuf,
+    view: Rc<dyn WindowView>,
+    last_align: AlignStats,
+    renderer: Renderer,
+    /// 底色是否由用户显式指定（true ⇒ 主题切换不再改窗口底色）
+    explicit_background: bool,
+    /// 光标闪烁：下一次翻转时刻（None = 没有聚焦的输入框，不需要动画）
+    next_blink: Option<Instant>,
+}
+
+/// 光标闪烁周期
+pub const BLINK_PERIOD: std::time::Duration = std::time::Duration::from_millis(530);
+
+impl WindowCtx {
+    pub fn new(id: WindowId, cfg: WindowConfig, view: Rc<dyn WindowView>, rt: &Runtime) -> Self {
+        rt.register_window(id);
+        // 首帧必须跑一次 view()，否则树是空的
+        rt.mark(id, Dirty::VIEW);
+        let size = cfg.size;
+        // 底色：显式设置优先；否则跟随主题
+        let background = cfg.background.unwrap_or_else(|| rt.theme().window_background);
+        let explicit_background = cfg.background.is_some();
+        let renderer = Renderer::new(size, background);
+        Self {
+            id,
+            cfg,
+            size,
+            track: Track::new(),
+            view_buf: ViewBuf::new(),
+            view,
+            last_align: AlignStats::default(),
+            renderer,
+            explicit_background,
+            next_blink: None,
+        }
+    }
+
+    pub fn id(&self) -> WindowId {
+        self.id
+    }
+
+    pub fn config(&self) -> &WindowConfig {
+        &self.cfg
+    }
+
+    /// 客户区尺寸（布局的可用空间）
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    /// 窗口尺寸变化（M4 由 winit 调用）：整窗重排 + 整窗脏 + 重建 pixmap
+    pub fn set_size(&mut self, rt: &Runtime, size: Size) {
+        if self.size == size {
+            return;
+        }
+        self.size = size;
+        self.renderer.resize(size);
+        self.track.mark_all_layout_dirty();
+        rt.mark(self.id, Dirty::LAYOUT | Dirty::PAINT | Dirty::PRESENT);
+    }
+
+    /// 当前帧的图像（未渲染时是全零/旧帧）
+    pub fn pixmap(&self) -> &vello_cpu::Pixmap {
+        self.renderer.pixmap()
+    }
+
+    /// 换窗口底色（主题切换；调用方应同时 `mark_all_layout_dirty` + 整窗脏）
+    pub fn set_background(&mut self, rt: &Runtime, color: lieui_geom::Color) {
+        self.renderer.set_background(color);
+        self.track.damage_whole_window();
+        rt.mark(self.id, Dirty::PAINT | Dirty::PRESENT);
+    }
+
+    /// DPI 缩放变化（M4 由 winit 调用）：只改光栅分辨率 + 整窗脏，**不动布局**。
+    ///
+    /// 注意：命中测试吃的是**逻辑**坐标，所以 winit 侧要把物理光标位置除以 scale。
+    pub fn set_scale_factor(&mut self, rt: &Runtime, scale: f32) {
+        if (self.renderer.scale() - scale).abs() < 1e-6 {
+            return;
+        }
+        self.renderer.set_scale(scale);
+        self.track.damage_whole_window();
+        rt.mark(self.id, Dirty::PAINT | Dirty::PRESENT);
+    }
+
+    pub fn scale_factor(&self) -> f32 {
+        self.renderer.scale()
+    }
+
+    /// 物理尺寸（pixmap / softbuffer surface 的尺寸）
+    pub fn physical_size(&self) -> Size {
+        self.renderer.physical_size()
+    }
+
+    pub fn track(&self) -> &Track {
+        &self.track
+    }
+
+    pub fn track_mut(&mut self) -> &mut Track {
+        &mut self.track
+    }
+
+    pub fn view_buf(&self) -> &ViewBuf {
+        &self.view_buf
+    }
+
+    /// 最近一次 `align` 的统计
+    pub fn last_align(&self) -> AlignStats {
+        self.last_align
+    }
+
+    /// 内容根（挂载后才有）
+    pub fn content_root(&self) -> Option<NodeId> {
+        self.track.content_root().map(|r| r.node)
+    }
+
+    // ── 帧 ──
+
+    /// 跑一帧：消费脏标志 → `view()`/`align` → **重排** → 取走脏区（M3 在这里光栅化 + 上屏）。
+    pub fn frame(&mut self, rt: &Runtime) -> FrameStats {
+        let dirty = rt.take_dirty(self.id);
+        let mut st = FrameStats {
+            dirty,
+            ..Default::default()
+        };
+
+        // ⓪ 主题同步：全局主题变了 ⇒ 渲染器换 token 快照。
+        // 窗口底色仅在"未显式指定"时跟随主题（`WindowConfig.background` 优先）。
+        let theme = rt.theme();
+        if self.renderer.options_mut().theme != theme {
+            let bg_follows = !self.explicit_background;
+            let opts = self.renderer.options_mut();
+            opts.theme = theme;
+            if bg_follows {
+                opts.background = theme.window_background;
+            }
+        }
+
+        // ① 响应式回路：任何 Signal 变更都只置 VIEW，这里统一消费一次（批处理免费）
+        if dirty.contains(Dirty::VIEW) {
+            rt.begin_view(self.id);
+            // 主题快照先注入：DSL 在构造 widget 时把 token 烘焙进描述（设计 §3.10）
+            self.view_buf.set_theme(rt.theme());
+            self.view_buf.begin();
+            self.view.view_erased(&mut self.view_buf);
+            rt.end_view();
+
+            st.view_ran = true;
+            self.last_align = align(&mut self.track, &self.view_buf);
+            st.align = self.last_align;
+        }
+
+        // ② 重排：只跑"边界集合"的子树（见 `layout::layout`）
+        if dirty.contains(Dirty::LAYOUT) || self.track.has_layout_dirty() {
+            st.layout = layout::layout(&mut self.track, self.size);
+        }
+
+        // ②.5 锚定层落位：popup / tooltip 要等布局给出锚点 rect 与自身尺寸才能定位。
+        // 挪了层的旧 ∪ 新矩形已登记进脏区 ⇒ 本帧的渲染自然会覆盖。
+        st.anchored_layers = layout::place_anchored_layers(&mut self.track, self.size);
+
+        // ②.6 滚动变化：偏移真的变了（滚轮 / 拖滚动条 / ScrollTo）⇒ 给容器派发
+        // `ScrollChanged`（Direct，带新偏移）。信号处理器据此重跑 view——虚拟列表靠它换窗。
+        for sc_id in self.track.take_scroll_changes() {
+            if !self.track.contains(sc_id) {
+                continue;
+            }
+            let offset = self.track.scroll_offset(sc_id);
+            let path = vec![sc_id];
+            self.dispatch(&rt, &path, &Event::Scroll { offset });
+        }
+
+        // ③ 光栅化：消费脏区（只重画受影响的行带，其余像素保留上一帧）
+        st.layout_pending = self.track.has_layout_dirty();
+        let (damage, damage_all) = self.track.take_damage();
+        st.damage = damage;
+        st.damage_all = damage_all;
+        st.paint_pending = dirty.contains(Dirty::PAINT) || st.damage_all || !st.damage.is_empty();
+        if st.paint_pending {
+            st.render = self.renderer.render(&self.track, &st.damage, st.damage_all);
+        }
+
+        // ④ 上屏：M4 由 softbuffer 消费（`present_with_damage`）；M3 到此"像素已就绪"
+        st.present_pending = dirty.contains(Dirty::PRESENT) || st.paint_pending;
+
+        st
+    }
+
+    // ── 动画（光标闪烁）──
+
+    /// 翻转闪烁相位。**只在有键盘聚焦的输入框时动作**——没有聚焦输入框的窗口
+    /// 永远不会被唤醒（空闲帧零功耗）。返回 true ⇒ 本帧有重绘义务。
+    ///
+    /// 平台层负责定时唤醒（`ControlFlow::WaitUntil`）；打字会重置相位（光标常亮）。
+    pub fn animate(&mut self, now: Instant) -> bool {
+        let focused_input = self
+            .track
+            .focused
+            .filter(|f| self.track.input_is_active(*f))
+            .is_some();
+
+        if !focused_input {
+            if self.track.blink_on {
+                self.track.blink_on = false;
+                self.next_blink = None;
+                // 擦掉残留的光标
+                if let Some(f) = self.track.focused {
+                    self.track.mark_paint_dirty(f);
+                }
+                return true;
+            }
+            self.next_blink = None;
+            return false;
+        }
+
+        match self.next_blink {
+            None => {
+                // 刚拿到焦点：光标先亮
+                self.track.blink_on = true;
+                self.next_blink = Some(now + BLINK_PERIOD);
+                if let Some(f) = self.track.focused {
+                    self.track.mark_paint_dirty(f);
+                }
+                true
+            }
+            Some(t) if now >= t => {
+                self.track.blink_on = !self.track.blink_on;
+                self.next_blink = Some(now + BLINK_PERIOD);
+                if let Some(f) = self.track.focused {
+                    self.track.mark_paint_dirty(f);
+                }
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// 下一次闪烁唤醒时刻（平台层据此设置 `ControlFlow::WaitUntil`）
+    pub fn next_wakeup(&self) -> Option<Instant> {
+        self.next_blink
+    }
+
+    // ── 事件 ──
+    ///
+    /// `path` 是命中链（`path[0]` 最外层、`path.last()` 目标），M1 由调用方给出（测试/无头场景），
+    /// M2 起由命中测试产出。
+    pub fn dispatch(
+        &mut self,
+        rt: &Runtime,
+        path: &[NodeId],
+        ev: &Event,
+    ) -> DispatchOutcome {
+        let mut cmds = CmdBuf::new();
+
+        // ① 框架内置行为（先于用户处理器；直接拿 `&mut Track`，不占处理器槽位）
+        //    传 `&Event` 而非摘要：IME 预编辑带字符串 payload
+        crate::widgets::handle_route(&mut self.track, path, ev, &mut cmds);
+
+        // ② 用户处理器（两段式：只读收集 → 调用；处理器只拿 `&mut Ctx`）
+        let out = crate::event::dispatch(rt, self.id, &self.track, path, ev, &mut cmds);
+
+        // ③ 落命令（借用释放后统一写树）
+        if !cmds.is_empty() {
+            let d = apply_cmds(&mut self.track, cmds.as_slice());
+            rt.mark(self.id, d);
+        }
+
+        // ④ 打字重置闪烁相位：输入期间光标保持常亮（500ms 内没有新输入才熄灭）
+        if matches!(
+            ev.kind(),
+            EventKind::CharacterReceived | EventKind::KeyDown | EventKind::PointerPressed
+        ) && self
+            .track
+            .focused
+            .filter(|f| self.track.input_is_active(*f))
+            .is_some()
+        {
+            self.track.blink_on = true;
+            self.next_blink = Some(Instant::now() + BLINK_PERIOD);
+        }
+        out
+    }
+
+    // ── 命中 ──
+
+    /// 命中链（纯函数，无副作用）
+    pub fn hit(&self, p: Point) -> Vec<NodeId> {
+        hit::hit_path(&self.track, p)
+    }
+
+    /// 命中目标（最深节点）
+    pub fn hit_target(&self, p: Point) -> Option<NodeId> {
+        hit::hit_test(&self.track, p)
+    }
+
+    // ── 指针输入 ──
+
+    /// 一步指针输入：状态机 → 逐个分发 → 未被处理的滚轮走框架默认滚动。
+    ///
+    /// M4 的 winit 层只需把 `CursorMoved` / `MouseInput` / `MouseWheel` 翻译成 [`InputEvent`]。
+    pub fn pointer(&mut self, rt: &Runtime, ev: InputEvent) -> PointerOutcome {
+        let step = input::step(&mut self.track, ev);
+        let mut outcome = PointerOutcome {
+            events: step.events.len(),
+            tapped: step.tapped,
+            ..Default::default()
+        };
+
+        let mut wheel_path: Option<Vec<NodeId>> = None;
+        for (path, e) in step.events {
+            if e.kind() == EventKind::PointerWheelChanged {
+                wheel_path = Some(path.clone());
+            }
+            let d = self.dispatch(rt, &path, &e);
+            outcome.handled |= d.handled;
+        }
+
+        if let InputEvent::Wheel { delta, .. } = ev
+            && !outcome.handled
+            && let Some(path) = wheel_path
+        {
+            outcome.scrolled = input::default_wheel_scroll(&mut self.track, &path, delta);
+        }
+
+        outcome
+    }
+
+    // ── 键盘 / 焦点 ──
+
+    /// 键盘事件：发给焦点节点的祖先链（无焦点时发给内容根，冒泡到根）
+    pub fn key(&mut self, rt: &Runtime, ev: Event) -> DispatchOutcome {
+        let path = match self.track.focused {
+            Some(id) => hit::path_to(&self.track, id),
+            None => match self.content_root() {
+                Some(root) => hit::path_to(&self.track, root),
+                None => Vec::new(),
+            },
+        };
+        if path.is_empty() {
+            return DispatchOutcome::default();
+        }
+        self.dispatch(rt, &path, &ev)
+    }
+
+    /// Tab / Shift+Tab 焦点迁移（框架默认行为），并派发 `LostFocus` / `GotFocus`
+    pub fn tab(&mut self, rt: &Runtime, forward: bool) -> Option<NodeId> {
+        let target = focus::next_tab(&self.track, self.track.focused, forward);
+        self.focus(rt, target, FocusState::Keyboard);
+        target
+    }
+
+    /// 程序化聚焦（并派发 `LostFocus` / `GotFocus`）
+    pub fn focus(&mut self, rt: &Runtime, target: Option<NodeId>, state: FocusState) {
+        let change = focus::set_focus(&mut self.track, target, state);
+        for (id, kind) in [
+            (change.lost, EventKind::LostFocus),
+            (change.got, EventKind::GotFocus),
+        ] {
+            if let Some(id) = id {
+                let path = hit::path_to(&self.track, id);
+                self.dispatch(rt, &path, &Event::simple(kind));
+            }
+        }
+    }
+
+    /// 逐帧钩子（动画）。`cx.damage(..)` 只标脏，不会重跑 `view()`
+    pub fn tick(&mut self, rt: &Runtime, now: Instant) {
+        let mut cx = Ctx::new(rt, self.id, EventView::tick());
+        self.view.on_tick(&mut cx, now);
+        if !cx.cmds().is_empty() {
+            let cmds = cx.take_cmds();
+            let d = apply_cmds(&mut self.track, &cmds);
+            rt.mark(self.id, d);
+        }
+    }
+
+    /// 外部数据（后台线程 → UI 线程）
+    pub fn external(&mut self, rt: &Runtime, data: ExternalData) {
+        let mut cx = Ctx::new(rt, self.id, EventView::external());
+        self.view.on_external(&mut cx, data);
+        if !cx.cmds().is_empty() {
+            let cmds = cx.take_cmds();
+            let d = apply_cmds(&mut self.track, &cmds);
+            rt.mark(self.id, d);
+        }
+    }
+
+    /// 关闭请求：`Cancel` 表示拦截
+    pub fn close_requested(&mut self, rt: &Runtime) -> CloseAction {
+        let mut cx = Ctx::new(rt, self.id, EventView::simple(EventKind::Unloaded));
+        self.view.on_close_request(&mut cx)
+    }
+}
+
+impl std::fmt::Debug for WindowCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowCtx")
+            .field("id", &self.id)
+            .field("title", &self.cfg.title)
+            .field("nodes", &self.track.len())
+            .finish()
+    }
+}
+
+// ───────────────────────── App ─────────────────────────
+
+/// 应用：窗口表 + 共享运行时。
+///
+/// **没有泛型参数**——窗口的 `ViewModel` 已被擦除成 `Rc<dyn WindowView>`。
+#[derive(Default)]
+pub struct App {
+    rt: Runtime,
+    next_window: u32,
+    windows: Vec<WindowCtx>,
+}
+
+impl App {
+    pub fn new(rt: Runtime) -> Self {
+        Self {
+            rt,
+            next_window: 1,
+            windows: Vec::new(),
+        }
+    }
+
+    pub fn runtime(&self) -> Runtime {
+        self.rt.clone()
+    }
+
+    /// 注册一个窗口。`vm` 可以是任意 `impl ViewModel`（**不同窗口类型可以不同**）。
+    pub fn window<V: ViewModel>(&mut self, cfg: WindowConfig, vm: V) -> WindowId {
+        self.window_erased(cfg, erased(Rc::new(vm)))
+    }
+
+    /// 以**已擦除的句柄**注册窗口。
+    ///
+    /// 用于两个场景：① 多窗口**共享同一个 VM 实例**（`erased(rc.clone())` 两次）；
+    /// ② 窗口视图由用户自己实现 `WindowView`（不经 `ViewModel`）。
+    pub fn window_erased(&mut self, cfg: WindowConfig, view: Rc<dyn WindowView>) -> WindowId {
+        let id = WindowId::new(self.next_window);
+        self.next_window += 1;
+        self.windows.push(WindowCtx::new(id, cfg, view, &self.rt));
+        id
+    }
+
+    pub fn windows(&self) -> &[WindowCtx] {
+        &self.windows
+    }
+
+    pub fn window_ctx(&self, id: WindowId) -> Option<&WindowCtx> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    pub fn window_ctx_mut(&mut self, id: WindowId) -> Option<&mut WindowCtx> {
+        self.windows.iter_mut().find(|w| w.id == id)
+    }
+
+    /// 逐窗口跑一帧；返回每个窗口的 `FrameStats`
+    pub fn frame_all(&mut self) -> Vec<(WindowId, FrameStats)> {
+        let rt = self.rt.clone();
+        self.windows
+            .iter_mut()
+            .map(|w| (w.id, w.frame(&rt)))
+            .collect()
+    }
+
+    /// 关闭窗口（注销其脏标志，丢弃其保留树）
+    pub fn close_window(&mut self, id: WindowId) -> bool {
+        let before = self.windows.len();
+        self.windows.retain(|w| w.id != id);
+        let removed = self.windows.len() != before;
+        if removed {
+            self.rt.unregister_window(id);
+        }
+        removed
+    }
+
+    /// 立即以**已擦除句柄**开窗（`Ctx` 请求走 [`App::drain_requests`]）
+    pub fn open_window_erased(
+        &mut self,
+        cfg: WindowConfig,
+        view: Rc<dyn WindowView>,
+    ) -> WindowId {
+        let id = WindowId::new(self.next_window);
+        self.next_window += 1;
+        self.windows
+            .push(WindowCtx::new(id, cfg, view, &self.rt));
+        id
+    }
+
+    // ── 请求队列（`Ctx::request` / `app::open_window` 写入）──
+
+    /// 处理待处理请求：开窗 / 关窗。返回 `(新增的窗口, 被关闭的窗口)` 供平台层同步真实窗口。
+    ///
+    /// 无窗口环境（测试）也能用 —— 这正是把请求做成队列而不是直接建窗的原因。
+    pub fn drain_requests(&mut self) -> (Vec<WindowId>, Vec<WindowId>) {
+        let opens: Vec<(WindowConfig, Rc<dyn WindowView>)> =
+            self.rt.requests().take::<(WindowConfig, Rc<dyn WindowView>)>();
+        let closes: Vec<CloseWindow> = self.rt.requests().take::<CloseWindow>();
+
+        let mut opened = Vec::with_capacity(opens.len());
+        for (cfg, view) in opens {
+            opened.push(self.open_window_erased(cfg, view));
+        }
+        let mut closed = Vec::new();
+        for CloseWindow(id) in closes {
+            if self.close_window(id) {
+                closed.push(id);
+            }
+        }
+        (opened, closed)
+    }
+
+    /// 还有待处理请求吗
+    pub fn has_pending_requests(&self) -> bool {
+        !self.rt.requests().is_empty()
+    }
+
+    /// 进入 winit 事件循环（阻塞直到退出）。**M4**。
+    ///
+    /// 需要窗口层（`platform`）：它负责创建真实窗口、把 winit 事件翻译成
+    /// [`InputEvent`] / [`Event`]，并把 pixmap 用 `present_with_damage` 上屏。
+    #[cfg(feature = "winit")]
+    pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::platform::run(self, None)
+    }
+
+    /// 同上，但在进入循环前把 [`crate::platform::RepaintHandle`] 交给调用方
+    /// （后台线程靠它唤醒 UI 线程）。
+    #[cfg(feature = "winit")]
+    pub fn run_with_handle(
+        self,
+        on_ready: impl FnOnce(crate::platform::RepaintHandle) + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::platform::run(self, Some(Box::new(on_ready)))
+    }
+
+    /// 本帧有窗口需要干活吗（M4 用它决定是否 `request_redraw`）
+    pub fn any_dirty(&self) -> bool {
+        self.rt.windows().iter().any(|w| !self.rt.peek_dirty(*w).is_empty())
+    }
+
+    // 说明：`run()`（winit 事件循环）与 `Ctx::open_window`（动态开窗）在 **M4** 落地——
+    // 它们需要真实的 winit 窗口与事件循环；M1 只做"纯逻辑的帧驱动"，便于无头单测。
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{
+        Event, EventKind, KeyCode, Modifiers, NamedKey, PointerButton, PointerId,
+    };
+    use crate::reactive::{Signal, act1};
+    use std::time::Duration;
+    use crate::theme::Theme;
+    use crate::track::{Kind, Layer, Placement};
+
+    // ── 一个 counter ViewModel（就是 §九 示例的形态，去掉 winit 部分）──
+
+    struct Counter {
+        count: Signal<i32>,
+    }
+
+    impl Counter {
+        fn inc(&self) {
+            self.count.update(|v| *v += 1);
+        }
+    }
+
+    impl ViewModel for Counter {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.gap(12.0);
+                c.text("Counter").font_size(48.0);
+                c.text(self.count.get().to_string()).font_size(72.0);
+                c.row(|r| {
+                    r.button("+1").on_tap(act(self, Self::inc));
+                });
+            });
+        }
+    }
+
+    fn act<T: 'static>(vm: &Rc<T>, f: fn(&T)) -> impl Fn() + 'static {
+        let me = Rc::clone(vm);
+        move || f(&me)
+    }
+
+    fn find_text(t: &Track, needle: &str) -> Option<NodeId> {
+        t.descendants(t.content_root()?.node)
+            .into_iter()
+            .find(|n| matches!(t.get(*n).map(|x| &x.kind), Some(Kind::Text(s)) if s == needle))
+    }
+
+    fn setup() -> (Runtime, App, Rc<Counter>, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Counter {
+            count: Signal::new(&rt, 0),
+        });
+        let id = app.window_erased(WindowConfig::new().title("Counter"), erased(vm.clone()));
+        (rt, app, vm, id)
+    }
+
+    #[test]
+    fn first_frame_mounts_the_tree() {
+        let (_, mut app, _, id) = setup();
+        let stats = app.frame_all();
+        let (_, st) = &stats[0];
+
+        assert!(st.view_ran);
+        assert_eq!(
+            st.align.created, 5,
+            "column + 2 text + row + 1 button = 5 个节点"
+        );
+        assert!(st.damage_all, "首次挂载整窗脏");
+
+        let w = app.window_ctx(id).unwrap();
+        assert_eq!(w.track().len(), 5);
+        assert!(find_text(w.track(), "0").is_some());
+    }
+
+    #[test]
+    fn second_frame_is_idle_without_state_change() {
+        let (_, mut app, _, _) = setup();
+        app.frame_all();
+        let stats = app.frame_all();
+        let (_, st) = &stats[0];
+
+        assert!(st.is_idle(), "无状态变化应完全空闲：{st:?}");
+        assert_eq!(st.align.patched, 0);
+        assert!(st.damage.is_empty() && !st.damage_all);
+    }
+
+    #[test]
+    fn signal_change_reruns_view_and_patches_only_that_node() {
+        let (_, mut app, vm, id) = setup();
+        app.frame_all();
+
+        vm.count.set(1); // 只置脏，不立即干活
+        assert!(app.any_dirty());
+
+        let stats = app.frame_all();
+        let (_, st) = &stats[0];
+        assert!(st.view_ran);
+        assert_eq!(st.align.patched, 1, "只有一个文本节点变化");
+        assert_eq!(st.align.created, 0);
+        assert_eq!(st.align.destroyed, 0);
+
+        let w = app.window_ctx(id).unwrap();
+        assert!(find_text(w.track(), "1").is_some());
+        assert!(find_text(w.track(), "0").is_none());
+        // 节点身份保持（视图态不丢）
+        assert_eq!(w.track().len(), 5);
+    }
+
+    #[test]
+    fn button_closure_changes_state_and_next_frame_renders_it() {
+        let (rt, mut app, vm, id) = setup();
+        app.frame_all();
+
+        // 模拟点击：命中链 = 内容根 → row → button（M2 会由命中测试给出）
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let row = w.track().children(root)[2];
+        let button = w.track().children(row)[0];
+        let path = vec![root, row, button];
+
+        let out = app
+            .window_ctx_mut(id)
+            .unwrap()
+            .dispatch(&rt, &path, &Event::Simple { kind: EventKind::Tapped });
+        assert_eq!(out.invoked, 1, "只有按钮注册了处理器");
+        assert_eq!(vm.count.get(), 1, "闭包直接改了 Signal");
+
+        // 下一帧：重跑 view() → align → 只 patch 那一行文本
+        let stats = app.frame_all();
+        assert!(stats[0].1.view_ran);
+        assert_eq!(stats[0].1.align.patched, 1);
+        let w = app.window_ctx(id).unwrap();
+        assert!(find_text(w.track(), "1").is_some());
+    }
+
+    #[test]
+    fn handler_can_request_repaint_without_rerunning_view() {
+        struct Once {
+            count: Signal<i32>,
+        }
+        impl ViewModel for Once {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text(self.count.get().to_string())
+                        .on_tap_with(|cx| cx.request_repaint());
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new(), Once { count: Signal::new(&rt, 0) });
+        app.frame_all();
+
+        // 命中链：内容根 → 那个文本节点（处理器挂在文本节点上）
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let text = w.track().children(root)[0];
+        let path = vec![root, text];
+
+        let d0 = rt.peek_dirty(id);
+        assert!(d0.is_empty(), "空闲窗口不该带脏标志");
+
+        app.window_ctx_mut(id)
+            .unwrap()
+            .dispatch(&rt, &path, &Event::Simple { kind: EventKind::Tapped });
+
+        let stats = app.frame_all();
+        let st = &stats[0].1;
+        assert!(!st.view_ran, "request_repaint 不应触发 view()");
+        assert!(st.paint_pending);
+    }
+
+    #[test]
+    fn two_windows_share_signals_but_keep_separate_trees() {
+        let rt = Runtime::new();
+        let shared = Signal::new(&rt, 7);
+
+        struct Panel {
+            v: Signal<i32>,
+            label: &'static str,
+        }
+        impl ViewModel for Panel {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text(format!("{} = {}", self.label, self.v.get()));
+                });
+            }
+        }
+
+        let mut app = App::new(rt.clone());
+        let a = app.window(
+            WindowConfig::new().title("A"),
+            Panel {
+                v: shared.clone(),
+                label: "A",
+            },
+        );
+        let b = app.window(
+            WindowConfig::new().title("B"),
+            Panel {
+                v: shared.clone(),
+                label: "B",
+            },
+        );
+        app.frame_all();
+
+        assert!(find_text(app.window_ctx(a).unwrap().track(), "A = 7").is_some());
+        assert!(find_text(app.window_ctx(b).unwrap().track(), "B = 7").is_some());
+
+        // 改共享 signal：两个窗口都会重跑 view()（R1 保守传播）
+        shared.set(8);
+        let stats = app.frame_all();
+        assert!(stats[0].1.view_ran && stats[1].1.view_ran);
+        assert!(find_text(app.window_ctx(a).unwrap().track(), "A = 8").is_some());
+        assert!(find_text(app.window_ctx(b).unwrap().track(), "B = 8").is_some());
+
+        // 两棵树的节点数一致但互不影响
+        assert_eq!(
+            app.window_ctx(a).unwrap().track().len(),
+            app.window_ctx(b).unwrap().track().len()
+        );
+    }
+
+    #[test]
+    fn closing_a_window_drops_its_flags() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all();
+        assert!(app.close_window(id));
+        assert!(app.window_ctx(id).is_none());
+        assert!(rt.windows().is_empty());
+        assert!(!app.close_window(id), "重复关闭返回 false");
+    }
+
+    #[test]
+    fn tick_hook_runs_without_rerunning_view() {
+        use std::cell::Cell;
+
+        struct Anim {
+            ticks: Rc<Cell<u32>>,
+        }
+        impl ViewModel for Anim {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("t").key("t");
+                });
+            }
+            fn on_tick(self: &Rc<Self>, cx: &mut Ctx, _now: Instant) {
+                self.ticks.set(self.ticks.get() + 1);
+                cx.damage_all();
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let ticks = Rc::new(Cell::new(0));
+        let id = app.window(WindowConfig::new(), Anim { ticks: ticks.clone() });
+        app.frame_all();
+
+        app.window_ctx_mut(id).unwrap().tick(&rt, Instant::now());
+        assert_eq!(ticks.get(), 1);
+
+        let stats = app.frame_all();
+        let st = &stats[0].1;
+        assert!(!st.view_ran, "on_tick 只重绘，不重跑 view()");
+        assert!(st.paint_pending);
+    }
+
+    #[test]
+    fn external_data_reaches_the_view_model() {
+        struct Ext {
+            got: Rc<std::cell::Cell<u32>>,
+        }
+        impl ViewModel for Ext {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("x");
+                });
+            }
+            fn on_external(self: &Rc<Self>, cx: &mut Ctx, data: ExternalData) {
+                if let Some(n) = data.downcast::<u32>() {
+                    self.got.set(n);
+                }
+                cx.damage_all();
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let got = Rc::new(std::cell::Cell::new(0));
+        let id = app.window(WindowConfig::new(), Ext { got: got.clone() });
+        app.frame_all();
+
+        app.window_ctx_mut(id)
+            .unwrap()
+            .external(&rt, ExternalData::new(42u32));
+        assert_eq!(got.get(), 42);
+        assert!(app.frame_all()[0].1.paint_pending);
+    }
+
+    #[test]
+    fn close_request_can_be_cancelled() {
+        struct Guard;
+        impl ViewModel for Guard {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("g");
+                });
+            }
+            fn on_close_request(self: &Rc<Self>, _cx: &mut Ctx) -> CloseAction {
+                CloseAction::Cancel
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new(), Guard);
+        app.frame_all();
+        assert_eq!(
+            app.window_ctx_mut(id).unwrap().close_requested(&rt),
+            CloseAction::Cancel
+        );
+    }
+
+    // ─────────────── M2：布局 / 命中 / 输入 端到端 ───────────────
+
+    fn center(t: &Track, id: NodeId) -> Point {
+        let r = crate::layout::rect_of(t, id);
+        Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
+    }
+
+    #[test]
+    fn frame_runs_layout_then_goes_idle() {
+        let (_, mut app, _, id) = setup();
+        let first = app.frame_all()[0].1.clone();
+
+        assert!(first.view_ran);
+        assert!(first.layout.ran, "首帧必须重排");
+        assert!(first.layout.nodes >= 5);
+        assert!(!first.layout_pending, "跑完后不应再有重排义务");
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let rect = crate::layout::rect_of(w.track(), root);
+        assert_eq!(rect.width, w.size().width, "内容根撑满窗口宽度");
+        assert_eq!(rect.height, w.size().height);
+
+        let second = app.frame_all()[0].1.clone();
+        assert!(second.is_idle(), "无变化时第二帧应空闲：{second:?}");
+    }
+
+    #[test]
+    fn resize_relayouts_the_whole_window() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all();
+
+        app.window_ctx_mut(id)
+            .unwrap()
+            .set_size(&rt, Size::new(200.0, 150.0));
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.layout.ran);
+        assert!(st.layout.moved > 0, "尺寸变化应移动节点");
+        assert!(st.damage_all);
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        assert_eq!(crate::layout::rect_of(w.track(), root).width, 200.0);
+    }
+
+    #[test]
+    fn click_reaches_the_button_through_hit_testing() {
+        let (rt, mut app, vm, id) = setup();
+        app.frame_all();
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let row = w.track().children(root)[2];
+        let button = w.track().children(row)[0];
+        let pos = center(w.track(), button);
+        assert!(crate::layout::rect_of(w.track(), button).width > 0.0);
+
+        // 用命中测试算出来的位置（不是手写 path）驱动输入
+        let down = app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos,
+                button: PointerButton::Left,
+            },
+        );
+        assert!(down.events > 0);
+
+        let up = app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos,
+                button: PointerButton::Left,
+            },
+        );
+        assert_eq!(up.tapped, Some(button), "命中测试 → 点击合成");
+        assert_eq!(vm.count.get(), 1, "闭包已改 Signal");
+
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.view_ran);
+        assert_eq!(st.align.patched, 1, "只有那一行文本变了");
+        let w = app.window_ctx(id).unwrap();
+        assert!(find_text(w.track(), "1").is_some());
+    }
+
+    #[test]
+    fn press_outside_the_button_then_move_away_does_not_click() {
+        let (rt, mut app, vm, id) = setup();
+        app.frame_all();
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let row = w.track().children(root)[2];
+        let button = w.track().children(row)[0];
+        let start = center(w.track(), button);
+        let away = Point::new(5.0, 290.0);
+
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: start, button: PointerButton::Left });
+        let up = w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: away, button: PointerButton::Left });
+
+        assert_eq!(up.tapped, None);
+        assert_eq!(vm.count.get(), 0);
+    }
+
+    #[test]
+    fn hover_follows_the_pointer_and_marks_damage() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all();
+        let _ = app.frame_all(); // 清空挂载脏区
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let row = w.track().children(root)[2];
+        let button = w.track().children(row)[0];
+        let pos = center(w.track(), button);
+
+        let w = app.window_ctx_mut(id).unwrap();
+        let out = w.pointer(&rt, InputEvent::Move { pointer: PointerId(0), pos });
+        assert!(out.events > 0);
+        assert!(w.track().state(button).pointer_over);
+        assert!(w.track().state(root).pointer_over, "整条链都置 pointer_over");
+
+        // 只重绘，不重跑 view()
+        let st = app.frame_all()[0].1.clone();
+        assert!(!st.view_ran, "hover 不经过 view()");
+        assert!(st.paint_pending);
+        assert!(st.damage_all || !st.damage.is_empty());
+
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(&rt, InputEvent::Leave);
+        assert!(!w.track().state(button).pointer_over);
+    }
+
+    #[test]
+    fn tab_moves_focus_in_declaration_order() {
+        struct Form;
+        impl ViewModel for Form {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("x").tab_stop(true);
+                    c.text("y").tab_stop(true);
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new(), Form);
+        app.frame_all();
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let kids = w.track().children(root).to_vec();
+        assert!(kids.len() >= 2);
+
+        let w = app.window_ctx_mut(id).unwrap();
+        // 走真焦点入口（内部 set_focus + LostFocus/GotFocus 派发）
+        w.focus(&rt, Some(kids[0]), FocusState::Keyboard);
+        assert_eq!(w.track().focused, Some(kids[0]));
+        assert_eq!(w.track().get(kids[0]).unwrap().focus_state, FocusState::Keyboard);
+
+        let next = w.tab(&rt, true);
+        assert_eq!(next, Some(kids[1]));
+        assert_eq!(w.track().focused, Some(kids[1]));
+        assert_eq!(w.track().get(kids[0]).unwrap().focus_state, FocusState::Unfocused);
+
+        // 循环回第一个
+        assert_eq!(w.tab(&rt, true), Some(kids[0]));
+        assert_eq!(w.tab(&rt, false), Some(kids[1]), "Shift+Tab 反向");
+    }
+
+    #[test]
+    fn wheel_scrolls_the_container_when_no_handler_claims_it() {
+        struct List {
+            n: Signal<i32>,
+        }
+        impl ViewModel for List {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    for i in 0..20 {
+                        c.text(format!("row {i}")).font_size(20.0);
+                    }
+                });
+                let _ = self.n.get();
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(
+            WindowConfig::new().size(200.0, 100.0),
+            List { n: Signal::new(&rt, 0) },
+        );
+        app.frame_all();
+
+        // 手工把内容根变成滚动容器（M5 的 Scroll 组件会做这件事）
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            let root = w.content_root().unwrap();
+            w.track_mut().get_mut(root).unwrap().layout.overflow_scroll = true;
+            w.track_mut().mark_all_layout_dirty();
+        }
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.layout.ran);
+
+        let (root, content_h) = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            (root, w.track().get(root).unwrap().content_size.height)
+        };
+        assert!(content_h > 100.0, "内容比视口高：{content_h}");
+
+        let out = app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Wheel {
+                pointer: PointerId(0),
+                pos: Point::new(10.0, 50.0),
+                delta: (0.0, 60.0),
+            },
+        );
+        assert!(out.scrolled, "无处理器认领 ⇒ 框架默认滚动");
+        let w = app.window_ctx(id).unwrap();
+        assert_eq!(w.track().scroll_offset(root), (0.0, 60.0));
+
+        // 滚动只重绘，不重排
+        let st = app.frame_all()[0].1.clone();
+        assert!(!st.layout.ran, "滚动不触发重排");
+        assert!(st.paint_pending);
+    }
+
+    // ─────────────── M3：光栅化 / 脏区 ───────────────
+
+    fn pixel(ctx: &WindowCtx, x: u16, y: u16) -> vello_cpu::color::PremulRgba8 {
+        let pix = ctx.pixmap();
+        pix.data()[usize::from(y) * usize::from(pix.width()) + usize::from(x)]
+    }
+
+    fn opaque(r: u8, g: u8, b: u8) -> vello_cpu::color::PremulRgba8 {
+        vello_cpu::color::PremulRgba8::from_u8_array([r, g, b, 255])
+    }
+
+    #[test]
+    fn frame_paints_background_and_content() {
+        struct Paint;
+        impl ViewModel for Paint {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.container(|k| {
+                        k.width(50.0);
+                        k.height(50.0);
+                        k.background(lieui_geom::Color::RED);
+                    });
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(200.0, 120.0), Paint);
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.render.raster.rasterized);
+        assert!(st.render.ops >= 2, "底色 + 内容：{:?}", st.render);
+
+        let ctx = app.window_ctx(id).unwrap();
+        assert_eq!(pixel(ctx, 25, 25), opaque(255, 0, 0), "红块已画出");
+        assert_eq!(pixel(ctx, 150, 100), opaque(245, 245, 245), "其余是窗口底色");
+    }
+
+    #[test]
+    fn idle_frame_does_not_render() {
+        let (_, mut app, _, id) = setup();
+        app.frame_all();
+        let st = app.frame_all()[0].1.clone();
+
+        assert!(!st.paint_pending);
+        assert!(!st.present_pending);
+        assert!(!st.render.raster.rasterized, "空闲帧不碰像素");
+        assert_eq!(st.rasterized_pixels(), 0);
+        let _ = id;
+    }
+
+    #[test]
+    fn damage_really_limits_repainting() {
+        struct Two;
+        impl ViewModel for Two {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.container(|k| {
+                        k.width(50.0);
+                        k.height(50.0);
+                        k.background(lieui_geom::Color::RED);
+                    });
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(200.0, 120.0), Two);
+        app.frame_all();
+        assert_eq!(pixel(app.window_ctx(id).unwrap(), 25, 25), opaque(255, 0, 0));
+
+        // 直接改颜色（不经过 align）并**只报告远处一小块脏区**
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            let root = w.content_root().unwrap();
+            let block = w.track().children(root)[0];
+            w.track_mut().get_mut(block).unwrap().paint.background_color =
+                Some(lieui_geom::Color::GREEN);
+            w.track_mut().damage_rect(Rect::new(150.0, 90.0, 10.0, 10.0));
+            rt.mark(id, Dirty::PAINT | Dirty::PRESENT);
+        }
+
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.paint_pending);
+        assert!(st.render.raster.pixels < 200 * 120 / 5, "只画了脏区行带");
+        // 脏区之外**保持上一帧**的红色 —— 这正是"局部光栅化"的证据
+        assert_eq!(
+            pixel(app.window_ctx(id).unwrap(), 25, 25),
+            opaque(255, 0, 0),
+            "未报告脏区的地方不应被重画"
+        );
+
+        // 整窗脏 ⇒ 这次才更新成绿色
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.track_mut().damage_whole_window();
+            rt.mark(id, Dirty::PAINT | Dirty::PRESENT);
+        }
+        app.frame_all();
+        assert_eq!(
+            pixel(app.window_ctx(id).unwrap(), 25, 25),
+            opaque(0, 128, 0),
+            "整窗脏后内容更新"
+        );
+    }
+
+    #[test]
+    fn click_only_repaints_a_band() {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Counter {
+            count: Signal::new(&rt, 0),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let row = w.track().children(root)[2];
+        let button = w.track().children(row)[0];
+        let pos = center(w.track(), button);
+
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos, button: PointerButton::Left });
+            w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos, button: PointerButton::Left });
+        }
+        assert_eq!(vm.count.get(), 1);
+
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.view_ran && st.layout.ran);
+        assert!(st.paint_pending);
+        let total = 400u64 * 300;
+        assert!(
+            st.rasterized_pixels() < total / 5,
+            "只重画了脏区：{} / {total}（batches={}）",
+            st.rasterized_pixels(),
+            st.render.raster.batches
+        );
+        // 渲染确实产生了内容（不是空 pixmap）
+        let ctx = app.window_ctx(id).unwrap();
+        assert_eq!(pixel(ctx, 1, 299), opaque(245, 245, 245));
+    }
+
+    #[test]
+    fn resize_rebuilds_the_pixmap_and_repaints() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert_eq!(ctx.pixmap().width(), 800);
+            assert_eq!(ctx.pixmap().height(), 600);
+        }
+
+        app.window_ctx_mut(id)
+            .unwrap()
+            .set_size(&rt, Size::new(320.0, 240.0));
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.damage_all);
+        assert!(st.render.raster.rasterized);
+        assert_eq!(st.render.raster.batches, 1, "整窗 ⇒ 一个批次");
+        assert_eq!(st.render.raster.pixels, 320 * 240);
+
+        let ctx = app.window_ctx(id).unwrap();
+        assert_eq!(ctx.pixmap().width(), 320);
+        assert_eq!(ctx.pixmap().height(), 240);
+        assert_eq!(pixel(ctx, 300, 200), opaque(245, 245, 245));
+    }
+
+    // ─────────────── M4：窗口请求队列 / DPI ───────────────
+
+    #[test]
+    fn ctx_can_request_a_new_window() {
+        struct Panel;
+        impl ViewModel for Panel {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("panel");
+                });
+            }
+        }
+
+        struct Root {
+            open: Signal<bool>,
+        }
+        impl ViewModel for Root {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("root");
+                });
+            }
+            fn on_tick(self: &Rc<Self>, cx: &mut Ctx, _now: Instant) {
+                if self.open.get() {
+                    self.open.set(false);
+                    crate::app::open_window(
+                        cx,
+                        WindowConfig::new().title("panel").size(120.0, 60.0),
+                        Panel,
+                    );
+                }
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Root {
+            open: Signal::new(&rt, false),
+        });
+        let root_id = app.window_erased(WindowConfig::new(), erased(Rc::clone(&vm)));
+        app.frame_all();
+        assert_eq!(app.windows().len(), 1);
+        assert!(!app.has_pending_requests());
+
+        // 请求开窗（队列化，不立即建窗）
+        vm.open.set(true);
+        app.window_ctx_mut(root_id)
+            .unwrap()
+            .tick(&rt, Instant::now());
+        assert!(app.has_pending_requests());
+
+        let (opened, closed) = app.drain_requests();
+        assert_eq!(opened.len(), 1);
+        assert!(closed.is_empty());
+        assert_eq!(app.windows().len(), 2);
+
+        // 新窗口照样能跑完整管线
+        let stats = app.frame_all();
+        let (_, st) = stats.iter().find(|(w, _)| *w == opened[0]).unwrap();
+        assert!(st.view_ran && st.render.raster.rasterized);
+        assert!(find_text(app.window_ctx(opened[0]).unwrap().track(), "panel").is_some());
+    }
+
+    #[test]
+    fn ctx_can_close_its_own_window() {
+        struct SelfClosing {
+            done: Signal<bool>,
+        }
+        impl ViewModel for SelfClosing {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("bye");
+                });
+            }
+            fn on_tick(self: &Rc<Self>, cx: &mut Ctx, _now: Instant) {
+                if self.done.get() {
+                    crate::app::close_self(cx);
+                }
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(
+            WindowConfig::new(),
+            SelfClosing {
+                done: Signal::new(&rt, true),
+            },
+        );
+        app.frame_all();
+        app.window_ctx_mut(id)
+            .unwrap()
+            .tick(&rt, Instant::now());
+
+        let (opened, closed) = app.drain_requests();
+        assert!(opened.is_empty());
+        assert_eq!(closed, vec![id]);
+        assert!(app.window_ctx(id).is_none());
+        assert_eq!(app.runtime().windows().len(), 0, "脏标志表也清掉了");
+    }
+
+    #[test]
+    fn scale_factor_resizes_the_pixmap_without_relayout() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert_eq!(ctx.pixmap().width(), 800);
+            assert_eq!(ctx.scale_factor(), 1.0);
+        }
+
+        app.window_ctx_mut(id)
+            .unwrap()
+            .set_scale_factor(&rt, 2.0);
+        let st = app.frame_all()[0].1.clone();
+        assert!(!st.layout.ran, "DPI 变化不吃布局");
+        assert!(st.paint_pending);
+
+        let ctx = app.window_ctx(id).unwrap();
+        assert_eq!(ctx.pixmap().width(), 1600);
+        assert_eq!(ctx.pixmap().height(), 1200);
+        assert_eq!(ctx.size(), Size::new(800.0, 600.0), "逻辑尺寸不变");
+        // 命中测试用逻辑坐标：内容根仍是 800×600 的逻辑矩形
+        assert_eq!(app.window_ctx(id).unwrap().hit_target(Point::new(10.0, 10.0)).is_some(), true);
+    }
+
+    // ─────────────── M5：内置行为 + 双向绑定 ───────────────
+
+    struct Controls {
+        volume: Signal<f32>,
+        agree: Signal<bool>,
+    }
+
+    impl ViewModel for Controls {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.gap(8.0);
+                c.slider_bound(&self.volume, 0.0, 10.0);
+                c.checkbox_bound(&self.agree);
+            });
+        }
+    }
+
+    fn controls() -> (Runtime, App, Rc<Controls>, WindowId, NodeId, NodeId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Controls {
+            volume: Signal::new(&rt, 0.0),
+            agree: Signal::new(&rt, false),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(200.0, 120.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        let (slider, checkbox) = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            let kids = w.track().children(root);
+            (kids[0], kids[1])
+        };
+        (rt, app, vm, id, slider, checkbox)
+    }
+
+    #[test]
+    fn slider_drag_writes_back_the_bound_signal() {
+        let (rt, mut app, vm, id, slider, _) = controls();
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), slider);
+        assert_eq!(rect.width, 140.0, "slider 默认宽");
+
+        let p = Point::new(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5);
+        let out = app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        assert!(out.events > 0);
+        assert!((vm.volume.get() - 5.0).abs() < 0.01, "拖到中点 ⇒ 5");
+        {
+            let w = app.window_ctx(id).unwrap();
+            assert_eq!(w.track().captured_by(PointerId(0)), Some(slider), "拖拽期间捕获指针");
+            assert!(matches!(
+                w.track().get(slider).map(|n| &n.kind),
+                Some(Kind::Slider { dragging: true, .. })
+            ));
+        }
+
+        // 拖到右端（并越界一点）⇒ 钳到 max
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos: Point::new(rect.right() + 50.0, p.y),
+            },
+        );
+        assert_eq!(vm.volume.get(), 10.0);
+
+        // 松开 ⇒ 结束拖拽 + 释放捕获
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: Point::new(rect.right(), p.y),
+                button: PointerButton::Left,
+            },
+        );
+        let w = app.window_ctx(id).unwrap();
+        assert_eq!(w.track().captured_by(PointerId(0)), None);
+        assert!(matches!(
+            w.track().get(slider).map(|n| &n.kind),
+            Some(Kind::Slider { dragging: false, .. })
+        ));
+    }
+
+    #[test]
+    fn slider_drag_and_the_next_view_do_not_fight() {
+        let (rt, mut app, vm, id, slider, _) = controls();
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), slider);
+        let p = Point::new(rect.x + rect.width * 0.25, rect.y + 5.0);
+
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        assert!((vm.volume.get() - 2.5).abs() < 0.01);
+
+        // 立即写节点 + 写 signal ⇒ 下一帧 view() 产出的描述值与节点一致 ⇒ 零 patch
+        let st = app.frame_all()[0].1.clone();
+        assert_eq!(st.align.patched, 0, "不应产生「值回弹」式补丁：{st:?}");
+        assert!(!st.layout.ran || st.layout.moved == 0);
+    }
+
+    #[test]
+    fn unbound_slider_ignores_the_pointer() {
+        struct Plain;
+        impl ViewModel for Plain {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.slider(0.5);
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(200.0, 120.0), Plain);
+        app.frame_all();
+        let slider = {
+            let w = app.window_ctx(id).unwrap();
+            w.track().children(w.content_root().unwrap())[0]
+        };
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), slider);
+
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: Point::new(rect.right(), rect.y + 5.0),
+                button: PointerButton::Left,
+            },
+        );
+        let w = app.window_ctx(id).unwrap();
+        assert!(
+            matches!(w.track().get(slider).map(|n| &n.kind), Some(Kind::Slider { value, dragging, .. }) if (*value - 0.5).abs() < 1e-3 && !*dragging),
+            "未绑定 ⇒ 框架不接管拖拽（desc 是唯一真相）：{:?}",
+            w.track().get(slider).map(|n| &n.kind)
+        );
+        assert_eq!(w.track().captured_by(PointerId(0)), None);
+    }
+
+    #[test]
+    fn bound_checkbox_toggles_on_tap() {
+        let (rt, mut app, vm, id, _, checkbox) = controls();
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), checkbox);
+        let p = Point::new(rect.x + 5.0, rect.y + 5.0);
+
+        let w = app.window_ctx_mut(id).unwrap();
+        let down = w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        let up = w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        assert_eq!(down.tapped, None);
+        assert_eq!(up.tapped, Some(checkbox));
+        assert!(vm.agree.get(), "Tapped ⇒ 框架翻转绑定的 signal");
+
+        // 再点一次翻回来
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        assert!(!vm.agree.get());
+    }
+
+    #[test]
+    fn unbound_checkbox_is_left_to_user_handlers() {
+        struct Plain {
+            clicks: Rc<std::cell::Cell<u32>>,
+        }
+        impl ViewModel for Plain {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                let clicks = Rc::clone(&self.clicks);
+                v.column(|c| {
+                    c.checkbox(false).on_tap(move || clicks.set(clicks.get() + 1));
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let clicks = Rc::new(std::cell::Cell::new(0));
+        let id = app.window(
+            WindowConfig::new().size(200.0, 120.0),
+            Plain {
+                clicks: Rc::clone(&clicks),
+            },
+        );
+        app.frame_all();
+        let cb = {
+            let w = app.window_ctx(id).unwrap();
+            w.track().children(w.content_root().unwrap())[0]
+        };
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), cb);
+        let p = Point::new(rect.x + 5.0, rect.y + 5.0);
+
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+
+        assert_eq!(clicks.get(), 1, "用户处理器被调用");
+        let w = app.window_ctx(id).unwrap();
+        assert!(
+            matches!(w.track().get(cb).map(|n| &n.kind), Some(Kind::Checkbox { checked: false })),
+            "未绑定 ⇒ 框架不改状态"
+        );
+    }
+
+    // ─────────────── M5：输入框（Input）───────────────
+
+    struct Form {
+        name: Signal<String>,
+    }
+
+    impl ViewModel for Form {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.input_bound(&self.name).placeholder("姓名");
+            });
+        }
+    }
+
+    fn form(initial: &str) -> (Runtime, App, Rc<Form>, WindowId, NodeId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Form {
+            name: Signal::new(&rt, initial.to_string()),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(240.0, 80.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        let input = {
+            let w = app.window_ctx(id).unwrap();
+            w.track().children(w.content_root().unwrap())[0]
+        };
+        (rt, app, vm, id, input)
+    }
+
+    fn input_state(app: &App, id: WindowId, input: NodeId) -> (String, usize, usize, String) {
+        let w = app.window_ctx(id).unwrap();
+        match w.track().get(input).map(|n| &n.kind) {
+            Some(Kind::Input {
+                text,
+                caret,
+                anchor,
+                preedit,
+                ..
+            }) => (text.clone(), *caret, *anchor, preedit.clone()),
+            other => panic!("不是输入框：{other:?}"),
+        }
+    }
+
+    /// 在输入框右端点一下：拿到焦点 + 光标落到末尾（多数用例的默认动作）
+    fn click_input(app: &mut App, rt: &Runtime, id: WindowId, input: NodeId) {
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), input);
+        click_input_at(app, rt, id, input, rect.right());
+    }
+
+    /// 在输入框里点一下（并让它拿到焦点）
+    fn click_input_at(app: &mut App, rt: &Runtime, id: WindowId, input: NodeId, x: f32) {
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), input);
+        let p = Point::new(x, rect.y + rect.height * 0.5);
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(
+            rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        w.pointer(
+            rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+    }
+
+    fn type_chars(app: &mut App, rt: &Runtime, id: WindowId, s: &str) {
+        for ch in s.chars() {
+            app.window_ctx_mut(id)
+                .unwrap()
+                .key(rt, Event::char_received(ch));
+        }
+    }
+
+    fn press_key(app: &mut App, rt: &Runtime, id: WindowId, code: KeyCode, mods: Modifiers) {
+        app.window_ctx_mut(id).unwrap().key(
+            rt,
+            Event::key_with(EventKind::KeyDown, code, mods),
+        );
+    }
+
+    #[test]
+    fn typing_writes_back_to_the_bound_signal() {
+        let (rt, mut app, vm, id, input) = form("");
+        click_input(&mut app, &rt, id, input);
+        assert_eq!(app.window_ctx(id).unwrap().track().focused, Some(input));
+
+        type_chars(&mut app, &rt, id, "abc");
+        assert_eq!(vm.name.get(), "abc");
+        let (text, caret, anchor, _) = input_state(&app, id, input);
+        assert_eq!((text.as_str(), caret, anchor), ("abc", 3, 3));
+
+        // 编辑回写的值与描述一致 ⇒ 下一帧不产生补丁（光标不会被"值回弹"打断）
+        let st = app.frame_all()[0].1.clone();
+        assert_eq!(st.align.patched, 0, "{st:?}");
+    }
+
+    #[test]
+    fn click_places_the_caret_at_the_clicked_glyph() {
+        let (rt, mut app, _, id, input) = form("abcd");
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), input);
+        let spec = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .get(input)
+            .unwrap()
+            .text
+            .spec
+            .clone();
+        let pad = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .get(input)
+            .unwrap()
+            .layout
+            .padding[0];
+        let w_ab = lieui_text::TextEngine::measure_text("ab", &spec).0 as f32;
+
+        click_input_at(&mut app, &rt, id, input, rect.x + pad + w_ab);
+        assert_eq!(input_state(&app, id, input).1, 2, "点在 a 与 b 之间");
+
+        type_chars(&mut app, &rt, id, "X");
+        assert_eq!(input_state(&app, id, input).0, "abXcd");
+    }
+
+    #[test]
+    fn backspace_delete_and_arrows_edit_around_the_caret() {
+        let (rt, mut app, vm, id, input) = form("abcd");
+        click_input(&mut app, &rt, id, input); // 光标落在末尾
+        assert_eq!(input_state(&app, id, input).1, 4);
+
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Left), Modifiers::EMPTY);
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Left), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).1, 2);
+
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Backspace), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).0, "acd");
+
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Delete), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).0, "ad");
+        assert_eq!(vm.name.get(), "ad");
+
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Home), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).1, 0);
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::End), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).1, 2);
+    }
+
+    #[test]
+    fn shift_arrows_select_and_typing_replaces_the_selection() {
+        let (rt, mut app, vm, id, input) = form("abcd");
+        click_input(&mut app, &rt, id, input);
+
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Left), Modifiers::SHIFT);
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Left), Modifiers::SHIFT);
+        let (_, caret, anchor, _) = input_state(&app, id, input);
+        assert_eq!((caret, anchor), (2, 4), "从末尾向左扩选两个字符");
+
+        type_chars(&mut app, &rt, id, "Z");
+        assert_eq!(input_state(&app, id, input).0, "abZ", "输入替换选区");
+        assert_eq!(vm.name.get(), "abZ");
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_and_backspace_clears_it() {
+        let (rt, mut app, vm, id, input) = form("hello");
+        click_input(&mut app, &rt, id, input);
+
+        press_key(
+            &mut app,
+            &rt,
+            id,
+            KeyCode::Char('a'),
+            Modifiers::CTRL,
+        );
+        let (_, caret, anchor, _) = input_state(&app, id, input);
+        assert_eq!((caret, anchor), (5, 0), "全选");
+
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Backspace), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).0, "");
+        assert_eq!(vm.name.get(), "");
+    }
+
+    #[test]
+    fn dragging_extends_the_selection() {
+        let (rt, mut app, _, id, input) = form("abcdef");
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), input);
+        let mid_y = rect.y + rect.height * 0.5;
+
+        // 按住（不松手）落在左侧
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: Point::new(rect.x + 6.0, mid_y),
+                    button: PointerButton::Left,
+                },
+            );
+        }
+        assert_eq!(input_state(&app, id, input).1, 0, "点在左侧 ⇒ 光标 0");
+        assert_eq!(
+            app.window_ctx(id).unwrap().track().captured_by(PointerId(0)),
+            Some(input),
+            "编辑期间捕获指针"
+        );
+
+        // 拖到右侧 ⇒ 扩选（锚点不动）
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos: Point::new(rect.right(), mid_y),
+            },
+        );
+        let (_, caret, anchor, _) = input_state(&app, id, input);
+        assert!(
+            caret > anchor,
+            "向右拖 ⇒ 光标在锚点右侧（caret={caret} anchor={anchor}）"
+        );
+
+        // 松手后捕获释放
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: Point::new(rect.right(), mid_y),
+                button: PointerButton::Left,
+            },
+        );
+        assert_eq!(app.window_ctx(id).unwrap().track().captured_by(PointerId(0)), None);
+    }
+
+    #[test]
+    fn ime_preedit_then_commit_inserts_text() {
+        let (rt, mut app, vm, id, input) = form("");
+        click_input(&mut app, &rt, id, input);
+
+        // 预编辑：只进组合串，不动文本
+        app.window_ctx_mut(id).unwrap().dispatch(
+            &rt,
+            &[input],
+            &Event::ImePreedit {
+                text: "zhong".to_string(),
+                cursor: Some((0, 5)),
+            },
+        );
+        assert_eq!(input_state(&app, id, input).3, "zhong");
+        assert_eq!(input_state(&app, id, input).0, "");
+        assert_eq!(vm.name.get(), "");
+
+        // 提交：一个字符一条 CharacterReceived（平台的实现方式）
+        type_chars(&mut app, &rt, id, "中");
+        let (text, _, _, preedit) = input_state(&app, id, input);
+        assert_eq!(text, "中");
+        assert_eq!(preedit, "", "提交后组合串清空");
+        assert_eq!(vm.name.get(), "中");
+    }
+
+    #[test]
+    fn losing_focus_clears_the_preedit() {
+        let (rt, mut app, _, id, input) = form("");
+        click_input(&mut app, &rt, id, input);
+        app.window_ctx_mut(id).unwrap().dispatch(
+            &rt,
+            &[input],
+            &Event::ImePreedit {
+                text: "ab".to_string(),
+                cursor: None,
+            },
+        );
+        assert_eq!(input_state(&app, id, input).3, "ab");
+
+        app.window_ctx_mut(id)
+            .unwrap()
+            .dispatch(&rt, &[input], &Event::simple(EventKind::LostFocus));
+        assert_eq!(input_state(&app, id, input).3, "");
+    }
+
+    #[test]
+    fn unfocused_input_ignores_characters() {
+        let (rt, mut app, vm, id, input) = form("");
+        // 没有点进去（没有焦点）时敲字不应落进输入框
+        type_chars(&mut app, &rt, id, "x");
+        assert_eq!(input_state(&app, id, input).0, "");
+        assert_eq!(vm.name.get(), "");
+    }
+
+    #[test]
+    fn unbound_input_ignores_editing() {
+        struct Plain;
+        impl ViewModel for Plain {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.input("固定文本");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(240.0, 80.0), Plain);
+        app.frame_all();
+        let input = {
+            let w = app.window_ctx(id).unwrap();
+            w.track().children(w.content_root().unwrap())[0]
+        };
+        click_input(&mut app, &rt, id, input);
+        type_chars(&mut app, &rt, id, "zzz");
+
+        let (text, caret, _, _) = input_state(&app, id, input);
+        assert_eq!(text, "固定文本", "未绑定 ⇒ 编辑不生效");
+        assert_eq!(caret, "固定文本".len());
+    }
+
+    #[test]
+    fn model_change_replaces_the_buffer_and_puts_the_caret_at_the_end() {
+        let (rt, mut app, vm, id, input) = form("ab");
+        click_input(&mut app, &rt, id, input);
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Home), Modifiers::EMPTY);
+        assert_eq!(input_state(&app, id, input).1, 0);
+
+        // 模型侧改值（模拟"外部同步"）
+        vm.name.set("hello".to_string());
+        app.frame_all();
+
+        let (text, caret, anchor, _) = input_state(&app, id, input);
+        assert_eq!((text.as_str(), caret, anchor), ("hello", 5, 5));
+    }
+
+    #[test]
+    fn tab_moves_focus_away_from_an_input() {
+        struct TwoFields {
+            a: Signal<String>,
+            b: Signal<String>,
+        }
+        impl ViewModel for TwoFields {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.input_bound(&self.a);
+                    c.input_bound(&self.b);
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(TwoFields {
+            a: Signal::new(&rt, String::new()),
+            b: Signal::new(&rt, String::new()),
+        });
+        let id = app.window_erased(WindowConfig::new().size(240.0, 120.0), erased(Rc::clone(&vm)));
+        app.frame_all();
+        let (first, second) = {
+            let w = app.window_ctx(id).unwrap();
+            let kids = w.track().children(w.content_root().unwrap());
+            (kids[0], kids[1])
+        };
+
+        click_input(&mut app, &rt, id, first);
+        type_chars(&mut app, &rt, id, "a");
+        assert_eq!(vm.a.get(), "a");
+
+        app.window_ctx_mut(id).unwrap().tab(&rt, true);
+        assert_eq!(app.window_ctx(id).unwrap().track().focused, Some(second));
+
+        type_chars(&mut app, &rt, id, "b");
+        assert_eq!((vm.a.get(), vm.b.get()), ("a".to_string(), "b".to_string()));
+    }
+
+    // ─────────────── M5：锚定层（popup）───────────────
+
+    struct Menu {
+        open: Signal<bool>,
+    }
+
+    impl ViewModel for Menu {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.gap(8.0);
+                c.button("菜单")
+                    .key("btn")
+                    .on_tap(act(self, |s| s.open.set(!s.open.get())));
+            });
+            if self.open.get() {
+                v.popup_at("btn", Placement::Below, |p| {
+                    p.text("菜单项 A");
+                    p.text("菜单项 B");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn popup_opens_on_tap_and_follows_the_anchor() {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(
+            WindowConfig::new().size(300.0, 200.0),
+            Menu {
+                open: Signal::new(&rt, false),
+            },
+        );
+        app.frame_all();
+        let btn = {
+            let w = app.window_ctx(id).unwrap();
+            w.track().children(w.content_root().unwrap())[0]
+        };
+        assert!(
+            app.window_ctx(id)
+                .unwrap()
+                .track()
+                .roots_of(Layer::Popup)
+                .next()
+                .is_none(),
+            "没开菜单前没有 popup 层"
+        );
+
+        // 点按钮 ⇒ open = true ⇒ view() 声明 popup ⇒ 布局后落位
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), btn);
+        let p = rect.center();
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: p,
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos: p,
+                    button: PointerButton::Left,
+                },
+            );
+        }
+        app.frame_all();
+
+        let (br, pr) = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let popup = t.roots_of(Layer::Popup).next().expect("popup 层出现了").node;
+            (crate::layout::rect_of(t, btn), crate::layout::rect_of(t, popup))
+        };
+        assert_eq!(pr.x, br.x, "Below 与锚点左对齐");
+        assert!(
+            (pr.y - (br.bottom() + 4.0)).abs() < 0.5,
+            "层在锚点下方留间距：{br:?} -> {pr:?}"
+        );
+
+        // 再点一次（按钮被 popup 挡不住：popup 在按钮下方）⇒ 关闭 ⇒ popup 层消失
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: p,
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos: p,
+                    button: PointerButton::Left,
+                },
+            );
+        }
+        app.frame_all();
+        assert!(
+            app.window_ctx(id)
+                .unwrap()
+                .track()
+                .roots_of(Layer::Popup)
+                .next()
+                .is_none(),
+            "再点一次后 popup 层消失"
+        );
+    }
+
+    // ─────────────── M6：ComboBox（A 档组合：按钮 + 锚定弹层）───────────────
+
+    struct Picker {
+        open: Signal<bool>,
+        choice: Signal<String>,
+    }
+
+    /// **A 档组合函数**（≈ 组件就是普通函数）：锚定按钮 + 轻关闭弹层。
+    /// 不需要任何新机制——这正是"组合覆盖 ~90%"的验收。
+    fn combo(
+        vm: &Rc<Picker>,
+        v: &mut ViewBuf,
+        anchor_key: &str,
+        options: &[&str],
+    ) {
+        v.column(|c| {
+            c.button("选择水果")
+                .key(anchor_key)
+                .on_tap(act(vm, |s| s.open.set(!s.open.get())));
+        });
+        if vm.open.get() {
+            v.popup_at(anchor_key, Placement::Below, |p| {
+                // 轻关闭：点击弹层之外 ⇒ 层根收到 Dismissed ⇒ 翻自己的状态
+                let me = Rc::clone(vm);
+                p.on(EventKind::Dismissed, move |_| me.open.set(false));
+                for opt in options {
+                    let me = Rc::clone(vm);
+                    let label = opt.to_string();
+                    p.text(opt.to_string())
+                        .padding(6.0)
+                        .width(80.0)
+                        .on_tap(move || {
+                            me.choice.set(label.clone());
+                            me.open.set(false);
+                        });
+                }
+            });
+        }
+    }
+
+    impl ViewModel for Picker {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            combo(self, v, "combo-btn", &["苹果", "香蕉", "樱桃"]);
+        }
+    }
+
+    fn picker() -> (Runtime, App, Rc<Picker>, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Picker {
+            open: Signal::new(&rt, false),
+            choice: Signal::new(&rt, String::new()),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(200.0, 200.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        (rt, app, vm, id)
+    }
+
+    fn popup_root_of(app: &App, id: WindowId) -> Option<NodeId> {
+        app.window_ctx(id)
+            .unwrap()
+            .track()
+            .roots_of(Layer::Popup)
+            .next()
+            .map(|r| r.node)
+    }
+
+    #[test]
+    fn combo_dropdown_opens_selects_and_light_dismisses() {
+        let (rt, mut app, vm, id) = picker();
+        let btn = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .children(app.window_ctx(id).unwrap().content_root().unwrap())[0];
+
+        assert!(popup_root_of(&app, id).is_none(), "展开前没有弹层");
+
+        // ① 点锚点 ⇒ 弹层出现，锚定按钮下方、左对齐
+        tap_node(&mut app, &rt, id, btn);
+        app.frame_all();
+        let (br, pr, items) = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let popup = popup_root_of(&app, id).expect("弹层出现");
+            let items: Vec<NodeId> = t
+                .descendants(popup)
+                .into_iter()
+                .filter(|n| matches!(t.get(*n).unwrap().kind, Kind::Text(_)))
+                .collect();
+            (
+                crate::layout::rect_of(t, btn),
+                crate::layout::rect_of(t, popup),
+                items,
+            )
+        };
+        assert_eq!(pr.x, br.x, "Below 左对齐");
+        assert!((pr.y - (br.bottom() + 4.0)).abs() < 0.5);
+        assert_eq!(items.len(), 3, "三个选项");
+
+        // ② 点"香蕉" ⇒ 选中 + 弹层关闭（选项自己翻 open）
+        tap_node(&mut app, &rt, id, items[1]);
+        assert_eq!(vm.choice.get(), "香蕉");
+        assert_eq!(vm.open.get(), false);
+        app.frame_all();
+        assert!(popup_root_of(&app, id).is_none(), "选择后弹层消失");
+
+        // ③ 再展开，点击弹层之外 ⇒ 轻关闭
+        tap_node(&mut app, &rt, id, btn);
+        app.frame_all();
+        assert!(popup_root_of(&app, id).is_some());
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: Point::new(190.0, 190.0),
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos: Point::new(190.0, 190.0),
+                    button: PointerButton::Left,
+                },
+            );
+        }
+        assert_eq!(vm.open.get(), false, "点外部 ⇒ Dismissed ⇒ 关闭");
+        app.frame_all();
+        assert!(popup_root_of(&app, id).is_none());
+
+        // ④ 锚点在关闭状态再点 ⇒ 重新展开（toggle 与 dismiss 不互相打架）
+        tap_node(&mut app, &rt, id, btn);
+        assert_eq!(vm.open.get(), true);
+    }
+
+    #[test]
+    fn anchor_click_while_open_closes_the_dropdown() {
+        let (rt, mut app, vm, id) = picker();
+        let btn = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .children(app.window_ctx(id).unwrap().content_root().unwrap())[0];
+
+        tap_node(&mut app, &rt, id, btn);
+        app.frame_all();
+        assert!(popup_root_of(&app, id).is_some());
+
+        // 弹层开着时再点锚点：Tapped(toggle→false) 先于 Dismissed(→false) ⇒ 关闭且保持关闭
+        tap_node(&mut app, &rt, id, btn);
+        assert_eq!(vm.open.get(), false);
+        app.frame_all();
+        assert!(popup_root_of(&app, id).is_none());
+    }
+
+    // ─────────────── M6：MenuBar（组合 + 嵌套弹层）───────────────
+
+    struct MenuVm {
+        /// 当前打开的菜单名（"" = 全关）——声明式互斥，同 Radio 原理
+        open_menu: Signal<String>,
+        /// "查找"子菜单是否展开
+        sub_open: Signal<bool>,
+        last: Signal<String>,
+    }
+
+    impl ViewModel for MenuVm {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            // ── 菜单条：一排锚点按钮（行固定高，按钮不被拉伸成整窗）──
+            v.row(|r| {
+                r.height(28.0);
+                r.button("文件")
+                    .key("menu-文件")
+                    .on_tap(act1(self, |s, m: String| {
+                        // toggle 自己（打开时再点 = 关闭）
+                        s.open_menu
+                            .set(if s.open_menu.get() == m { String::new() } else { m });
+                    }, "文件".to_string()));
+                r.button("编辑")
+                    .key("menu-编辑")
+                    .on_tap(act1(self, |s, m: String| {
+                        s.open_menu
+                            .set(if s.open_menu.get() == m { String::new() } else { m });
+                    }, "编辑".to_string()));
+            });
+
+            // ── 弹层：声明式存在（open_menu 是唯一真相），锚定各自的按钮 ──
+            if self.open_menu.get() == "文件" {
+                v.popup_at("menu-文件", Placement::Below, |p| {
+                    let me = Rc::clone(self);
+                    // 轻关闭守卫：只关自己（避免清掉刚打开的兄弟菜单）
+                    p.on(EventKind::Dismissed, move |_| {
+                        if me.open_menu.get() == "文件" {
+                            me.open_menu.set(String::new());
+                        }
+                    });
+                    for item in ["新建", "打开"] {
+                        let me = Rc::clone(self);
+                        let label = item.to_string();
+                        p.text(item.to_string())
+                            .padding(6.0)
+                            .width(90.0)
+                            .on_tap(move || {
+                                me.last.set(label.clone());
+                                me.open_menu.set(String::new());
+                            });
+                    }
+                });
+            }
+            if self.open_menu.get() == "编辑" {
+                v.popup_at("menu-编辑", Placement::Below, |p| {
+                    let me = Rc::clone(self);
+                    p.on(EventKind::Dismissed, move |_| {
+                        if me.open_menu.get() == "编辑" {
+                            me.open_menu.set(String::new());
+                        }
+                    });
+                    p.text("撤销")
+                        .padding(6.0)
+                        .width(90.0)
+                        .on_tap({
+                            let me = Rc::clone(self);
+                            move || {
+                                me.last.set("撤销".to_string());
+                                me.open_menu.set(String::new());
+                            }
+                        });
+                    // 子菜单锚点：这一项本身是下级弹层的锚
+                    p.text("查找 ▸")
+                        .padding(6.0)
+                        .width(90.0)
+                        .key("item-查找")
+                        .on_tap(act(self, |s| s.sub_open.set(!s.sub_open.get())));
+                });
+            }
+            // ── 子层级：锚点在另一个弹层里（RightOf），验证嵌套弹层 ──
+            if self.open_menu.get() == "编辑" && self.sub_open.get() {
+                v.popup_at("item-查找", Placement::RightOf, |p| {
+                    let me = Rc::clone(self);
+                    p.text("查找内容")
+                        .padding(6.0)
+                        .width(90.0)
+                        .on_tap(move || {
+                            me.last.set("查找内容".to_string());
+                            me.open_menu.set(String::new());
+                            me.sub_open.set(false);
+                        });
+                });
+            }
+        }
+    }
+
+    fn menu_vm() -> (Runtime, App, Rc<MenuVm>, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(MenuVm {
+            open_menu: Signal::new(&rt, String::new()),
+            sub_open: Signal::new(&rt, false),
+            last: Signal::new(&rt, String::new()),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(300.0, 220.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        (rt, app, vm, id)
+    }
+
+    fn menu_buttons(app: &App, id: WindowId) -> (NodeId, NodeId) {
+        let w = app.window_ctx(id).unwrap();
+        let kids = w.track().children(w.content_root().unwrap());
+        (kids[0], kids[1])
+    }
+
+    fn popup_texts(app: &App, id: WindowId) -> Vec<String> {
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let Some(popup) = t.roots_of(Layer::Popup).next().map(|r| r.node) else {
+            return Vec::new();
+        };
+        t.descendants(popup)
+            .into_iter()
+            .filter_map(|n| match &t.get(n).unwrap().kind {
+                Kind::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn menu_bar_opens_one_menu_at_a_time_and_reanchors() {
+        let (rt, mut app, _, id) = menu_vm();
+        let (btn_file, btn_edit) = menu_buttons(&app, id);
+
+        assert!(popup_texts(&app, id).is_empty(), "初始没有弹层");
+
+        // 打开"文件"
+        tap_node(&mut app, &rt, id, btn_file);
+        app.frame_all();
+        assert_eq!(popup_texts(&app, id), vec!["新建".to_string(), "打开".to_string()]);
+
+        // 直接点"编辑"：文件关闭、编辑打开（tapped 先行、dismiss 只关自己）
+        tap_node(&mut app, &rt, id, btn_edit);
+        app.frame_all();
+        assert_eq!(popup_texts(&app, id), vec!["撤销".to_string(), "查找 ▸".to_string()]);
+
+        // 弹层重新锚定到"编辑"按钮下方（跨帧跟随锚点）
+        let (br, pr) = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let popup = t.roots_of(Layer::Popup).next().unwrap().node;
+            (
+                crate::layout::rect_of(t, btn_edit),
+                crate::layout::rect_of(t, popup),
+            )
+        };
+        assert_eq!(pr.x, br.x, "x 对齐：br={br:?} pr={pr:?}");
+        assert!(
+            (pr.y - (br.bottom() + 4.0)).abs() < 0.5,
+            "y 锚定：br={br:?} pr={pr:?}"
+        );
+
+        // 再点"编辑"：关闭
+        tap_node(&mut app, &rt, id, btn_edit);
+        app.frame_all();
+        assert!(popup_texts(&app, id).is_empty());
+    }
+
+    #[test]
+    fn menu_item_fires_and_submenu_nests_to_the_right() {
+        let (rt, mut app, vm, id) = menu_vm();
+        let (btn_file, _) = menu_buttons(&app, id);
+
+        // 文件 → 新建：动作触发 + 菜单关闭
+        tap_node(&mut app, &rt, id, btn_file);
+        app.frame_all();
+        let item = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let popup = t.roots_of(Layer::Popup).next().unwrap().node;
+            t.descendants(popup)
+                .into_iter()
+                .find(|n| matches!(&t.get(*n).unwrap().kind, Kind::Text(s) if s == "新建"))
+                .expect("有 新建 项")
+        };
+        tap_node(&mut app, &rt, id, item);
+        assert_eq!(vm.last.get(), "新建");
+        assert_eq!(vm.open_menu.get(), "");
+        app.frame_all();
+        assert!(popup_texts(&app, id).is_empty());
+
+        // 编辑 → 查找 ▸：子菜单出现在右侧（RightOf，锚点是弹层内的项）
+        let (_, btn_edit) = menu_buttons(&app, id);
+        tap_node(&mut app, &rt, id, btn_edit);
+        app.frame_all();
+        let find_item = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let popup = t.roots_of(Layer::Popup).next().unwrap().node;
+            t.descendants(popup)
+                .into_iter()
+                .find(|n| matches!(&t.get(*n).unwrap().kind, Kind::Text(s) if s == "查找 ▸"))
+                .expect("有 查找 项")
+        };
+        tap_node(&mut app, &rt, id, find_item);
+        app.frame_all();
+
+        // 两个弹层：菜单 + 子菜单（同层后声明者在上面）
+        let (item_r, sub_r) = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let mut roots = t.roots_of(Layer::Popup).map(|r| r.node);
+            let _menu = roots.next().unwrap();
+            let sub = roots.next().expect("子菜单弹层存在");
+            (
+                crate::layout::rect_of(t, find_item),
+                crate::layout::rect_of(t, sub),
+            )
+        };
+        assert!(
+            (sub_r.x - (item_r.right() + 4.0)).abs() < 0.5,
+            "子菜单在锚点右侧：item={item_r:?} sub={sub_r:?}"
+        );
+        assert!((sub_r.y - item_r.y).abs() < 0.5, "子菜单与锚点顶对齐");
+
+        // 点子菜单项：动作 + 全部关闭（含子菜单状态）
+        let sub_item = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let mut roots = t.roots_of(Layer::Popup).map(|r| r.node);
+            let _menu = roots.next().unwrap();
+            let sub = roots.next().unwrap();
+            t.descendants(sub)
+                .into_iter()
+                .find(|n| matches!(&t.get(*n).unwrap().kind, Kind::Text(s) if s == "查找内容"))
+                .expect("有 查找内容 项")
+        };
+        tap_node(&mut app, &rt, id, sub_item);
+        assert_eq!(vm.last.get(), "查找内容");
+        assert_eq!(vm.open_menu.get(), "");
+        assert_eq!(vm.sub_open.get(), false);
+        app.frame_all();
+        assert!(popup_texts(&app, id).is_empty(), "全部弹层关闭");
+    }
+
+    #[test]
+    fn clicking_outside_closes_the_open_menu() {
+        let (rt, mut app, vm, id) = menu_vm();
+        let (btn_file, _) = menu_buttons(&app, id);
+
+        tap_node(&mut app, &rt, id, btn_file);
+        app.frame_all();
+        assert!(!popup_texts(&app, id).is_empty());
+
+        // 点窗口右下角（远离菜单条与弹层）⇒ 轻关闭
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: Point::new(280.0, 200.0),
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos: Point::new(280.0, 200.0),
+                    button: PointerButton::Left,
+                },
+            );
+        }
+        assert_eq!(vm.open_menu.get(), "", "点外部 ⇒ Dismissed ⇒ 关闭");
+        app.frame_all();
+        assert!(popup_texts(&app, id).is_empty());
+    }
+
+    // ─────────────── M6：VirtualList（ScrollChanged + 组合）───────────────
+
+    /// **虚拟列表**（A 档组合函数）：只物化可见窗口的行。
+    ///
+    /// 原理：滚动容器内 = 顶部占位 + 可见行 + 底部占位（总高恒 = count × item_h，
+    /// 滚动条因此"诚实"）；`ScrollChanged` 事件把新偏移写回 `first` signal ⇒
+    /// view 重跑换一批行。滚动位置本身在保留树里（视图态），跨帧不丢。
+    fn virtual_list(
+        v: &mut ViewBuf,
+        first: &Signal<usize>,
+        count: usize,
+        item_h: f32,
+        viewport_h: f32,
+        label: impl Fn(usize) -> String,
+    ) {
+        let visible = (viewport_h / item_h).ceil() as usize + 1;
+        let first_i = first.get().min(count);
+        let last_i = (first_i + visible).min(count);
+
+        v.scroll(|s| {
+            s.height(viewport_h);
+            s.width(140.0);
+            let sig = first.clone();
+            let ih = item_h;
+            s.on(EventKind::ScrollChanged, move |cx| {
+                sig.set((cx.scroll_offset().1 / ih) as usize);
+            });
+            // 顶部占位（已滚过的行）
+            let top = first_i as f32 * item_h;
+            s.row(|sp| sp.height(top));
+            for i in first_i..last_i {
+                let text = label(i);
+                s.row(|r| {
+                    r.height(item_h);
+                    r.text(text).font_size(16.0);
+                });
+            }
+            // 底部占位（尚未滚到的行）
+            let bottom = (count - last_i) as f32 * item_h;
+            s.row(|sp| sp.height(bottom));
+        });
+    }
+
+    struct LongList {
+        first: Signal<usize>,
+    }
+
+    impl ViewModel for LongList {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            virtual_list(v, &self.first, 1000, 24.0, 240.0, |i| format!("Item {i}"));
+        }
+    }
+
+    fn long_list() -> (Runtime, App, Rc<LongList>, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(LongList {
+            first: Signal::new(&rt, 0),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(200.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        (rt, app, vm, id)
+    }
+
+    /// 滚动容器 = 内容根本身（`v.scroll` 在 view 顶层声明）
+    fn scroll_node(app: &App, id: WindowId) -> NodeId {
+        app.window_ctx(id).unwrap().content_root().unwrap()
+    }
+
+    fn visible_labels(app: &App, id: WindowId) -> Vec<String> {
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let scroll = scroll_node(app, id);
+        t.descendants(scroll)
+            .into_iter()
+            .filter_map(|n| match &t.get(n).unwrap().kind {
+                Kind::Text(s) if s.starts_with("Item ") => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn virtual_list_materializes_only_the_visible_window() {
+        let (rt, mut app, _vm, id) = long_list();
+        let scroll = scroll_node(&app, id);
+
+        // 1000 行只渲染 11 行（240/24 + 1），标签是前 11 个
+        let labels = visible_labels(&app, id);
+        assert_eq!(labels.len(), 11, "只物化可见窗口：{}", labels.len());
+        assert_eq!(labels[0], "Item 0");
+        assert_eq!(labels[10], "Item 10");
+
+        // 内容尺寸是"虚拟"的完整高度 ⇒ 滚动条诚实
+        assert!(
+            (app.window_ctx(id).unwrap().track().get(scroll).unwrap().content_size.height - 24000.0)
+                .abs()
+                < 0.5,
+            "内容高 = 1000 × 24"
+        );
+
+        // 滚一屏：ScrollChanged ⇒ first=10 ⇒ 下一帧换一批行
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(
+                &rt,
+                InputEvent::Wheel {
+                    pointer: PointerId(0),
+                    pos: Point::new(60.0, 120.0),
+                    delta: (0.0, 240.0),
+                },
+            );
+        }
+        app.frame_all(); // 派发 ScrollChanged ⇒ 信号写入（本帧还是旧行）
+        app.frame_all(); // view 重跑 ⇒ 换窗
+        let labels = visible_labels(&app, id);
+        assert_eq!(labels.len(), 11, "窗口大小不变");
+        assert_eq!(labels[0], "Item 10", "窗口前移 10 行：{labels:?}");
+        assert_eq!(labels[10], "Item 20");
+
+        // 滚动位置在保留树里（视图态）⇒ 与信号一致，不回弹
+        assert!(
+            (app.window_ctx(id)
+                .unwrap()
+                .track()
+                .scroll_offset(scroll)
+                .1
+                - 240.0)
+                .abs()
+                < 0.5
+        );
+    }
+
+    #[test]
+    fn scrolling_back_reveals_earlier_items() {
+        let (_rt, mut app, _vm, id) = long_list();
+        let scroll = scroll_node(&app, id);
+
+        // 直接把偏移滚到很深（模拟 ScrollTo / 大量滚轮）
+        app.window_ctx_mut(id)
+            .unwrap()
+            .track_mut()
+            .set_scroll_offset(scroll, (0.0, 24000.0 - 240.0));
+        app.frame_all(); // 派发 ScrollChanged ⇒ 信号写入
+        app.frame_all(); // view 重跑 ⇒ 换窗
+        let labels = visible_labels(&app, id);
+        assert_eq!(labels.last().map(String::as_str), Some("Item 999"), "{labels:?}");
+    }
+
+    // ─────────────── M6：开关 / 单选 ───────────────
+
+    struct Toggles {
+        on: Signal<bool>,
+        color: Signal<String>,
+    }
+
+    impl ViewModel for Toggles {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.gap(8.0);
+                c.switch_bound(&self.on);
+                c.radio_bound(&self.color, "red");
+                c.radio_bound(&self.color, "green");
+                // 只显示形态（未绑定 ⇒ 内置行为不激活）
+                c.switch(true);
+                c.radio(true);
+            });
+        }
+    }
+
+    fn toggles() -> (Runtime, App, Rc<Toggles>, WindowId, Vec<NodeId>) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Toggles {
+            on: Signal::new(&rt, false),
+            color: Signal::new(&rt, "red".to_string()),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(200.0, 200.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        let kids = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .children(app.window_ctx(id).unwrap().content_root().unwrap())
+            .to_vec();
+        (rt, app, vm, id, kids)
+    }
+
+    fn tap_node(app: &mut App, rt: &Runtime, id: WindowId, node: NodeId) {
+        let p = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), node).center();
+        let w = app.window_ctx_mut(id).unwrap();
+        w.pointer(
+            rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        w.pointer(
+            rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+    }
+
+    #[test]
+    fn switch_bound_toggles_the_signal_and_the_desc_follows() {
+        let (rt, mut app, vm, id, kids) = toggles();
+        tap_node(&mut app, &rt, id, kids[0]);
+        assert_eq!(vm.on.get(), true, "点击 ⇒ 写回 signal");
+
+        // 下一帧 desc 跟上（apply_to 判等 ⇒ 零补丁，不回弹）
+        app.frame_all();
+
+        tap_node(&mut app, &rt, id, kids[0]);
+        assert_eq!(vm.on.get(), false);
+
+        // 未绑定的只显示形态：点不变
+        tap_node(&mut app, &rt, id, kids[3]);
+        assert_eq!(vm.on.get(), false);
+    }
+
+    #[test]
+    fn radio_group_is_mutually_exclusive_via_the_view_rerun() {
+        let (rt, mut app, vm, id, kids) = toggles();
+        assert_eq!(vm.color.get(), "red", "初始选中 red");
+
+        // 点 green ⇒ signal 变 ⇒ 下一帧两个 radio 的 selected 由对齐器自然更新
+        tap_node(&mut app, &rt, id, kids[2]);
+        assert_eq!(vm.color.get(), "green");
+
+        app.frame_all();
+        let (red_sel, green_sel) = {
+            let t = app.window_ctx(id).unwrap().track();
+            (
+                matches!(t.get(kids[1]).unwrap().kind, Kind::Radio { selected: true, .. }),
+                matches!(t.get(kids[2]).unwrap().kind, Kind::Radio { selected: true, .. }),
+            )
+        };
+        assert!(!red_sel && green_sel, "声明式互斥：red=false green=true");
+
+        // 点回 red：同样只需一次信号写入
+        tap_node(&mut app, &rt, id, kids[1]);
+        assert_eq!(vm.color.get(), "red");
+    }
+
+    #[test]
+    fn unbound_radio_ignores_taps() {
+        let (rt, mut app, vm, id, kids) = toggles();
+        tap_node(&mut app, &rt, id, kids[4]);
+        assert_eq!(vm.color.get(), "red", "未绑定 ⇒ 编辑不生效");
+    }
+
+    // ─────────────── M5：主题 ───────────────
+
+    #[test]
+    fn theme_switch_recolors_the_controls_on_the_next_frame() {
+        struct Btn;
+        impl ViewModel for Btn {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.center();
+                    c.button("按钮");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(200.0, 200.0), Btn);
+        app.frame_all();
+
+        // 取按钮左下角内侧一点（避开圆角与文字）
+        let (sx, sy) = {
+            let w = app.window_ctx(id).unwrap();
+            let t = w.track();
+            let r = crate::layout::rect_of(t, t.children(w.content_root().unwrap())[0]);
+            ((r.x + 6.0) as u16, (r.bottom() - 3.0) as u16)
+        };
+        let light = Theme::light();
+        let dark = Theme::dark();
+
+        // 浅色：按钮底 = control token
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert_eq!(
+                pixel(ctx, sx, sy),
+                opaque(light.control.r, light.control.g, light.control.b),
+                "按钮底色 = 主题 control"
+            );
+        }
+
+        // 切深色 ⇒ 重跑 view（token 重新烘焙）+ 整窗重绘 ⇒ 按钮变深
+        rt.set_theme(dark);
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.view_ran, "主题切换 ⇒ view 重跑");
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert_eq!(
+                pixel(ctx, sx, sy),
+                opaque(dark.control.r, dark.control.g, dark.control.b),
+                "切主题后按钮底色跟随"
+            );
+        }
+
+        // 同值切换是 no-op：不再重跑
+        rt.set_theme(dark);
+        let st = app.frame_all()[0].1.clone();
+        assert!(!st.view_ran, "同主题切换是 no-op");
+    }
+
+    #[test]
+    fn explicit_window_background_survives_theme_switch() {
+        struct Empty;
+        impl ViewModel for Empty {
+            fn view(self: &Rc<Self>, _v: &mut ViewBuf) {}
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(
+            WindowConfig::new()
+                .size(100.0, 100.0)
+                .background(lieui_geom::Color::RED),
+            Empty,
+        );
+        app.frame_all();
+
+        rt.set_theme(Theme::dark());
+        app.frame_all();
+        let ctx = app.window_ctx(id).unwrap();
+        assert_eq!(pixel(ctx, 50, 50), opaque(255, 0, 0), "显式底色优先于主题");
+    }
+
+    // ─────────────── M6 收尾：光标闪烁 + 输入框水平滚动 ───────────────
+
+    #[test]
+    fn caret_blinks_only_while_an_input_is_focused() {
+        let (rt, mut app, _, id, input) = form("abc");
+
+        // 未聚焦：animate 是 no-op（不会唤醒，也不会画光标）
+        assert!(!app.window_ctx_mut(id).unwrap().animate(Instant::now()));
+        assert!(!app.window_ctx(id).unwrap().track().blink_on);
+
+        // 点进输入框：dispatch 重置相位 ⇒ 光标常亮
+        click_input(&mut app, &rt, id, input);
+        assert!(app.window_ctx(id).unwrap().track().blink_on);
+
+        // 静止一个周期 ⇒ 翻转为灭；再一个周期 ⇒ 又亮
+        let later = Instant::now() + BLINK_PERIOD + Duration::from_millis(50);
+        assert!(app.window_ctx_mut(id).unwrap().animate(later));
+        assert!(!app.window_ctx(id).unwrap().track().blink_on, "周期到 ⇒ 灭");
+        assert!(app
+            .window_ctx_mut(id)
+            .unwrap()
+            .animate(later + BLINK_PERIOD));
+        assert!(app.window_ctx(id).unwrap().track().blink_on, "再翻转为亮");
+
+        // 未到周期：不动（这就是"聚焦才动，其余零功耗"的保证）
+        assert!(!app
+            .window_ctx_mut(id)
+            .unwrap()
+            .animate(later + BLINK_PERIOD + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn input_horizontally_scrolls_to_keep_the_caret_visible() {
+        let (rt, mut app, vm, id, input) = form("");
+        click_input(&mut app, &rt, id, input);
+
+        // 打 40 个字符：远超默认 200 宽的输入框
+        type_chars(&mut app, &rt, id, "0123456789abcdef0123456789abcdef01234567");
+        app.frame_all();
+
+        let (scroll, caret) = {
+            let w = app.window_ctx(id).unwrap();
+            match w.track().get(input).map(|n| &n.kind) {
+                Some(Kind::Input { caret, scroll, .. }) => (*scroll, *caret),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(caret == 40);
+        assert!(scroll > 0.0, "文本超宽 ⇒ 自动水平滚动，光标保持可见：{scroll}");
+
+        // Home：光标回 0 ⇒ 滚动也回 0（可见窗口跟随光标）
+        press_key(&mut app, &rt, id, KeyCode::Named(NamedKey::Home), Modifiers::EMPTY);
+        app.frame_all();
+        let (caret2, scroll2) = {
+            let w = app.window_ctx(id).unwrap();
+            match w.track().get(input).map(|n| &n.kind) {
+                Some(Kind::Input { caret, scroll, .. }) => (*caret, *scroll),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(caret2, 0);
+        assert!((scroll2 - 0.0).abs() < 0.01, "Home ⇒ 滚动回 0：{scroll2}");
+        assert_eq!(vm.name.get().len(), 40);
+    }
+
+    #[test]
+    fn disabled_slider_ignores_the_pointer() {
+        struct Off {
+            volume: Signal<f32>,
+        }
+        impl ViewModel for Off {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.slider_bound(&self.volume, 0.0, 10.0).enabled(false);
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Off {
+            volume: Signal::new(&rt, 1.0),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(200.0, 120.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        let slider = {
+            let w = app.window_ctx(id).unwrap();
+            w.track().children(w.content_root().unwrap())[0]
+        };
+        let rect = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), slider);
+
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: Point::new(rect.right(), rect.y + 5.0),
+                button: PointerButton::Left,
+            },
+        );
+        assert_eq!(vm.volume.get(), 1.0, "禁用 ⇒ 内置行为不执行");
+        assert_eq!(
+            app.window_ctx(id).unwrap().track().captured_by(PointerId(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_ring_is_repainted_without_rerunning_view() {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Counter {
+            count: Signal::new(&rt, 0),
+        });
+        let id = app.window_erased(WindowConfig::new(), erased(vm));
+        app.frame_all();
+
+        // 找到按钮并给它 tab_stop + 键盘焦点（模拟 Tab 导航）
+        let button = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            let row = w.track().children(root)[2];
+            w.track().children(row)[0]
+        };
+        app.window_ctx_mut(id)
+            .unwrap()
+            .track_mut()
+            .get_mut(button)
+            .unwrap()
+            .tab_stop = true;
+        app.window_ctx_mut(id)
+            .unwrap()
+            .tab(&rt, true)
+            .expect("有可聚焦节点");
+
+        let st = app.frame_all()[0].1.clone();
+        assert!(!st.view_ran, "焦点变化不重跑 view()");
+        assert!(st.paint_pending);
+        assert!(st.render.scene.ops > 0);
+    }
+}
