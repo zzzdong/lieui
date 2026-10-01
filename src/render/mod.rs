@@ -85,6 +85,10 @@ impl Renderer {
         self.opts.background = c;
     }
 
+    pub fn options(&self) -> &SceneOptions {
+        &self.opts
+    }
+
     pub fn options_mut(&mut self) -> &mut SceneOptions {
         &mut self.opts
     }

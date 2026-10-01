@@ -243,7 +243,14 @@ impl ViewModel for Gallery {
                         s.rt.set_theme(Theme::dark());
                     }
                 }));
-                r.text("或点这里看看 hover").font_size(13.0);
+                r.text("或悬停这里看 tooltip（悬停 0.6s 浮出，点我试试）")
+                    .font_size(13.0)
+                    .color(self.rt.theme().text_secondary)
+                    .hover_color(self.rt.theme().accent)
+                    .tooltip("框架级 tooltip：\n· 悬停 600ms 自动出现\n· 移开/按下自动消失\n· 屏幕边缘自动翻转与钳位")
+                    .on_tap(act(self, |s| {
+                        s.last_action.set("看到 hover 变色和 tooltip 了吗？".into());
+                    }));
             });
 
             // ── 按钮 ──
@@ -287,6 +294,9 @@ impl ViewModel for Gallery {
             Gallery::combo_anchor(self, s);
 
             // ── 图标（Material Icons 字体，名称即 codepoints 表里的名字）──
+            // 垂直对齐说明：图标的行盒 = 字号见方的正方形（该字体行高系数 1.0），
+            // 行上 `align_items(Center)` 按行盒交叉轴居中 ⇒ 不同字号混排天然对齐；
+            // icon_button 内部把字形行盒双轴居中绘制 ⇒ 字形在按钮里也是居中的。
             self.divider(s);
             s.text("图标（icon / icon_button）").font_size(16.0);
             s.row(|r| {
@@ -304,9 +314,15 @@ impl ViewModel for Gallery {
                 r.icon("star").font_size(24.0);
                 r.icon("info").font_size(20.0);
                 r.icon("menu").font_size(16.0);
-                r.text("不同字号（28/24/20/16），可 .color 变色")
+                // `.optical_align(true)`：按**墨迹盒**参与尺寸与居中。
+                // 图标字体墨迹精确居中于行盒（Δ=0），普通字体不居中（13px 拉丁偏上 1.05px、
+                // CJK 偏下 0.39px）⇒ 混排时按墨迹对齐，视觉中心才严格重合。
+                // `.wrap(false)`：演示行里保持单行（换行会把行撑高、失去"居中对比"的意义）。
+                r.text("不同字号，可 .color 变色")
                     .font_size(13.0)
-                    .color(self.rt.theme().text_secondary);
+                    .color(self.rt.theme().text_secondary)
+                    .wrap(false)
+                    .optical_align(true);
             });
 
             // ── 输入框 ──

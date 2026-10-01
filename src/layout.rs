@@ -164,7 +164,10 @@ fn anchored_origin(
 ) -> Option<(f32, f32)> {
     let lr = track.get(layer).map(|n| n.rect()).unwrap_or_default();
     let (sw, sh) = (lr.width, lr.height);
-    let a = track.find_by_key(&anchor.key)?;
+    let a = match &anchor.target {
+        crate::track::AnchorTarget::Key(key) => track.find_by_key(key)?,
+        crate::track::AnchorTarget::Node(id) => *id,
+    };
     let ar = track.get(a).map(|n| n.rect()).unwrap_or_default();
 
     let mut p = anchor.placement;
@@ -332,6 +335,11 @@ fn write_back(
             overflow_scroll: is_scroll,
         };
         n.desired = desired;
+        // 文本节点：记下引擎这次测度用的**换行宽度**，绘制时复用同一约束
+        //（否则测度按约束换行、绘制不换行 ⇒ 盒子两行高、只画一行 ⇒ 看起来顶对齐）
+        if matches!(&n.kind, Kind::Text(_) | Kind::Button { .. }) {
+            n.text_wrap = flex.measured_wrap_width;
+        }
     }
     let new_rect = Rect::new(x, y, w, h);
     if !rect_eq(old_rect, new_rect) {
@@ -463,8 +471,10 @@ mod tests {
         let txt = text(&mut t, "菜单项", 14.0);
         t.append_child(popup, txt);
         let rid = t.add_root(Layer::Popup, None, popup);
-        t.root_mut(rid).unwrap().opts.anchor =
-            Some(Anchor { key: Key::from("anchor"), placement });
+        t.root_mut(rid).unwrap().opts.anchor = Some(Anchor {
+            target: crate::track::AnchorTarget::Key(Key::from("anchor")),
+            placement,
+        });
         (t, anchor, popup)
     }
 
@@ -622,6 +632,97 @@ mod tests {
         layout(&mut t, Size::new(300.0, 100.0));
         assert_eq!(rect_of(&t, a), Rect::new(0.0, 0.0, 100.0, 100.0));
         assert_eq!(rect_of(&t, b), Rect::new(100.0, 0.0, 200.0, 100.0), "吃掉剩余宽");
+    }
+
+    /// **测度与绘制口径一致**：窄容器里的长文本，测度按约束换行 ⇒ 盒子是两行高，
+    /// 绘制必须用同一约束重排（否则只画一行、贴在盒子顶部 ⇒ 看起来顶对齐）。
+    /// 这里用**像素**验证：画出的墨迹带覆盖盒子的绝大部分高度。
+    #[test]
+    fn wrapped_text_draws_with_the_same_wrap_width_as_measure() {
+        use vello_cpu::color::PremulRgba8;
+
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        {
+            let n = t.get_mut(root).unwrap();
+            n.layout.flex_direction = FlexDirection::Column;
+            n.layout.dim = [120.0, 120.0];
+        }
+        t.add_root(Layer::Content, None, root);
+
+        let text = t.create(
+            Kind::Text("这是一段足够长的中文文本，用来验证换行测度与绘制一致".into()),
+            None,
+        );
+        {
+            let n = t.get_mut(text).unwrap();
+            n.text.spec.font_size = 14.0;
+            n.text.color = lieui_geom::Color::BLACK;
+        }
+        t.append_child(root, text);
+
+        layout(&mut t, Size::new(120.0, 120.0));
+        let rect = rect_of(&t, text);
+        assert!(rect.height > 30.0, "应当换行成多行：h={}", rect.height);
+
+        let mut r = crate::render::Renderer::new(Size::new(120.0, 120.0), lieui_geom::Color::WHITE);
+        r.render(&t, &[], true);
+        let pix = r.pixmap();
+        let pw = usize::from(pix.width());
+        let (mut top, mut bottom) = (usize::MAX, 0usize);
+        for y in 0..120usize {
+            for x in 0..120usize {
+                let p: PremulRgba8 = pix.data()[y * pw + x];
+                if p.r < 240 || p.g < 240 || p.b < 240 {
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                }
+            }
+        }
+        let drawn = (bottom - top + 1) as f32;
+        assert!(
+            drawn > rect.height * 0.6,
+            "画出的墨迹带要覆盖盒子的大部分（不再是只画第一行）：\
+             墨迹 {top}..{bottom}（{drawn}px） vs 盒子高 {}",
+            rect.height
+        );
+    }
+
+    /// 光学对齐：`spec.optical_align` 让文本节点按**墨迹高度**参与布局，
+    /// 于是 `align_items(Center)` 居中的是墨迹盒（视觉中心）而不是行盒。
+    #[test]
+    fn optical_align_changes_the_measured_height() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        {
+            let n = t.get_mut(root).unwrap();
+            n.layout.dim = [300.0, 100.0];
+            n.layout.flex_direction = FlexDirection::Row;
+            n.layout.align_items = lieui_layout::FlexAlign::Center;
+        }
+        t.add_root(Layer::Content, None, root);
+
+        let plain = t.create(Kind::Text("abc".into()), None);
+        let optical = t.create(Kind::Text("abc".into()), None);
+        t.get_mut(plain).unwrap().text.spec.font_size = 13.0;
+        {
+            let n = t.get_mut(optical).unwrap();
+            n.text.spec.font_size = 13.0;
+            n.text.spec.optical_align = true;
+        }
+        t.append_child(root, plain);
+        t.append_child(root, optical);
+        layout(&mut t, Size::new(300.0, 100.0));
+
+        let h_plain = rect_of(&t, plain).height;
+        let h_optical = rect_of(&t, optical).height;
+        assert!(
+            h_optical < h_plain,
+            "光学高度 = 墨迹高 < 行盒高：{h_optical} < {h_plain}"
+        );
+        // 两者都居中（盒中心都落在行中心）
+        assert!((rect_of(&t, plain).center().y - 50.0).abs() < 0.01);
+        assert!((rect_of(&t, optical).center().y - 50.0).abs() < 0.01);
     }
 
     #[test]

@@ -96,7 +96,9 @@ pub mod prelude {
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
     pub use crate::theme::Theme;
-    pub use crate::track::{FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility};
+    pub use crate::track::{
+        AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility,
+    };
     pub use crate::view::{DescRef, ViewBuf};
     pub use lieui_geom::{Color, Point, Rect, Size};
     pub use crate::render::scene::Scene;

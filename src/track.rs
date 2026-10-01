@@ -607,10 +607,19 @@ pub enum FocusPolicy {
     BlockBelow,
 }
 
-/// 浮层锚点：**节点 key**（布局后才解析成 rect，避免"rect 还没算出来"的老问题）
+/// 浮层锚点的目标
+#[derive(Clone, PartialEq, Debug)]
+pub enum AnchorTarget {
+    /// 命中第一个带该 key 的节点（`popup_at` 的声明式用法）
+    Key(Key),
+    /// 直接指定节点（框架内部用法：tooltip 锚到任意 hover 节点，不要求有 key）
+    Node(NodeId),
+}
+
+/// 浮层锚点：布局后才解析成 rect（避免"rect 还没算出来"的老问题）
 #[derive(Clone, PartialEq, Debug)]
 pub struct Anchor {
-    pub key: Key,
+    pub target: AnchorTarget,
     pub placement: Placement,
 }
 
@@ -686,6 +695,9 @@ pub struct Root {
     /// 声明它的父层条目（`None` = Content）
     pub owner: Option<RootId>,
     pub opts: LayerOpts,
+    /// 框架自管层（tooltip 等）：`align` 的 stale 清理**跳过**它们，
+    /// 生命周期归框架（`WindowCtx` 的 tooltip 会话）而不是 view()。
+    pub framework: bool,
 }
 
 /// 滚动条 thumb 的拖拽会话（`widgets::scroll_handle` 维护）
@@ -708,6 +720,11 @@ pub struct Node {
     pub kind: Kind,
     /// 对齐用的稳定 key（列表项）
     pub key: Option<Key>,
+    /// 悬停提示（框架级 tooltip：hover 该节点 600ms 后自动浮出；`None` = 无）
+    pub tooltip: Option<String>,
+    /// **测度时实际使用的换行宽度**（布局引擎写回；绘制复用同一约束，
+    /// 避免"测度按约束换行、绘制不换行"的顶对齐错位）
+    pub text_wrap: Option<f32>,
 
     // ── 样式（内联；无选择器/继承）──
     pub layout: FlexStyle,
@@ -757,6 +774,8 @@ impl Node {
             children: Vec::new(),
             kind,
             key,
+            tooltip: None,
+            text_wrap: None,
             layout: FlexStyle::default(),
             paint: PaintStyle::default(),
             text: TextStyle::default(),
@@ -1061,6 +1080,7 @@ impl Track {
             layer,
             owner,
             opts,
+            framework: false,
         });
         if let Some(n) = self.get_mut(node) {
             n.flags.insert(Flags::ATTACHED);
@@ -1070,6 +1090,16 @@ impl Track {
         // 层出现 → 整窗脏（backdrop / 遮挡关系可能影响任意像素）
         self.damage_whole_window();
         id
+    }
+
+    /// 挂一个**框架自管**层根（tooltip 等）：`align` 的 stale 清理会跳过它，
+    /// 生命周期归调用方（打开者负责用 [`Track::remove_root`] 关闭）。
+    pub fn add_framework_root(&mut self, layer: Layer, owner: Option<RootId>, node: NodeId) -> RootId {
+        let rid = self.add_root(layer, owner, node);
+        if let Some(r) = self.root_mut(rid) {
+            r.framework = true;
+        }
+        rid
     }
 
     /// 摘掉一个层根并销毁其子树；返回**一并移除的层根数量**（含嵌套子层）

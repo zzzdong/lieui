@@ -379,7 +379,7 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
     }
 }
 
-/// 画滚动条（滚动容器专用；不溢出的轴不画）
+/// 画滚动条（滚动容器专用；不溢出的轴不画）——由 [`draw_scrollbar_overlay`] 调用
 fn draw_scrollbars(
     out: &mut Scene,
     cull: &Cull,
@@ -680,24 +680,14 @@ pub(crate) fn draw(
 
         Kind::Text(_) => {
             if let Kind::Text(s) = &n.kind {
-                push_text(
-                    cache, out, cull, s, &n.text.spec, text_color, rect, false, transform,
-                );
+                let spec = draw_spec(n);
+                push_text(cache, out, cull, s, &spec, text_color, rect, false, transform);
             }
         }
 
         Kind::Button { label } => {
-            push_text(
-                cache,
-                out,
-                cull,
-                label,
-                &n.text.spec,
-                text_color,
-                rect,
-                true,
-                transform,
-            );
+            let spec = draw_spec(n);
+            push_text(cache, out, cull, label, &spec, text_color, rect, true, transform);
         }
 
         // 输入框：文本（或 placeholder）+ 选区 + 光标 + IME 组合下划线
@@ -995,11 +985,31 @@ pub(crate) fn draw(
         }
     }
 
-    // ── ⑤ 滚动条（虚拟部件：不属于任何 Kind，挂滚动容器自身）──
-    // 场景构建会按 overflow_scroll 自动裁剪，滚动条画在视口内不受影响
-    if n.layout.overflow_scroll {
-        draw_scrollbars(out, cull, n, rect, transform, theme);
+    // ── ⑤ 滚动条：**不在这里画** ──
+    // 它是覆盖层（虚拟部件），必须画在**子项之后**，否则会被列表项/内容子节点盖住。
+    // 由 `scene::walk` 在走完 children 之后调用 [`draw_scrollbar_overlay`]。
+}
+
+/// 滚动条覆盖层（`scene::walk` 在**子项之后**调用；仍在滚动容器的裁剪内）。
+///
+/// 为什么单独成一层：滚动条属于滚动容器自身，但视觉上必须在内容之上
+/// （旧实现画在容器自己的 draw 里 ⇒ 后画的列表项会把它盖住）。
+pub(crate) fn draw_scrollbar_overlay(
+    out: &mut Scene,
+    cull: &Cull,
+    track: &crate::track::Track,
+    id: crate::track::NodeId,
+    transform: Affine,
+    theme: &crate::theme::Theme,
+) {
+    let Some(n) = track.get(id) else {
+        return;
+    };
+    if !(n.layout.overflow_scroll && n.layout.show_scrollbar) {
+        return;
     }
+    let rect = n.rect();
+    draw_scrollbars(out, cull, n, rect, transform, theme);
 }
 
 /// 背景色解析：pressed > hover > 常态
@@ -1030,6 +1040,22 @@ pub fn resolve_text_color(n: &Node) -> Color {
         return c;
     }
     n.text.color
+}
+
+/// 绘制用的排版规格：补上**测度时用的换行宽度**。
+///
+/// 布局引擎按约束宽度测度文本（会换行），绘制若不施加同一约束就会"盒子按两行算、
+/// 只画一行"⇒ 文本贴在盒子顶部（看起来顶对齐，且与相邻项无法居中对齐）。
+/// 用引擎写回的 `n.text_wrap` 复用同一宽度，测度与绘制逐字一致。
+fn draw_spec(n: &Node) -> TextSpec {
+    let mut spec = n.text.spec.clone();
+    if spec.wrap
+        && spec.max_width.is_none()
+        && let Some(w) = n.text_wrap
+    {
+        spec.max_width = Some(f64::from(w));
+    }
+    spec
 }
 
 /// 禁用态：半透明（视觉降级；行为上的禁用由 `hit`/内置行为负责）
@@ -1065,20 +1091,28 @@ fn push_text(
     if text.is_empty() || rect.is_empty() {
         return;
     }
-    let (layout, hit) = cache.get_or_build_counted(text, spec, color);
+    let (layout, ink, hit) = cache.get_full(text, spec, color);
     if hit {
         out.stats.text_cache_hits += 1;
     } else {
         out.stats.text_layouts_built += 1;
     }
 
-    let origin = if center {
-        Point::new(
+    // 光学对齐（`spec.optical_align`）：按**墨迹**而不是行盒定位。
+    // - 节点矩形的高度由测度给出（= 墨迹高）⇒ 非居中场景把墨迹上缘对到矩形上缘；
+    // - 居中场景（按钮等）把墨迹盒居中到矩形里 —— 这才是视觉居中。
+    let ink = ink.filter(|b| !b.is_empty());
+    let origin = match (ink, center) {
+        (Some(b), false) => Point::new(rect.x, rect.y - b.top),
+        (Some(b), true) => Point::new(
+            rect.x + (rect.width - layout.width()) * 0.5,
+            rect.y + (rect.height - b.height()) * 0.5 - b.top,
+        ),
+        (None, true) => Point::new(
             rect.x + (rect.width - layout.width()) * 0.5,
             rect.y + (rect.height - layout.height()) * 0.5,
-        )
-    } else {
-        Point::new(rect.x, rect.y)
+        ),
+        (None, false) => Point::new(rect.x, rect.y),
     };
 
     let op = Op::Text {
@@ -1160,6 +1194,50 @@ mod tests {
         assert_eq!(scene.stats.text_layouts_built, 1);
     }
 
+    /// 光学对齐：节点矩形高 = 墨迹高，绘制原点需上移到墨迹上缘之外
+    /// （`origin.y = rect.y - ink.top`），字形墨迹才正好贴住矩形上缘。
+    #[test]
+    fn optical_align_puts_the_ink_top_at_the_rect_top() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.add_root(Layer::Content, None, root);
+        // 不设显式尺寸：高度必须来自测度（光学模式 = 墨迹高）
+        let id = t.create(Kind::Text("abc".into()), None);
+        {
+            let n = t.get_mut(id).unwrap();
+            n.text = TextStyle::new().font_size(13.0);
+            n.text.spec.optical_align = true;
+        }
+        t.append_child(root, id);
+        layout(&mut t, Size::new(200.0, 200.0));
+
+        let rect = crate::layout::rect_of(&t, id);
+        let ink = lieui_text::TextEngine::ink_bounds("abc", &t.get(id).unwrap().text.spec)
+            .expect("abc 有墨迹");
+
+        let scene = build(&t);
+        let Op::Text { origin, .. } = scene
+            .ops()
+            .iter()
+            .find(|op| matches!(op, Op::Text { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(
+            (rect.height - ink.height()).abs() < 0.01,
+            "节点高度 = 墨迹高度：{} vs {}",
+            rect.height,
+            ink.height()
+        );
+        assert!(
+            (origin.y - (rect.y - ink.top)).abs() < 0.01,
+            "绘制原点上移到墨迹上缘：{} vs {}",
+            origin.y,
+            rect.y - ink.top
+        );
+    }
+
     #[test]
     fn empty_text_is_skipped() {
         let mut t = Track::new();
@@ -1196,6 +1274,46 @@ mod tests {
         // 水平居中：左右留白相等（±1px 容差）
         let left = origin.x;
         let right = 80.0 - origin.x - layout.width();
+        assert!((left - right).abs() < 1.0, "left={left} right={right}");
+        // 垂直居中：上下留白相等（label 行盒在按钮内双轴居中）
+        let top = origin.y;
+        let bottom = 30.0 - origin.y - layout.height();
+        assert!((top - bottom).abs() < 1.0, "top={top} bottom={bottom}");
+    }
+
+    /// icon_button 的字形行盒在按钮内**双轴居中**（gallery 图标行的对齐依据）。
+    #[test]
+    fn icon_button_glyph_is_centered_in_the_button() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.add_root(Layer::Content, None, root);
+        let id = node(
+            &mut t,
+            Kind::Button {
+                label: "\u{e5cd}".into(), // close
+            },
+            40.0,
+            32.0,
+        );
+        t.get_mut(id).unwrap().text = TextStyle::new().font_size(20.0);
+        t.append_child(root, id);
+        layout(&mut t, Size::new(200.0, 200.0));
+
+        let scene = build(&t);
+        let Op::Text { layout, origin, .. } = scene
+            .ops()
+            .iter()
+            .find(|op| matches!(op, Op::Text { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        // 行盒（20×20，图标字体行高系数 1.0）应居中于 40×32：上下各 6、左右各 10
+        let top = origin.y;
+        let bottom = 32.0 - origin.y - layout.height();
+        let left = origin.x;
+        let right = 40.0 - origin.x - layout.width();
+        assert!((top - bottom).abs() < 1.0, "top={top} bottom={bottom}");
         assert!((left - right).abs() < 1.0, "left={left} right={right}");
     }
 
@@ -1611,6 +1729,32 @@ mod tests {
             _ => false,
         });
         assert!(thumb_x_hit, "溢出 ⇒ 场景里有 thumb 矩形");
+    }
+
+    /// 滚动条是**覆盖层**：必须画在子项（列表项）之后，否则会被盖住
+    /// （pdfkit 左侧页列表的症状）。
+    #[test]
+    fn scrollbar_is_drawn_above_the_content() {
+        let (mut t, sc, _) = scroll_tree();
+        // 给内容子节点一个铺满的底色（模拟列表项的整行背景）
+        let content = t.children(sc)[0];
+        t.get_mut(content).unwrap().paint.background_color = Some(Color::RED);
+
+        let scene = build(&t);
+        let thumb = scene.ops().iter().position(|op| {
+            matches!(op, Op::Rect { rect, color, .. }
+                if *color == crate::theme::Theme::light().scrollbar_thumb
+                    && rect.width <= SCROLLBAR_WIDTH + 0.5)
+        });
+        let item = scene
+            .ops()
+            .iter()
+            .position(|op| matches!(op, Op::Rect { color, .. } if *color == Color::RED));
+        let (thumb, item) = (thumb.expect("有 thumb"), item.expect("有内容底色"));
+        assert!(
+            thumb > item,
+            "滚动条（op #{thumb}）必须在内容（op #{item}）之后绘制"
+        );
     }
 
     // ── 开关 / 单选 ──

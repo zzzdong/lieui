@@ -14,6 +14,7 @@
 //!    - **字体注册增强**：[`FontSource`]（路径/内存）+ family 名覆盖 + 绑定 generic family
 //!      （如把注册字体挂到 `monospace`）。
 
+pub mod ink;
 pub mod spec;
 
 use std::borrow::Cow;
@@ -28,6 +29,7 @@ use parley::{
 
 use lieui_geom::Color;
 
+pub use ink::{InkBounds, ink_bounds};
 pub use spec::{FontWeight, TextAlign, TextSpec};
 
 /// 文本布局类型（画笔颜色在整形时写入）
@@ -143,6 +145,10 @@ pub fn create_text_layout(text: &str, spec: &TextSpec, color: Color) -> TextLayo
 pub struct TextEngine;
 
 impl TextEngine {
+    /// 测度：返回 `(宽, 高)`。
+    ///
+    /// 默认口径是 parley 的**行盒**（advance × 行高）；`spec.optical_align = true` 时
+    /// 高度换成**墨迹高度**（见 [`TextSpec::optical_align`]）。
     pub fn measure_text(text: &str, spec: &TextSpec) -> (f64, f64) {
         // 测量结果缓存：布局引擎会对每个文本节点测量 1~2 次，
         // parley 排版是纯 CPU 大头；同样的 (内容, 规格) 直接命中。
@@ -152,7 +158,15 @@ impl TextEngine {
         }
         // 测度不关心颜色，用默认色整形（不影响尺寸）
         let layout = create_text_layout(text, spec, Color::BLACK);
-        let result = (layout.width() as f64, layout.height() as f64);
+        let w = layout.width() as f64;
+        let h = if spec.optical_align {
+            ink::ink_bounds(&layout)
+                .filter(|b| !b.is_empty())
+                .map_or(layout.height() as f64, |b| b.height() as f64)
+        } else {
+            layout.height() as f64
+        };
+        let result = (w, h);
         MEASURE_CACHE.with(|c| {
             let mut c = c.borrow_mut();
             // 简单防膨胀：超限后整体清空（正常 UI 远达不到上限）。
@@ -164,6 +178,18 @@ impl TextEngine {
         result
     }
 
+    /// 文本的墨迹盒（相对排版原点、y 向下）。无可见字形（空串 / 全空白）⇒ `None`。
+    ///
+    /// 与 [`TextEngine::measure_text`] 同源（同一次排版的坐标系），供**光学对齐**使用：
+    /// 绘制时把字形上缘对到节点矩形上缘（`origin.y = rect.y - ink.top`）。
+    pub fn ink_bounds(text: &str, spec: &TextSpec) -> Option<InkBounds> {
+        if text.is_empty() {
+            return None;
+        }
+        let layout = create_text_layout(text, spec, Color::BLACK);
+        ink::ink_bounds(&layout)
+    }
+
     /// 清空测度缓存（主题/字体变更后调用）
     pub fn clear_measure_cache() {
         MEASURE_CACHE.with(|c| c.borrow_mut().clear());
@@ -171,7 +197,7 @@ impl TextEngine {
 }
 
 /// 测量缓存键：内容 + 影响尺寸的规格字段（颜色/对齐不影响测量结果）
-type MeasureKey = (String, String, u64, u16, bool, u64, u64);
+type MeasureKey = (String, String, u64, u16, bool, u64, u64, bool);
 
 thread_local! {
     static MEASURE_CACHE: RefCell<std::collections::HashMap<MeasureKey, (f64, f64)>> =
@@ -193,6 +219,7 @@ fn measure_cache_key(text: &str, spec: &TextSpec) -> MeasureKey {
         spec.wrap,
         spec.max_width.unwrap_or(f64::INFINITY).to_bits(),
         spec.line_height.unwrap_or(f64::NAN).to_bits(),
+        spec.optical_align,
     )
 }
 
@@ -425,6 +452,67 @@ mod tests {
         assert_eq!(align_to_utf8_boundary(s, 1), 0, "1 落在汉字中间 ⇒ 回退");
         assert_eq!(align_to_utf8_boundary(s, 3), 3);
         assert_eq!(align_to_utf8_boundary(s, 999), s.len());
+    }
+
+    /// 墨迹盒的 characterization：图标字体墨迹**精确居中**于行盒（Δ=0），
+    /// 普通字体则偏（拉丁偏上、CJK 略偏下）——这正是"盒子对齐 ≠ 视觉对齐"的量化依据。
+    #[test]
+    fn ink_bounds_explains_the_optical_offset() {
+        // 图标字体（Material Icons：行盒 = 字号见方，墨迹居中）
+        let bytes = include_bytes!("../../../src/assets/MaterialIcons-Regular.ttf");
+        let names = register_font_bytes(bytes.to_vec());
+        let family = names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Material Icons".into());
+        for size in [16.0f32, 20.0, 24.0, 28.0] {
+            let spec = TextSpec::new(f64::from(size))
+                .font_family(family.clone())
+                .wrap(false);
+            let (w, h) = TextEngine::measure_text("\u{e5cd}", &spec);
+            let (w, h) = (w as f32, h as f32);
+            let ink = TextEngine::ink_bounds("\u{e5cd}", &spec).unwrap();
+            assert!((w - size).abs() < 0.5 && (h - size).abs() < 0.5, "行盒见方：{w}×{h}");
+            assert!(ink.center_y() - h / 2.0 == 0.0, "图标墨迹中心 = 行盒中心");
+        }
+
+        // 普通字体：行盒 ≠ 墨迹中心
+        let s13 = TextSpec::new(13.0);
+        let (_, box_cjk) = TextEngine::measure_text("不同字号（28/24/20/16）", &s13);
+        let box_cjk = box_cjk as f32;
+        let ink_cjk = TextEngine::ink_bounds("不同字号（28/24/20/16）", &s13).unwrap();
+        assert!(
+            ink_cjk.height() < box_cjk,
+            "墨迹比行盒矮：{} vs {box_cjk}",
+            ink_cjk.height()
+        );
+        let (_, box_latin) = TextEngine::measure_text("abc", &s13);
+        let box_latin = box_latin as f32;
+        let ink_latin = TextEngine::ink_bounds("abc", &s13).unwrap();
+        assert!(
+            ink_latin.center_y() < box_latin / 2.0 - 0.5,
+            "拉丁文字墨迹中心明显高于行盒中心：{} vs {}",
+            ink_latin.center_y(),
+            box_latin / 2.0
+        );
+    }
+
+    /// `optical_align`：测度高度换成墨迹高度。
+    #[test]
+    fn optical_align_measures_by_ink() {
+        let plain = TextSpec::new(13.0);
+        let optical = TextSpec::new(13.0).optical_align(true);
+        let text = "不同字号（28/24/20/16），可 .color 变色";
+        let (w0, h0) = TextEngine::measure_text(text, &plain);
+        let (w1, h1) = TextEngine::measure_text(text, &optical);
+        let ink = TextEngine::ink_bounds(text, &plain).unwrap();
+        assert_eq!(w0, w1, "宽度口径不变（advance）");
+        assert!(h1 < h0, "光学高度小于行盒高度：{h1} < {h0}");
+        assert!(
+            (h1 - f64::from(ink.height())).abs() < 0.01,
+            "光学高度 = 墨迹高度：{h1} vs {}",
+            ink.height()
+        );
     }
 
     /// 参考 lievisual：parley 0.11 有 `StyleProperty::LineHeight`（`FontSizeRelative`），

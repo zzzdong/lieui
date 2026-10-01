@@ -100,10 +100,12 @@ pub fn align(track: &mut Track, view: &ViewBuf) -> AlignStats {
         }
     }
 
-    // 描述里没有的层根 → 消失（连同嵌套子层）
+    // 描述里没有的层根 → 消失（连同嵌套子层）。框架自管层（tooltip 等）跳过——
+    // 它们的生命周期归框架，不归 view()。
     let stale: Vec<RootId> = track
         .roots()
         .iter()
+        .filter(|r| !r.framework)
         .map(|r| r.id)
         .filter(|id| !claimed.contains(id))
         .collect();
@@ -143,6 +145,7 @@ fn write_all(track: &mut Track, d: &DescNode, id: NodeId) {
         n.transform = d.transform;
         n.tab_stop = d.tab_stop;
         n.tab_index = d.tab_index;
+        n.tooltip = d.tooltip.clone();
         n.key = d.key.clone();
         n.handlers = d.handlers.clone();
         n.bindings = d.bindings.clone();
@@ -225,6 +228,12 @@ fn align_node(track: &mut Track, view: &ViewBuf, d_idx: u32, id: NodeId, out: &m
         }
         if n.key != d.key {
             n.key = d.key.clone();
+        }
+        // tooltip 不影响布局/绘制，只更新框架会话读取的内容（变化的 tooltip
+        // 若正开着，由 tooltip 会话下一帧自然刷新内容——层根节点是框架建的，
+        // 这里管不到，见 WindowCtx 的 tooltip 逻辑）
+        if n.tooltip != d.tooltip {
+            n.tooltip = d.tooltip.clone();
         }
         if n.interaction.enabled != d.enabled {
             n.interaction.enabled = d.enabled;

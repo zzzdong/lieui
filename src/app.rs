@@ -316,6 +316,21 @@ pub struct WindowCtx {
     explicit_background: bool,
     /// 光标闪烁：下一次翻转时刻（None = 没有聚焦的输入框，不需要动画）
     next_blink: Option<Instant>,
+    /// 框架 tooltip 会话（悬停带 `tooltip` 的节点 → 计时 → 浮出；移开/按下 → 消失）
+    tooltip: Option<TooltipSession>,
+}
+
+/// 悬停到 tooltip 浮出的延迟
+pub const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// 一个进行中的 tooltip 会话
+struct TooltipSession {
+    /// 带 tooltip 描述的节点（tooltip 层锚在它上面）
+    target: NodeId,
+    /// 悬停开始时刻（arm 计时起点）
+    since: Instant,
+    /// 已浮出的 tooltip 层根（None = 还在计时）
+    layer: Option<crate::track::RootId>,
 }
 
 /// 光标闪烁周期
@@ -342,6 +357,7 @@ impl WindowCtx {
             renderer,
             explicit_background,
             next_blink: None,
+            tooltip: None,
         }
     }
 
@@ -547,7 +563,11 @@ impl WindowCtx {
 
     /// 下一次闪烁唤醒时刻（平台层据此设置 `ControlFlow::WaitUntil`）
     pub fn next_wakeup(&self) -> Option<Instant> {
-        self.next_blink
+        match (self.next_blink, self.tooltip.as_ref()) {
+            (Some(b), Some(t)) if t.layer.is_none() => Some(b.min(t.since + TOOLTIP_DELAY)),
+            (_, Some(t)) if t.layer.is_none() => Some(t.since + TOOLTIP_DELAY),
+            (b, _) => b,
+        }
     }
 
     // ── 事件 ──
@@ -632,7 +652,111 @@ impl WindowCtx {
             outcome.scrolled = input::default_wheel_scroll(&mut self.track, &path, delta);
         }
 
+        // tooltip 会话跟随 hover：命中链变了 ⇒ 重新定位目标（移开/按下 ⇒ 关闭）
+        if step.hover_changed || matches!(ev, InputEvent::Down { .. }) {
+            self.sync_tooltip();
+        }
+
         outcome
+    }
+
+    // ── tooltip（框架自管层）──
+
+    /// 根据当前 hover 链重算 tooltip 目标：从最深节点向上找第一个带 tooltip 的。
+    /// 目标变了 ⇒ 关掉旧层、重新计时；没有目标 ⇒ 整个会话结束。
+    fn sync_tooltip(&mut self) {
+        let target = self
+            .track
+            .hover_path
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| self.track.get(*id).is_some_and(|n| n.tooltip.is_some()));
+
+        match (target, &mut self.tooltip) {
+            (Some(t), Some(s)) if s.target == t => {} // 悬停目标没变：继续计时/保持
+            (t, s) => {
+                // 目标变了（或离开）：关掉旧层
+                if let Some(sess) = s
+                    && let Some(rid) = sess.layer.take()
+                {
+                    self.track.remove_root(rid);
+                }
+                *s = t.map(|target| TooltipSession {
+                    target,
+                    since: Instant::now(),
+                    layer: None,
+                });
+            }
+        }
+    }
+
+    /// 每帧推进 tooltip 会话（到时浮出；目标失效/文本消失 ⇒ 收回）。
+    pub fn update_tooltip(&mut self, now: Instant) {
+        let theme = self.renderer.options().theme;
+        let mut open: Option<(NodeId, String)> = None;
+        let mut close: Option<crate::track::RootId> = None;
+
+        if let Some(sess) = &mut self.tooltip {
+            let alive = self
+                .track
+                .get(sess.target)
+                .is_some_and(|n| n.tooltip.is_some());
+            if !alive {
+                if let Some(rid) = sess.layer.take() {
+                    close = Some(rid);
+                }
+                self.tooltip = None;
+            } else if sess.layer.is_none() && now >= sess.since + TOOLTIP_DELAY {
+                open = self
+                    .track
+                    .get(sess.target)
+                    .and_then(|n| n.tooltip.clone())
+                    .map(|text| (sess.target, text));
+            }
+        }
+
+        if let Some(rid) = close {
+            self.track.remove_root(rid);
+        }
+        if let Some((target, text)) = open {
+            let rid = self.open_tooltip_layer(&theme, target, text);
+            if let Some(sess) = &mut self.tooltip {
+                sess.layer = Some(rid);
+            }
+        }
+    }
+
+    /// 建 tooltip 层（锚到目标节点右侧，放不下自动翻到左侧/钳到视口）。
+    fn open_tooltip_layer(
+        &mut self,
+        theme: &crate::theme::Theme,
+        target: NodeId,
+        text: String,
+    ) -> crate::track::RootId {
+        let node = self.track.create(crate::track::Kind::Text(text), None);
+        if let Some(n) = self.track.get_mut(node) {
+            n.paint.background_color = Some(theme.tooltip_background);
+            n.paint.border_radius = 4.0;
+            n.text.color = theme.tooltip_text;
+            n.text.spec.font_size = 12.0;
+            n.text.spec.wrap = false;
+            n.layout = n
+                .layout
+                .clone()
+                .padding_top(6.0)
+                .padding_bottom(6.0)
+                .padding_left(10.0)
+                .padding_right(10.0);
+        }
+        let rid = self.track.add_framework_root(crate::track::Layer::Tooltip, None, node);
+        if let Some(r) = self.track.root_mut(rid) {
+            r.opts.anchor = Some(crate::track::Anchor {
+                target: crate::track::AnchorTarget::Node(target),
+                placement: crate::track::Placement::RightOf,
+            });
+        }
+        rid
     }
 
     // ── 键盘 / 焦点 ──
@@ -675,6 +799,8 @@ impl WindowCtx {
 
     /// 逐帧钩子（动画）。`cx.damage(..)` 只标脏，不会重跑 `view()`
     pub fn tick(&mut self, rt: &Runtime, now: Instant) {
+        // tooltip 会话推进（到时浮出 / 目标失效收回）
+        self.update_tooltip(now);
         let mut cx = Ctx::new(rt, self.id, EventView::tick());
         self.view.on_tick(&mut cx, now);
         if !cx.cmds().is_empty() {
@@ -3303,6 +3429,97 @@ mod tests {
     }
 
     // ─────────────── M6 收尾：光标闪烁 + 输入框水平滚动 ───────────────
+
+    #[test]
+    fn tooltip_opens_after_hover_delay_and_closes_on_leave() {
+        struct T;
+        impl ViewModel for T {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("hover me").font_size(20.0).tooltip("i am a tooltip");
+                    c.text("plain");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(300.0, 200.0), T);
+        app.frame_all();
+
+        // 找到带 tooltip 的文本节点
+        let target = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            w.track()
+                .children(root)
+                .iter()
+                .copied()
+                .find(|k| w.track().get(*k).is_some_and(|n| n.tooltip.is_some()))
+                .unwrap()
+        };
+
+        // 悬停到目标上（会话 armed，但未到延迟 ⇒ 无 tooltip 层）
+        let center = {
+            let w = app.window_ctx(id).unwrap();
+            let r = crate::layout::rect_of(w.track(), target);
+            Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
+        };
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos: center,
+            },
+        );
+        app.frame_all();
+        assert!(
+            app.window_ctx(id)
+                .unwrap()
+                .track()
+                .roots_of(crate::track::Layer::Tooltip)
+                .next()
+                .is_none(),
+            "未到延迟 ⇒ 不应出现 tooltip 层"
+        );
+
+        // 时间到（tick 推进会话）⇒ 浮出，且锚到目标节点
+        let now = Instant::now() + TOOLTIP_DELAY + Duration::from_millis(50);
+        app.window_ctx_mut(id).unwrap().tick(&rt, now);
+        app.frame_all();
+        {
+            let w = app.window_ctx(id).unwrap();
+            let tip_root = w
+                .track()
+                .roots_of(crate::track::Layer::Tooltip)
+                .next()
+                .expect("延迟到 ⇒ tooltip 层应出现");
+            assert!(tip_root.framework, "tooltip 层是框架自管的");
+            match &tip_root.opts.anchor.as_ref().unwrap().target {
+                crate::track::AnchorTarget::Node(t) => assert_eq!(*t, target, "锚到 hover 节点"),
+                other => panic!("tooltip 锚点应为 Node：{other:?}"),
+            }
+        }
+
+        // 移开 ⇒ 消失（align 不得回收框架自管层——消失必须来自会话本身）
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos: Point::new(150.0, 150.0),
+            },
+        );
+        app.frame_all();
+        assert!(
+            app.window_ctx(id)
+                .unwrap()
+                .track()
+                .roots_of(crate::track::Layer::Tooltip)
+                .next()
+                .is_none(),
+            "移开 ⇒ tooltip 层应消失"
+        );
+    }
 
     #[test]
     fn caret_blinks_only_while_an_input_is_focused() {

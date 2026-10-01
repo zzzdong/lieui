@@ -128,5 +128,9 @@ mod tests {
         let (w, h) = TextEngine::measure_text(&icon_char("close").to_string(), &spec);
         assert!(w > 0.0 && h > 0.0, "close 测得 {w}×{h}");
         assert!(!spec.wrap);
+        // 对齐友好的关键性质：Material Icons 行高系数 = 1.0 ⇒ 行盒是**字号见方的正方形**，
+        // 字形墨迹居中于 em。于是 align_items(Center) 按行盒居中 ≈ 按视觉中心居中，
+        // 不同字号的图标混排天然对齐（gallery 图标段依赖这一点）。
+        assert!((w - 20.0).abs() < 0.5 && (h - 20.0).abs() < 0.5, "行盒应≈字号见方：{w}×{h}");
     }
 }

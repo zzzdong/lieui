@@ -184,10 +184,16 @@ struct TextKey {
     color: u32,
 }
 
-/// 文本排版缓存：`(内容, 规格, 颜色) → Arc<TextLayout>`
+/// 缓存条目：排版结果 + 墨迹盒（仅 `spec.optical_align` 时计算并保留）
+struct TextEntry {
+    layout: Arc<TextLayout>,
+    ink: Option<lieui_text::InkBounds>,
+}
+
+/// 文本排版缓存：`(内容, 规格, 颜色) → 排版 + 墨迹盒`
 #[derive(Default)]
 pub struct TextCache {
-    map: HashMap<TextKey, Arc<TextLayout>>,
+    map: HashMap<TextKey, TextEntry>,
 }
 
 impl TextCache {
@@ -209,7 +215,7 @@ impl TextCache {
 
     /// 取（或新建）文本排版。命中缓存时不做任何 parley 调用。
     pub fn get_or_build(&mut self, text: &str, spec: &TextSpec, color: Color) -> Arc<TextLayout> {
-        self.get_or_build_counted(text, spec, color).0
+        self.get_full(text, spec, color).0
     }
 
     /// 同上，并返回是否命中缓存（`SceneStats` 的观测点）
@@ -219,21 +225,50 @@ impl TextCache {
         spec: &TextSpec,
         color: Color,
     ) -> (Arc<TextLayout>, bool) {
+        let (l, _ink, hit) = self.get_full(text, spec, color);
+        (l, hit)
+    }
+
+    /// 排版 + 墨迹盒 + 是否命中缓存。
+    ///
+    /// 墨迹盒只在 `spec.optical_align` 时计算（其余场景多算一次字形 bbox 是纯浪费），
+    /// 且与排版一起缓存 ⇒ 光学对齐的**每帧成本为零**（布局时算过一次就复用）。
+    pub fn get_full(
+        &mut self,
+        text: &str,
+        spec: &TextSpec,
+        color: Color,
+    ) -> (Arc<TextLayout>, Option<lieui_text::InkBounds>, bool) {
         let key = TextKey {
             text: text.to_string(),
             spec: spec_hash(spec),
             color: color_key(color),
         };
-        if let Some(hit) = self.map.get(&key) {
-            return (Arc::clone(hit), true);
+        if let Some(entry) = self.map.get_mut(&key) {
+            // 命中时若这次需要墨迹而条目里没有（首次是非光学用法）⇒ 补算一次
+            if spec.optical_align && entry.ink.is_none() {
+                entry.ink = lieui_text::ink_bounds(&entry.layout);
+            }
+            return (Arc::clone(&entry.layout), entry.ink, true);
         }
         let layout = Arc::new(lieui_text::create_text_layout(text, spec, color));
+        let ink = if spec.optical_align {
+            lieui_text::ink_bounds(&layout)
+        } else {
+            None
+        };
         // 简单防膨胀（正常 UI 远达不到上限）
         if self.map.len() >= 2048 {
             self.map.clear();
         }
-        self.map.insert(key, Arc::clone(&layout));
-        (layout, false)
+        self.map.insert(
+            key,
+            TextEntry {
+                layout: Arc::clone(&layout),
+                ink,
+            },
+        );
+        (layout, ink, false)
     }
 }
 
@@ -483,6 +518,9 @@ impl SceneBuilder {
         for child in n.children.iter().copied() {
             self.walk(track, child, transform, cull, opts, out);
         }
+
+        // 滚动条覆盖层：画在**子项之后**（否则被列表项盖住），仍在容器裁剪内
+        crate::widgets::draw_scrollbar_overlay(out, cull, track, id, transform, &opts.theme);
 
         if let Some(_c) = clip {
             out.push(Op::PopClip);

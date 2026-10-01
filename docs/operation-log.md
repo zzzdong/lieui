@@ -1069,3 +1069,119 @@ family 覆盖 + generic 绑定（用仓库内 Material Icons 字体实测：覆�
 advance≈字号）。
 
 验证：`cargo test --workspace` 291 全绿（273+6+4+8）；clippy 0 警告。
+
+## M5+ 框架级 tooltip（2026-10-01）
+
+**背景**：gallery 里「或点这里看看 hover」是个没有任何 handler/hover 视觉的纯文本——点了没
+反应、hover 也没东西可看。借此把 v3 缺的 tooltip 补成**框架级**能力（hover 态本来就归框架的
+视图态，tooltip 只延迟出现一次，放 view() 里声明既啰嗦又需要 hover 数据在模型里）。
+
+**组成**：
+1. **描述字段**：`DescNode.tooltip` / `Node.tooltip` + `DescRef::tooltip(..)` DSL；align 的
+   write_all/patch 两路都同步（tooltip 不影响布局/绘制 ⇒ 不置脏）。
+2. **锚点泛化**：`Anchor { target: AnchorTarget, placement }`，`AnchorTarget::Key(Key) | Node(NodeId)`
+   ——`popup_at`/`tooltip_at` 走 Key 不变；框架 tooltip 锚到任意 hover 节点（不要求有 key）。
+   `anchored_origin` 按 target 解析，翻转/钳位逻辑共用。
+3. **框架自管层**：`Root.framework: bool` + `Track::add_framework_root`；**align 的 stale 清理
+   跳过 framework 层**——tooltip 的生命周期归 `WindowCtx` 会话，view() 重跑不会误删。
+4. **会话状态机**（`WindowCtx`）：hover 链变化 ⇒ 从最深节点向上找第一个带 tooltip 的 ⇒ 计时
+   （`TOOLTIP_DELAY = 600ms`）；`tick(now)` 到时浮出（`Layer::Tooltip` + RightOf + 翻转/钳位
+   复用锚定落位）；移开/按下/目标销毁 ⇒ `remove_root`。`next_wakeup` 合并 armed 截止时刻
+   （空闲窗口也能被唤醒浮出）。主题新增 `tooltip_background` / `tooltip_text`。
+5. **Renderer::options()**（只读）补齐——tooltip 建层时要读主题 token。
+
+**回归**：`tooltip_opens_after_hover_delay_and_closes_on_leave`——悬停未到延迟无层、到点浮出
+且锚定目标节点、`framework == true`、移开自动消失。
+
+**gallery**：246 行改为真实演示——文本有 `hover_color`（hover 变强调色）+ `tooltip`（多行提示）+
+`on_tap` 反馈到状态栏。
+
+验证：`cargo test --workspace` 292 全绿；clippy 0 警告。
+
+## 文本墨迹盒（ink bounds）与光学对齐（2026-10-01）
+
+**起因**：gallery 图标段那行文字看起来没和不同字号的图标垂直对齐。排查后确认：
+**lieui 的文本尺寸一直是 parley 行盒**（`TextEngine::measure_text` → `layout.width()/height()`；
+`lieui-layout::FlexNode::measure_text` 直接调它；绘制按 rect 左上角画 glyph runs），
+**没有墨迹盒**——而 lievisual 有（`TextLayout::ink_bounds` + `glyph.rs::ink_box`，
+用 skrifa 逐字形 bbox，服务于 `compute_text_offset` 的光学居中）。
+
+**实测数据**（`ink_bounds_explains_the_optical_offset` 固化为断言）：
+
+| 字体 | 行盒 | 墨迹 | 墨迹中心 − 行盒中心 |
+|---|---|---|---|
+| Material Icons @16/20/24/28 | = 字号（见方） | ≈0.58em | **0.00**（精确居中） |
+| 系统字体拉丁 13px（"abc"） | 14.95 | 9.46 | **+1.05**（偏上） |
+| 系统字体 CJK 13px | 16.51 | 13.17 | **−0.39**（偏下） |
+
+⇒ 「按行盒居中」时图标（Δ=0）与拉丁文字混排会偏 ~1px，CJK 只偏 0.4px。
+另外顺带发现：**lieui-layout 的 relative `position_top` 不生效**（探针测试失败，
+`write_back` 没有应用 relative 偏移）——"用相对定位微调"这条捷径不可用，正解是 ink。
+
+**实现（参考 lievisual 移植）**：
+1. `lieui-text::ink`（新）：`InkBounds` + `ink_bounds(&TextLayout)`；逐字形墨迹盒取自
+   skrifa `GlyphMetrics::bounds`（不是重建轮廓），按 `(blob id, collection index, 字号)`
+   进程级缓存字形盒 map。skrifa 0.44 与 parley 内部同版本，不引入重复依赖。
+2. `TextEngine::ink_bounds(text, spec)`（给绘制/对齐用，坐标系与测度同源、y 向下）。
+3. `TextSpec.optical_align`（新字段）：置真时**测度高度 = 墨迹高度**（宽度仍是 advance）；
+   `measure_cache_key` 已含该位。它不是功能开关而是**排版口径**，所以放在 spec 里随测度流动
+   （`lieui-layout` 自己调 measure，无需改布局引擎）。
+4. `DescRef::optical_align(true)` DSL；绘制端 `push_text`：
+   非居中 ⇒ `origin.y = rect.y - ink.top`（墨迹上缘贴矩形上缘）；
+   居中 ⇒ 把墨迹盒居中到矩形里。墨迹与排版一起进 `TextCache`（`get_full`），
+   每帧零成本；命中但缺 ink 时惰性补算一次。
+5. gallery 图标段那行文字用上 `.optical_align(true)`。
+
+**测试** +5：ink characterization（上表数据）、`optical_align` 测度 = 墨迹高、
+布局高度随口径变化、绘制原点按墨迹上缘、以及原有的图标行盒见方断言。
+
+验证：`cargo test --workspace` 297 全绿（277+6+4+10）；clippy 0 警告；gallery 编译通过。
+
+### 后续（同日）：真正的根因是「测度/绘制换行口径不一致」
+
+用地表最强的证据（**渲染成像素**再量墨迹带）复查 gallery 图标行，抓到真凶：
+
+```text
+修复前：PROBE favorite/star/info/menu 墨迹带中心 = 13.0 ~ 13.5
+        PROBE label: rect y=0 h=28  绘制墨迹带 = 0..12 中心 = 6.0   ← 顶对齐
+```
+
+**根因**：布局引擎测度文本时会**按约束宽度换行**（`flex_node::layout_single_node`
+把 `style.max_width = avail_w` 注入后调 `TextEngine::measure_text`），而**绘制**用的是
+节点自身的 spec（`max_width: None`）⇒ 不换行。于是：
+- 该标签在 360 宽的行里放不下（图标占 152，剩 208）⇒ 测度**换行成两行**，盒高 28；
+- 绘制只画一行（13px 高），贴在 28 高的盒子顶部 ⇒ 肉眼看就是「文本顶对齐」。
+
+这是框架级既有缺陷（与 `optical_align` 无关，任何被约束到换行的文本都会错位；
+上一节测出的 0.39px 光学偏差只是次要因素）。
+
+**修复**：
+1. `lieui-layout::FlexNode.measured_wrap_width`：测度时记录**实际使用的换行宽度**
+   （`wrap=false` 时清空）；
+2. `lieui::layout::write_back`：把它写到文本/按钮节点的 `Node.text_wrap`；
+3. `widgets::draw_spec(n)`：绘制时若 `spec.wrap && spec.max_width.is_none()`，
+   用 `n.text_wrap` 补上同一约束 ⇒ 测度与绘制**逐字一致**（布局缓存键已含 max_width）。
+4. gallery 图标行标签加 `.wrap(false)`（演示行保持单行）并缩短文案。
+
+**回归测试**（像素级）：`wrapped_text_draws_with_the_same_wrap_width_as_measure` ——
+窄容器里的长中文文本，画出的墨迹带必须覆盖盒子高度的 60% 以上（此前只有一行 ≈ 33%）。
+修复后同一探针：`label: 墨迹带 0..28 中心 = 14.0`，与图标中心一致。
+
+验证：`cargo test --workspace` 298 全绿；clippy 0 警告；gallery 编译通过。
+
+### 后续（同日）：滚动条被列表项遮挡
+
+**症状**（pdfkit 左侧页列表）：滚动容器的 thumb 被 item 盖住。
+
+**根因**：滚动条是容器的"虚拟部件"，但画在 `widgets::draw` 的 ⑤ 步（**容器自身内容**里），
+而 `scene::walk` 是"自身内容 → 子节点"的顺序 ⇒ 后画的列表项（整行背景）把它盖住。
+
+**修复**：把滚动条改成**覆盖层**——
+- `widgets::draw` 不再画滚动条；新增 `pub(crate) draw_scrollbar_overlay(...)`；
+- `scene::walk` 在**走完 children 之后、PopClip 之前**调用它 ⇒ 覆盖在内容之上，
+  且仍在滚动容器的裁剪内（不会画到视口外）。
+
+**回归测试**：`scrollbar_is_drawn_above_the_content`——给内容子节点铺满底色，
+断言场景 op 序列里 thumb 的位置**在内容之后**。
+
+验证：`cargo test --workspace` 299 全绿；clippy 0 警告；pdfkit 重新编译通过。

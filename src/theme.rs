@@ -45,6 +45,9 @@ pub struct Theme {
     /// 滚动条 thumb
     pub scrollbar_thumb: Color,
     pub scrollbar_thumb_drag: Color,
+    /// 悬停提示（tooltip）底色与文字
+    pub tooltip_background: Color,
+    pub tooltip_text: Color,
     /// 控件圆角半径
     pub control_radius: f32,
 }
@@ -66,6 +69,8 @@ impl Theme {
             caret: Color::new(30, 30, 30),
             scrollbar_thumb: Color::rgba(120, 120, 120, 110),
             scrollbar_thumb_drag: Color::rgba(90, 90, 90, 170),
+            tooltip_background: Color::rgba(0x1f, 0x29, 0x37, 0xf2),
+            tooltip_text: Color::WHITE,
             control_radius: 4.0,
         }
     }
@@ -86,6 +91,8 @@ impl Theme {
             caret: Color::new(230, 230, 230),
             scrollbar_thumb: Color::rgba(180, 180, 180, 110),
             scrollbar_thumb_drag: Color::rgba(200, 200, 200, 170),
+            tooltip_background: Color::rgba(0x0b, 0x0f, 0x14, 0xf5),
+            tooltip_text: Color::new(230, 230, 230),
             control_radius: 4.0,
         }
     }

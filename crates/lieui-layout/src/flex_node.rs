@@ -28,6 +28,12 @@ pub struct FlexNode {
     /// 若存在，布局时按约束宽度重新测量以支持换行，
     /// 而非使用单行 intrinsic size（避免长文本溢出/不换行）。
     pub measure_text: Option<(String, lieui_text::TextSpec)>,
+
+    /// **本次测度实际使用的换行宽度**（`style.wrap` 时由约束宽度决定）。
+    ///
+    /// 存在的意义：**绘制必须用同一个约束重新排版**，否则"测度按约束换行、绘制不换行"
+    /// 会出现盒子两行高、只画一行的顶对齐错位。宿主把它记到节点上供绘制复用。
+    pub measured_wrap_width: Option<f32>,
 }
 
 impl FlexNode {
@@ -43,6 +49,7 @@ impl FlexNode {
             in_initial_state: true,
             intrinsic_size: None,
             measure_text: None,
+            measured_wrap_width: None,
         }
     }
 
@@ -963,15 +970,19 @@ impl FlexNode {
                     MeasureMode::Undefined => f32::MAX,
                 };
                 let mut style = style.clone();
-                style.max_width = if is_defined(avail_w) && avail_w < f32::MAX {
-                    Some(avail_w as f64)
+                let wrap_w = if is_defined(avail_w) && avail_w < f32::MAX {
+                    Some(avail_w)
                 } else {
                     None
                 };
+                style.max_width = wrap_w.map(f64::from);
+                // 记下换行宽度：宿主（lieui 的 write_back）会写到节点上，绘制复用同一约束
+                self.measured_wrap_width = wrap_w;
                 let (mw, mh) = TextEngine::measure_text(content, &style);
                 (mw as f32, mh as f32)
             } else {
                 // wrap=false：保留原始 style 中的 max_width（用户显式设置），不追加约束宽度
+                self.measured_wrap_width = None;
                 let (mw, mh) = TextEngine::measure_text(content, style);
                 (mw as f32, mh as f32)
             }

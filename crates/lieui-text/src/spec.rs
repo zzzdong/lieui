@@ -42,6 +42,15 @@ pub struct TextSpec {
     pub text_align: TextAlign,
     /// 是否允许换行。默认 true；false 时布局与渲染都保持单行。
     pub wrap: bool,
+    /// **按墨迹盒（ink bounds）参与尺寸与居中**，而不是行盒。
+    ///
+    /// 行盒里 ascent/descent 不对称 ⇒ 可见字形视觉中心偏离行盒中心（普通字体约 0.1em），
+    /// 与行高系数 1.0 的图标字体混排时"盒子对齐了、看着没对齐"。打开本项后：
+    /// - `measure_text` 的高度 = 墨迹高度；
+    /// - 绘制按墨迹上缘对齐节点矩形 ⇒ 可配合 `align_items(Center)` 做光学居中。
+    ///
+    /// 默认 false（行盒语义，换行/多行排版更稳）。
+    pub optical_align: bool,
 }
 
 impl Default for TextSpec {
@@ -54,6 +63,7 @@ impl Default for TextSpec {
             max_width: None,
             text_align: TextAlign::Start,
             wrap: true,
+            optical_align: false,
         }
     }
 }
@@ -98,6 +108,12 @@ impl TextSpec {
 
     pub fn wrap(mut self, v: bool) -> Self {
         self.wrap = v;
+        self
+    }
+
+    /// 按墨迹盒参与尺寸/居中（见字段说明）
+    pub fn optical_align(mut self, v: bool) -> Self {
+        self.optical_align = v;
         self
     }
 }

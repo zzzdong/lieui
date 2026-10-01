@@ -24,6 +24,7 @@ use crate::track::{
 pub(crate) struct DescNode {
     pub kind: KindDesc,
     pub key: Option<Key>,
+    pub tooltip: Option<String>,
     pub layout: FlexStyle,
     pub paint: PaintStyle,
     pub text: TextStyle,
@@ -48,6 +49,7 @@ impl DescNode {
         Self {
             kind,
             key: None,
+            tooltip: None,
             layout: FlexStyle::default(),
             paint: PaintStyle::default(),
             text: TextStyle::default(),
@@ -525,7 +527,10 @@ impl ViewBuf {
             Layer::Popup,
             None,
             |opts| {
-                opts.anchor = Some(Anchor { key, placement });
+                opts.anchor = Some(Anchor {
+                    target: crate::track::AnchorTarget::Key(key),
+                    placement,
+                });
             },
             f,
         );
@@ -543,7 +548,10 @@ impl ViewBuf {
             Layer::Tooltip,
             None,
             |opts| {
-                opts.anchor = Some(Anchor { key, placement });
+                opts.anchor = Some(Anchor {
+                    target: crate::track::AnchorTarget::Key(key),
+                    placement,
+                });
             },
             f,
         );
@@ -618,6 +626,10 @@ impl ViewBuf {
 
     pub fn gap(&mut self, g: f32) {
         self.cur().gap(g);
+    }
+    /// 当前容器的布局逃生舱（与 [`DescRef::layout`] 对应；层根 / 容器闭包内用）
+    pub fn layout(&mut self, f: impl FnOnce(&mut FlexStyle)) {
+        self.cur().layout(f);
     }
     pub fn padding(&mut self, p: f32) {
         self.cur().padding(p);
@@ -833,6 +845,16 @@ impl<'a> DescRef<'a> {
         self
     }
 
+    /// **光学对齐**：按墨迹盒（ink bounds）而不是行盒参与尺寸与居中。
+    ///
+    /// 行盒里 ascent/descent 不对称 ⇒ 可见字形视觉中心偏离行盒中心
+    /// （实测：13px 拉丁文字偏 1.05px、CJK 偏 0.39px），而行高系数 1.0 的图标字体
+    /// 墨迹**精确居中**于行盒。混排时按墨迹对齐才能让两者视觉中心重合。
+    pub fn optical_align(mut self, v: bool) -> Self {
+        self.n().text.spec.optical_align = v;
+        self
+    }
+
     // ── 可视 / 命中 ──
 
     pub fn visible(mut self, v: bool) -> Self {
@@ -861,6 +883,12 @@ impl<'a> DescRef<'a> {
 
     pub fn enabled(mut self, v: bool) -> Self {
         self.n().enabled = v;
+        self
+    }
+
+    /// 悬停提示：hover 该节点 [`crate::app::TOOLTIP_DELAY`] 后框架自动浮出 tooltip。
+    pub fn tooltip(mut self, s: impl Into<String>) -> Self {
+        self.n().tooltip = Some(s.into());
         self
     }
 
@@ -1070,7 +1098,14 @@ mod tests {
         assert!(!v.roots[1].opts.hit_test_visible);
         // popup 锚点是 key
         assert_eq!(
-            v.roots[popup].opts.anchor.as_ref().map(|a| a.key.clone()),
+            v.roots[popup]
+                .opts
+                .anchor
+                .as_ref()
+                .map(|a| match &a.target {
+                    crate::track::AnchorTarget::Key(k) => k.clone(),
+                    _ => panic!("popup 锚点应为 key"),
+                }),
             Some(Key::Str("more".into()))
         );
     }
