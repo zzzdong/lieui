@@ -1,0 +1,346 @@
+//! 定时器与动画帧（"一个时钟"）。
+//!
+//! 帧唤醒的来源本来有三处硬编码（光标闪烁、tooltip 计时、loading spinner），每加一种
+//! 动画就要改 `WindowCtx` 与平台层两处。这里把**时钟**收敛成一份表：
+//!
+//! | 需求 | API | 语义 |
+//! |---|---|---|
+//! | 延迟一次 | [`Runtime::set_timeout`] | `dur` 之后回调一次（回调拿 `&mut Ctx`） |
+//! | 周期性 | [`Runtime::set_interval`] | 每 `dur` 回调一次，直到 [`TimerHandle::cancel`] |
+//! | 逐帧动画 | [`Runtime::request_animation`] | 下一帧调用 `ViewModel::on_animation`；想继续就再请求 |
+//!
+//! 平台层只问一个问题："下次什么时候醒？"——答案是
+//! [`WindowCtx::next_wakeup`](crate::app::WindowCtx::next_wakeup)，它把框架内部
+//! （闪烁 / tooltip / 忙碌 spinner）与本模块（定时器 / 动画帧）取最早值。
+//! 没有唤醒源时 `ControlFlow::Wait`（空闲零功耗）。
+//!
+//! ## 为什么回调不是 `Send`
+//!
+//! 定时器在 **UI 线程**执行（回调拿 `&mut Ctx`，可以改 `Signal`、开窗、起任务），
+//! 所以闭包是 `!Send` 的普通 `FnMut`。跨线程的周期活儿请用 [`crate::task::spawn_task`]
+//! + [`crate::task::TaskCtx::post`]。
+
+use std::time::{Duration, Instant};
+
+use crate::event::Ctx;
+use crate::reactive::Runtime;
+use crate::window::WindowId;
+
+/// 动画帧间隔（约 60fps）：`request_animation` 的最小唤醒粒度
+pub const FRAME_PERIOD: Duration = Duration::from_millis(16);
+
+/// 定时器回调（UI 线程执行，可拿 `Ctx` 改状态 / 开窗 / 起任务）
+type TimerCallback = Box<dyn FnMut(&mut Ctx)>;
+
+/// 一条定时器记录（框架内部；用户拿到的是 [`TimerHandle`]）
+pub(crate) struct Timer {
+    pub(crate) id: u64,
+    pub(crate) window: WindowId,
+    pub(crate) deadline: Instant,
+    /// `Some` = 周期定时器（到点后按它重排）
+    pub(crate) interval: Option<Duration>,
+    pub(crate) cb: Option<TimerCallback>,
+}
+
+impl Timer {
+    /// 取出回调（到点时调用；`interval` 由调用方决定是否重排）
+    pub(crate) fn take_cb(&mut self) -> Option<TimerCallback> {
+        self.cb.take()
+    }
+}
+
+/// 定时器句柄：用来取消 / 查询（`!Send`，留在 UI 线程）。
+///
+/// 注意：**丢掉句柄不会取消定时器**（`let _ = rt.set_timeout(..)` 是常见写法，
+/// 不该自杀）。要取消就显式 [`Self::cancel`]。
+pub struct TimerHandle {
+    rt: Runtime,
+    id: u64,
+    window: WindowId,
+}
+
+impl TimerHandle {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn window(&self) -> WindowId {
+        self.window
+    }
+
+    /// 该定时器是否还在表里（一次性定时器触发后即消失）
+    pub fn is_active(&self) -> bool {
+        self.rt
+            .inner
+            .timers
+            .borrow()
+            .iter()
+            .any(|t| t.id == self.id)
+    }
+
+    /// 取消（幂等）
+    pub fn cancel(&self) {
+        self.rt
+            .inner
+            .timers
+            .borrow_mut()
+            .retain(|t| t.id != self.id);
+    }
+}
+
+impl std::fmt::Debug for TimerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimerHandle")
+            .field("id", &self.id)
+            .field("active", &self.is_active())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Runtime {
+    /// 延迟 `dur` 后回调一次（`f` 在 **UI 线程**执行，可拿 `&mut Ctx`）
+    pub fn set_timeout<F: FnMut(&mut Ctx) + 'static>(
+        &self,
+        window: WindowId,
+        dur: Duration,
+        f: F,
+    ) -> TimerHandle {
+        self.push_timer(window, dur, None, Box::new(f))
+    }
+
+    /// 每 `dur` 回调一次（直到 [`TimerHandle::cancel`]，或窗口关闭）
+    pub fn set_interval<F: FnMut(&mut Ctx) + 'static>(
+        &self,
+        window: WindowId,
+        dur: Duration,
+        f: F,
+    ) -> TimerHandle {
+        self.push_timer(window, dur, Some(dur), Box::new(f))
+    }
+
+    fn push_timer(
+        &self,
+        window: WindowId,
+        dur: Duration,
+        interval: Option<Duration>,
+        cb: TimerCallback,
+    ) -> TimerHandle {
+        let id = {
+            let n = self.inner.next_task_id.get() + 1;
+            self.inner.next_task_id.set(n);
+            n
+        };
+        self.inner.timers.borrow_mut().push(Timer {
+            id,
+            window,
+            deadline: Instant::now() + dur,
+            interval,
+            cb: Some(cb),
+        });
+        // 新定时器 ⇒ 唤醒一次，让平台层重算 ControlFlow
+        self.wake();
+        TimerHandle {
+            rt: self.clone(),
+            id,
+            window,
+        }
+    }
+
+    /// 请求**下一帧**调用 `ViewModel::on_animation`（经典 RAF 语义：想继续就在回调里再请求）
+    pub fn request_animation(&self, window: WindowId) {
+        let mut list = self.inner.animating.borrow_mut();
+        if !list.contains(&window) {
+            list.push(window);
+        }
+        drop(list);
+        self.wake();
+    }
+
+    /// 下一帧是否已排了动画回调
+    pub fn animation_pending(&self, window: WindowId) -> bool {
+        self.inner.animating.borrow().contains(&window)
+    }
+
+    /// 取走"下一帧要跑动画"的标记（`WindowCtx::tick` 调用）
+    pub(crate) fn take_animation_request(&self, window: WindowId) -> bool {
+        let mut list = self.inner.animating.borrow_mut();
+        match list.iter().position(|w| *w == window) {
+            Some(i) => {
+                list.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 取走已到期的定时器（回调在表外执行 ⇒ 回调里能安全地再设定时器）
+    pub(crate) fn take_due_timers(&self, window: WindowId, now: Instant) -> Vec<Timer> {
+        let mut timers = self.inner.timers.borrow_mut();
+        let mut due = Vec::new();
+        let mut i = 0;
+        while i < timers.len() {
+            if timers[i].window == window && timers[i].deadline <= now {
+                due.push(timers.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        due
+    }
+
+    /// 周期定时器回到表里（一次性定时器到此结束）
+    pub(crate) fn reschedule_timer(&self, mut timer: Timer, now: Instant) {
+        let Some(interval) = timer.interval else {
+            return; // 一次性：跑完即消失
+        };
+        let Some(cb) = timer.take_cb() else {
+            return; // 回调被 take 走后没还回来（不该发生）
+        };
+        timer.cb = Some(cb);
+        // 按"上次计划时刻"累加，避免回调耗时导致漂移
+        timer.deadline += interval.max(Duration::from_millis(1));
+        if timer.deadline <= now {
+            timer.deadline = now + interval.max(Duration::from_millis(1));
+        }
+        self.inner.timers.borrow_mut().push(timer);
+    }
+
+    /// 某窗口的下一个时钟事件时刻（定时器到期 / 动画帧），供帧调度取最早值
+    pub fn next_deadline(&self, window: WindowId) -> Option<Instant> {
+        let due = self
+            .inner
+            .timers
+            .borrow()
+            .iter()
+            .filter(|t| t.window == window)
+            .map(|t| t.deadline)
+            .min();
+        let anim = self
+            .animation_pending(window)
+            .then(|| Instant::now() + FRAME_PERIOD);
+        match (due, anim) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// 清掉某窗口的定时器与动画请求（窗口关闭时调用）
+    pub(crate) fn cancel_timers_of(&self, window: WindowId) {
+        self.inner
+            .timers
+            .borrow_mut()
+            .retain(|t| t.window != window);
+        self.inner.animating.borrow_mut().retain(|w| *w != window);
+    }
+
+    /// 当前定时器数量（测试 / 调试）
+    pub fn timer_count(&self) -> usize {
+        self.inner.timers.borrow().len()
+    }
+}
+
+/// 便于测试：把该窗口的定时器**立即**置为到期（不改真实时钟）
+#[cfg(test)]
+pub(crate) fn force_due(rt: &Runtime, window: WindowId) {
+    let mut timers = rt.inner.timers.borrow_mut();
+    for t in timers.iter_mut() {
+        if t.window == window {
+            t.deadline = Instant::now() - Duration::from_millis(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn win() -> WindowId {
+        WindowId::new(1)
+    }
+
+    #[test]
+    fn timeout_is_due_only_after_its_deadline_and_is_one_shot() {
+        let rt = Runtime::new();
+        rt.register_window(win());
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let h = {
+            let hits = hits.clone();
+            rt.set_timeout(win(), Duration::from_secs(60), move |_| hits.set(hits.get() + 1))
+        };
+        assert_eq!(rt.timer_count(), 1);
+        assert!(h.is_active());
+        assert!(rt.next_deadline(win()).is_some(), "有定时器 ⇒ 有唤醒时刻");
+
+        // 还没到点
+        assert!(rt.take_due_timers(win(), Instant::now()).is_empty());
+
+        // 到点：取出来跑一次，一次性 ⇒ 不重排
+        force_due(&rt, win());
+        let mut due = rt.take_due_timers(win(), Instant::now());
+        assert_eq!(due.len(), 1);
+        (due[0].take_cb().unwrap())(&mut Ctx::new(&rt, win(), crate::event::EventView::tick()));
+        rt.reschedule_timer(due.remove(0), Instant::now());
+        assert_eq!(hits.get(), 1);
+        assert_eq!(rt.timer_count(), 0, "一次性定时器触发后消失");
+        assert!(rt.next_deadline(win()).is_none());
+    }
+
+    #[test]
+    fn interval_reschedules_itself_until_cancelled() {
+        let rt = Runtime::new();
+        rt.register_window(win());
+        let h = rt.set_interval(win(), Duration::from_millis(10), |_| {});
+
+        // 模拟三次触发（`reschedule_timer` 内部会取出并还原回调）
+        for _ in 0..3 {
+            force_due(&rt, win());
+            let mut due = rt.take_due_timers(win(), Instant::now());
+            assert_eq!(due.len(), 1);
+            rt.reschedule_timer(due.remove(0), Instant::now());
+        }
+        assert_eq!(rt.timer_count(), 1, "周期定时器一直在表里");
+
+        h.cancel();
+        assert_eq!(rt.timer_count(), 0);
+        assert!(!h.is_active());
+    }
+
+    #[test]
+    fn animation_request_is_one_shot_and_drives_the_deadline() {
+        let rt = Runtime::new();
+        rt.register_window(win());
+        assert!(!rt.animation_pending(win()));
+        assert!(rt.next_deadline(win()).is_none());
+
+        rt.request_animation(win());
+        rt.request_animation(win()); // 幂等
+        assert!(rt.animation_pending(win()));
+        assert!(rt.next_deadline(win()).is_some(), "排了动画帧 ⇒ 有唤醒时刻");
+
+        assert!(rt.take_animation_request(win()), "被取走后当帧消费掉");
+        assert!(!rt.take_animation_request(win()), "一次性：不重复触发");
+        assert!(!rt.animation_pending(win()));
+    }
+
+    #[test]
+    fn timers_are_per_window_and_cancelled_with_the_window() {
+        let rt = Runtime::new();
+        let a = WindowId::new(1);
+        let b = WindowId::new(2);
+        rt.register_window(a);
+        rt.register_window(b);
+        rt.set_timeout(a, Duration::from_secs(60), |_| {});
+        rt.set_timeout(b, Duration::from_secs(60), |_| {});
+        rt.request_animation(b);
+        assert_eq!(rt.timer_count(), 2);
+
+        rt.cancel_timers_of(a);
+        assert_eq!(rt.timer_count(), 1, "只清 a 的");
+        assert!(rt.next_deadline(a).is_none());
+        assert!(rt.next_deadline(b).is_some());
+
+        rt.cancel_timers_of(b);
+        assert_eq!(rt.timer_count(), 0);
+        assert!(!rt.animation_pending(b));
+    }
+}

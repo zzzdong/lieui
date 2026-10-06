@@ -560,23 +560,97 @@ impl Ctx {
         self.rt.mark(self.window, Dirty::VIEW);
     }
 
-    /// 只重绘：不重跑 `view()`、不重排（动画、光标闪烁、外部像素流）
+    /// 请求重绘（不重跑 `view()`、不重排）：**已有脏区**里那一块会被光栅化。
+    ///
+    /// 适合"状态在节点属性里、脏区已由树登记"的场景（光标闪烁、外部像素流）。
+    /// 自绘节点改了内部状态（不经过树）时要用 [`Self::damage_all`] 或 [`Self::damage`]，
+    /// 否则没有脏区 ⇒ 什么都不画。
     pub fn request_repaint(&self) {
         self.rt.mark(self.window, Dirty::PAINT | Dirty::PRESENT);
     }
 
-    /// 语义化别名
-    pub fn damage_all(&self) {
-        self.request_repaint();
+    /// **整窗标脏**（下一帧整窗重绘）。
+    ///
+    /// 动画帧里最常用：自绘节点（`CustomNode`）的相位不经过保留树，
+    /// 没有脏矩形可登记 ⇒ 用整窗重绘保证画出来（精修脏区可用 [`Self::damage`]）。
+    pub fn damage_all(&mut self) {
+        self.cmds.damage_all();
+    }
+
+    // ── 定时器 / 动画帧（见 `crate::timer`）──
+
+    /// 延迟 `dur` 后回调一次（在 **UI 线程**执行，可拿 `&mut Ctx`）
+    pub fn set_timeout<F: FnMut(&mut Ctx) + 'static>(
+        &self,
+        dur: std::time::Duration,
+        f: F,
+    ) -> crate::timer::TimerHandle {
+        self.rt.set_timeout(self.window, dur, f)
+    }
+
+    /// 每 `dur` 回调一次（直到 `TimerHandle::cancel` 或窗口关闭）
+    pub fn set_interval<F: FnMut(&mut Ctx) + 'static>(
+        &self,
+        dur: std::time::Duration,
+        f: F,
+    ) -> crate::timer::TimerHandle {
+        self.rt.set_interval(self.window, dur, f)
+    }
+
+    /// 请求下一帧回调 `ViewModel::on_animation`（想继续动画就在回调里再请求一次）
+    pub fn request_animation(&self) {
+        self.rt.request_animation(self.window);
+    }
+
+    // ── 后台任务 / loading 遮罩（见 `crate::task`）──
+
+    /// 起一个后台任务（**在当前窗口**）：返回值由框架投递给 `on_external`（包在
+    /// [`crate::task::TaskEvent`] 里）。多数情况用带遮罩的
+    /// [`Self::spawn_task_busy`](Self::spawn_task_busy)。
+    pub fn spawn_task<T, F>(&self, work: F) -> crate::task::TaskHandle
+    where
+        T: Send + 'static,
+        F: FnOnce(crate::task::TaskCtx) -> T + Send + 'static,
+    {
+        self.rt.spawn_task(self.window, work)
+    }
+
+    /// 起一个后台任务 + loading 遮罩（文案 `label`）：完成时遮罩自动收起。
+    pub fn spawn_task_busy<T, F>(&self, label: impl Into<String>, work: F) -> crate::task::TaskHandle
+    where
+        T: Send + 'static,
+        F: FnOnce(crate::task::TaskCtx) -> T + Send + 'static,
+    {
+        self.rt.spawn_task_busy(self.window, label, work)
+    }
+
+    /// 手动开一个「忙碌」段（遮罩随 `BusyToken` 的 drop 结束）
+    pub fn begin_busy(&self, label: impl Into<String>) -> crate::task::BusyToken {
+        self.rt.begin_busy(self.window, label)
+    }
+
+    /// 平台唤醒器（`None` = 无头 / 事件循环未起）。想自己管线程时用它带出去。
+    pub fn waker(&self) -> Option<std::sync::Arc<dyn crate::task::Waker>> {
+        self.rt.waker()
     }
 
     // ── 命令（延迟写入通道）──
 
-    /// 提交一个待处理请求（开窗/关窗等；载荷类型由 `app` 层解释）。
+    /// 提交一个待处理请求（**框架控制消息**：开窗/关窗等；载荷类型由 `app` 层解释）。
     ///
     /// 用法见 [`crate::app::open_window`] / [`crate::app::close_self`]。
+    /// 业务事件请用 [`Self::emit`]（走 `on_external`，跨线程一致）。
     pub fn request<T: 'static>(&self, v: T) {
         self.rt.requests().push(v);
+    }
+
+    /// 投递一条**自定义事件**给本窗口（下一个 tick 由 `ViewModel::on_external` 收到）。
+    ///
+    /// 这是 `Signal` 之外的"消息"通道：适合枚举型业务事件（`MyEvent::SaveFinished`）、
+    /// 或者"不想为它建 Signal"的一次性通知。同一个 `T` 也可以跨线程投递
+    /// （[`crate::task::TaskCtx::post`] 与 [`Emitter`] 是同一条管道）。
+    pub fn emit<T: Send + 'static>(&self, msg: T) -> bool {
+        self.rt.emit(self.window, msg)
     }
 
     pub fn cmd(&mut self, c: Cmd) {
@@ -609,6 +683,191 @@ impl Ctx {
 
     pub fn scroll_to(&mut self, id: NodeId, offset: (f32, f32)) {
         self.cmds.scroll_to(id, offset);
+    }
+}
+
+// ───────────────────────── 自定义事件（`emit` / `Emitter`）─────────────────────────
+
+impl Runtime {
+    /// 投递一条自定义事件到某个窗口：UI 线程在下一个 tick 的
+    /// `ViewModel::on_external` 里收到（`data.downcast::<T>()`）。
+    ///
+    /// 与 [`crate::task::TaskCtx::post`] 是同一条管道（`Waker`）：有平台时走
+    /// `EventLoopProxy`，无头时进本地队列（`App::frame_all` 消费）。返回 `false`
+    /// 表示事件循环已退出。
+    pub fn emit<T: Send + 'static>(&self, window: WindowId, msg: T) -> bool {
+        self.inner
+            .waker
+            .borrow()
+            .post(window, crate::app::ExternalData::new(msg))
+    }
+
+    /// **广播**一条自定义事件给所有已注册窗口（载荷用 `Arc` 共享，免得逐个克隆）。
+    ///
+    /// ```ignore
+    /// rt.emit_global(Arc::new(AppEvent::ThemePackChanged));
+    /// // 窗口侧：data.downcast::<Arc<AppEvent>>()
+    /// ```
+    pub fn emit_global<T: Send + Sync + 'static>(&self, msg: std::sync::Arc<T>) -> bool {
+        let windows = self.windows();
+        let mut ok = false;
+        for w in windows {
+            ok |= self.emit(w, std::sync::Arc::clone(&msg));
+        }
+        ok
+    }
+}
+
+/// 类型化的**事件发射器**：`Clone + Send`，可以挂在业务层里、也可以 move 进工作线程。
+///
+/// 与 [`crate::task::TaskCtx`] 的区别：发射器只关心"发事件"，不带任务语义
+/// （没有进度 / 取消 / 完成）；适合把 UI 无关的业务模块（网络层、文件监听、设备）接进来。
+///
+/// ```ignore
+/// struct Net { tx: Emitter<NetEvent> }               // 业务层持有
+/// impl Net {
+///     fn on_bytes(&self, b: Vec<u8>) { self.tx.emit(NetEvent::Bytes(b)); }
+/// }
+/// // UI 侧：ViewModel::on_external 里 downcast::<NetEvent>()
+/// ```
+///
+/// 内部只存 [`WakerSlot`](crate::task::WakerSlot)（`Send + Sync`）而**不是** `Runtime`
+/// —— 这正是它天然能跨线程、无需 unsafe 的原因。
+pub struct Emitter<T> {
+    window: WindowId,
+    waker: crate::task::WakerSlot,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Emitter<T> {
+    fn clone(&self) -> Self {
+        Self {
+            window: self.window,
+            waker: self.waker.clone(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: Send + 'static> Emitter<T> {
+    /// 造一个发射器
+    pub fn new(rt: &Runtime, window: WindowId) -> Self {
+        Self {
+            window,
+            waker: rt.inner.waker.borrow().clone(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn window(&self) -> WindowId {
+        self.window
+    }
+
+    /// 发一条事件（UI 线程在 `on_external` 里收到）
+    pub fn emit(&self, msg: T) -> bool {
+        self.waker
+            .post(self.window, crate::app::ExternalData::new(msg))
+    }
+}
+
+impl<T> std::fmt::Debug for Emitter<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Emitter")
+            .field("window", &self.window)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod emit_tests {
+    use super::*;
+    use crate::app::ExternalData;
+    use crate::reactive::Runtime;
+    use crate::window::WindowId;
+
+    fn win() -> WindowId {
+        WindowId::new(1)
+    }
+
+    #[test]
+    fn emit_targets_one_window_and_lands_in_the_local_queue() {
+        let rt = Runtime::new();
+        rt.register_window(win());
+        assert!(rt.emit(win(), 7u32));
+
+        let queued = rt.take_pending_external();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, win());
+        assert_eq!(queued[0].1.downcast_ref::<u32>(), Some(&7));
+    }
+
+    #[test]
+    fn emit_global_broadcasts_to_every_window() {
+        let rt = Runtime::new();
+        let a = WindowId::new(1);
+        let b = WindowId::new(2);
+        rt.register_window(a);
+        rt.register_window(b);
+
+        assert!(rt.emit_global(std::sync::Arc::new("refresh".to_string())));
+        let queued = rt.take_pending_external();
+        assert_eq!(queued.len(), 2, "每个窗口一条");
+        for (w, data) in queued {
+            assert!(w == a || w == b);
+            let payload = data.downcast::<std::sync::Arc<String>>().expect("是 Arc<String>");
+            assert_eq!(payload.as_str(), "refresh");
+        }
+    }
+
+    #[test]
+    fn emitter_is_send_sync_and_carries_its_own_channel() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Emitter<u32>>();
+
+        let rt = Runtime::new();
+        rt.register_window(win());
+        let tx = Emitter::<&'static str>::new(&rt, win());
+        let tx2 = tx.clone();
+        assert_eq!(tx2.window(), win());
+
+        // 模拟"业务层在别的线程发事件"：并发发两条，都能落到队列
+        let handles: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|msg| {
+                let tx = tx.clone();
+                std::thread::spawn(move || tx.emit(msg))
+            })
+            .collect();
+        for h in handles {
+            assert!(h.join().unwrap());
+        }
+        let queued = rt.take_pending_external();
+        assert_eq!(queued.len(), 2, "跨线程投递同样进队列");
+        let mut got: Vec<&'static str> = queued
+            .into_iter()
+            .map(|(_, d)| d.downcast::<&'static str>().unwrap())
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn request_stays_the_framework_control_channel() {
+        // `request` 走 RequestQueue（开窗/关窗），`emit` 走 Waker 管道 —— 互不干扰
+        let rt = Runtime::new();
+        rt.register_window(win());
+        let cx = Ctx::new(&rt, win(), EventView::tick());
+        cx.request(42u8);
+        cx.emit("event");
+        assert_eq!(rt.requests().len(), 1, "控制消息在 RequestQueue");
+        assert_eq!(rt.take_pending_external().len(), 1, "业务事件在 Waker 管道");
+    }
+
+    #[test]
+    fn external_data_is_the_single_payload_type() {
+        // 说明性断言：两条管道共用 `ExternalData` 作为载荷载体
+        let d = ExternalData::new(String::from("x"));
+        assert_eq!(d.downcast::<String>().as_deref(), Some("x"));
     }
 }
 

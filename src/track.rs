@@ -699,6 +699,9 @@ pub struct Root {
     /// 框架自管层（tooltip 等）：`align` 的 stale 清理**跳过**它们，
     /// 生命周期归框架（`WindowCtx` 的 tooltip 会话）而不是 view()。
     pub framework: bool,
+    /// 声明时的标签（`ViewBuf::modal_tagged`）：按标签找回这个层
+    /// （框架的 loading 遮罩靠它定位动画节点）。
+    pub tag: Option<u64>,
 }
 
 /// 滚动条 thumb 的拖拽会话（`widgets::scroll_handle` 维护）
@@ -1070,6 +1073,11 @@ impl Track {
         self.roots.iter().filter(move |r| r.layer == layer)
     }
 
+    /// 按标签找层根（`ViewBuf::modal_tagged` 声明时打的标签）
+    pub fn root_by_tag(&self, tag: u64) -> Option<&Root> {
+        self.roots.iter().find(|r| r.tag == Some(tag))
+    }
+
     /// 挂一个层根（节点应为游离或已挂载的子树根）
     pub fn add_root(&mut self, layer: Layer, owner: Option<RootId>, node: NodeId) -> RootId {
         let id = RootId(self.next_root);
@@ -1082,6 +1090,7 @@ impl Track {
             owner,
             opts,
             framework: false,
+            tag: None,
         });
         if let Some(n) = self.get_mut(node) {
             n.flags.insert(Flags::ATTACHED);

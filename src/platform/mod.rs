@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use lieui_geom::{Point, Rect, Size};
@@ -100,6 +101,21 @@ impl RepaintHandle {
         self.proxy
             .send_event(AppEvent::External { window, data })
             .is_ok()
+    }
+}
+
+/// 平台唤醒器：`RepaintHandle` 是 [`Waker`](crate::task::Waker) 的唯一 winit 实现。
+///
+/// 实现 trait 之后，`Runtime::set_waker` 就能把它交给框架 —— 任务（`Runtime::spawn_task`）
+/// 与 `TaskCtx::post` 从此不需要调用方自己传句柄。
+impl crate::task::Waker for RepaintHandle {
+    fn wake(&self) -> bool {
+        // 显式写固有方法，避免与 trait 方法混淆
+        RepaintHandle::wake(self)
+    }
+
+    fn post(&self, window: WindowId, data: ExternalData) -> bool {
+        RepaintHandle::post_external(self, window, data)
     }
 }
 
@@ -856,8 +872,12 @@ pub fn run(
     on_ready: Option<Box<dyn FnOnce(RepaintHandle)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop: EventLoop<AppEvent> = EventLoop::with_user_event().build()?;
+    let handle = RepaintHandle::new(event_loop.create_proxy());
+    // 唤醒器注入运行时：`Runtime::spawn_task` / `TaskCtx::post` / `Runtime::wake`
+    // 从此自带通道 —— 调用方**不再必须**用 `run_with_handle` 手动传递句柄。
+    app.runtime().set_waker(Arc::new(handle.clone()));
     if let Some(f) = on_ready {
-        f(RepaintHandle::new(event_loop.create_proxy()));
+        f(handle);
     }
     let mut runner = Runner::new(app);
     event_loop.run_app(&mut runner)?;

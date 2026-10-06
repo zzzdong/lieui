@@ -81,23 +81,38 @@ impl std::ops::BitAnd for Dirty {
 /// `Clone` 只是 `Rc` 引用计数 +1 —— 可以自由 clone 到各窗口的 ViewModel 构造函数里。
 #[derive(Clone, Default)]
 pub struct Runtime {
-    inner: Rc<RuntimeInner>,
+    pub(crate) inner: Rc<RuntimeInner>,
 }
 
 #[derive(Default)]
-struct RuntimeInner {
+pub(crate) struct RuntimeInner {
     /// 每窗口一份脏标志（`Vec` 而非 `HashMap`：窗口数量是个位数，顺序即注册顺序）
-    windows: RefCell<Vec<(WindowId, Dirty)>>,
+    pub(crate) windows: RefCell<Vec<(WindowId, Dirty)>>,
     /// 当前正在执行 `view()` 的窗口；`view()` 期间禁止 `Signal::set`
-    in_view: Cell<Option<WindowId>>,
+    pub(crate) in_view: Cell<Option<WindowId>>,
     /// 待处理请求（开窗 / 关窗 / 外部数据），由 `app` 层解释载荷类型
-    requests: RequestQueue,
+    pub(crate) requests: RequestQueue,
     /// 全局主题（设计 §3.10：`Theme` 是 App 的普通字段，无 thread_local）
-    theme: RefCell<crate::theme::Theme>,
+    pub(crate) theme: RefCell<crate::theme::Theme>,
     /// 主题模式（主题从哪来：预设 / 跟随系统 / 自定义）
-    theme_mode: Cell<crate::theme::ThemeMode>,
+    pub(crate) theme_mode: Cell<crate::theme::ThemeMode>,
     /// 操作系统的深色状态（平台层上报；`System` 模式下据此选预设）
-    system_dark: Cell<bool>,
+    pub(crate) system_dark: Cell<bool>,
+    /// 跨线程唤醒器（平台层进入事件循环时注入；未注入 = 本地队列模式）
+    pub(crate) waker: RefCell<crate::task::WakerSlot>,
+    /// 后台任务表（取消标志、所属窗口、是否挂遮罩）
+    pub(crate) tasks: RefCell<Vec<crate::task::TaskRecord>>,
+    /// 每窗口的「忙碌」项（loading 遮罩的来源；空 = 没有遮罩）
+    pub(crate) busy: RefCell<Vec<crate::task::BusyItem>>,
+    /// 任务 / 忙碌项的自增 id
+    pub(crate) next_task_id: Cell<u64>,
+    /// loading 遮罩的**最短可见时间**（`Duration::ZERO` = 不等待，结束即刻收起）。
+    /// 见 [`Runtime::set_busy_min_visible`]。
+    pub(crate) busy_min_visible: Cell<std::time::Duration>,
+    /// 定时器表（`set_timeout` / `set_interval`；UI 线程闭包）
+    pub(crate) timers: RefCell<Vec<crate::timer::Timer>>,
+    /// 请求了下一动画帧的窗口（`request_animation`；每帧回调后清空，要持续就再请求）
+    pub(crate) animating: RefCell<Vec<WindowId>>,
 }
 
 /// 待处理请求槽（类型擦除；**谁放谁取**）。

@@ -54,6 +54,17 @@ pub struct WindowConfig {
     pub resizable: bool,
     pub decorations: bool,
     pub always_on_top: bool,
+    /// 是否使用框架的 loading 遮罩（默认 `true`）。
+    ///
+    /// 关掉后 `Runtime::begin_busy` / `spawn_task_busy` 只维护状态，
+    /// 遮罩由用户自己渲染（`Runtime::busy_items` 能拿到忙碌项）。
+    pub auto_busy_overlay: bool,
+    /// **整窗重绘模式**（默认 `false` = 用脏区局部重绘）。
+    ///
+    /// 打开后每帧都整窗重绘：脏区带来的收益（实测 1280×720 下局部重绘比整窗快
+    /// 20~90×）全部放弃，换来"绝不会因为漏标脏区而留残影"的确定性。
+    /// 用途：① 排查残影类 bug 时一键对照；② 对正确性要求高于性能的场景。
+    pub full_repaint: bool,
 }
 
 impl Default for WindowConfig {
@@ -67,6 +78,8 @@ impl Default for WindowConfig {
             resizable: true,
             decorations: true,
             always_on_top: false,
+            auto_busy_overlay: true,
+            full_repaint: false,
         }
     }
 }
@@ -74,6 +87,21 @@ impl Default for WindowConfig {
 impl WindowConfig {
     pub fn background(mut self, c: lieui_geom::Color) -> Self {
         self.background = Some(c);
+        self
+    }
+
+    /// 关闭框架的 loading 遮罩（自己渲染，见 `Runtime::busy_items`）
+    pub fn auto_busy_overlay(mut self, on: bool) -> Self {
+        self.auto_busy_overlay = on;
+        self
+    }
+
+    /// 整窗重绘模式：放弃脏区带来的局部重绘收益，换取"绝不因漏标而残影"的确定性。
+    ///
+    /// 排查残影 bug 时的对照开关：若打开后残影消失，说明某处**漏标脏区**
+    /// （自绘节点改状态没 `cx.damage(..)`、改了非 `Signal` 状态没 `invalidate`……）。
+    pub fn full_repaint(mut self, on: bool) -> Self {
+        self.full_repaint = on;
         self
     }
 }
@@ -199,8 +227,15 @@ pub trait ViewModel: 'static {
         CloseAction::Close
     }
 
-    /// 逐帧钩子（动画）；注意 `view()` 不会因此重跑，只重绘由 `cx.damage(..)` 指定的区域
+    /// 逐帧钩子（每帧都跑）；注意 `view()` 不会因此重跑，只重绘由 `cx.damage(..)` 指定的区域
     fn on_tick(self: &Rc<Self>, _cx: &mut Ctx, _now: Instant) {}
+
+    /// **动画帧**：只在上一帧调过 `cx.request_animation()` 时被调用（见 [`crate::timer`]）。
+    ///
+    /// 想持续动画就在回调里再 `cx.request_animation()` 一次；停手即停帧（空闲零功耗）。
+    /// `dt` = 距上一帧的时长（做按时间推进的动画用它，别假设固定步长）。
+    /// 需要重绘时自己标脏（`cx.damage(node)`）——框架不会替你决定重绘范围。
+    fn on_animation(self: &Rc<Self>, _cx: &mut Ctx, _now: Instant, _dt: std::time::Duration) {}
 }
 
 /// 对象安全的窗口视图。
@@ -210,6 +245,7 @@ pub trait ViewModel: 'static {
 pub trait WindowView {
     fn view_erased(&self, v: &mut ViewBuf);
     fn on_tick(&self, cx: &mut Ctx, now: Instant);
+    fn on_animation(&self, cx: &mut Ctx, now: Instant, dt: std::time::Duration);
     fn on_external(&self, cx: &mut Ctx, data: ExternalData);
     fn on_close_request(&self, cx: &mut Ctx) -> CloseAction;
 }
@@ -228,6 +264,10 @@ impl<V: ViewModel> WindowView for VmAdapter<V> {
 
     fn on_tick(&self, cx: &mut Ctx, now: Instant) {
         V::on_tick(&self.0, cx, now)
+    }
+
+    fn on_animation(&self, cx: &mut Ctx, now: Instant, dt: std::time::Duration) {
+        V::on_animation(&self.0, cx, now, dt)
     }
 
     fn on_external(&self, cx: &mut Ctx, data: ExternalData) {
@@ -318,6 +358,15 @@ pub struct WindowCtx {
     next_blink: Option<Instant>,
     /// 框架 tooltip 会话（悬停带 `tooltip` 的节点 → 计时 → 浮出；移开/按下 → 消失）
     tooltip: Option<TooltipSession>,
+    /// loading 遮罩的 spinner 实例（跨帧保留；`Color` = 主题 accent，变了就重建）
+    spinner: Option<(crate::geom::Color, crate::custom::CustomCell)>,
+    /// 本窗口当前还有忙碌项（每帧刷新）——`next_wakeup` 靠它决定要不要继续定时唤醒
+    /// （有遮罩就要 30fps 驱动 spinner，并给"最短可见时间"到点的收尾留出时机）
+    has_busy: bool,
+    /// 上一帧的时刻（算动画 `dt`）
+    last_tick: Instant,
+    /// 本窗口的**时钟**下次到期时刻（定时器 / 动画帧；`frame()` 里刷新）
+    next_clock: Option<Instant>,
 }
 
 /// 悬停到 tooltip 浮出的延迟
@@ -358,6 +407,10 @@ impl WindowCtx {
             explicit_background,
             next_blink: None,
             tooltip: None,
+            spinner: None,
+            has_busy: false,
+            last_tick: Instant::now(),
+            next_clock: None,
         }
     }
 
@@ -450,6 +503,11 @@ impl WindowCtx {
             ..Default::default()
         };
 
+        // ⓪ 忙碌收尾：收掉"最短可见时间"已过的遮罩项（见 `task::set_busy_min_visible`）。
+        // 放在帧首：快任务挂上遮罩后立刻结束的情况，也能保证遮罩被画出来过。
+        rt.reap_busy(Instant::now());
+        self.has_busy = rt.is_busy(self.id);
+
         // ⓪ 主题同步：全局主题变了 ⇒ 渲染器换 token 快照 + **整窗重绘**。
         // 窗口底色仅在"未显式指定"时跟随主题（`WindowConfig.background` 优先）。
         //
@@ -474,6 +532,9 @@ impl WindowCtx {
             self.view_buf.set_theme(rt.theme());
             self.view_buf.begin();
             self.view.view_erased(&mut self.view_buf);
+            // 后台任务忙碌 ⇒ 追加框架 loading 遮罩层（声明式：忙碌项清空就不声明，
+            // 下一帧 align 的 stale 清理会把旧层删掉）
+            self.push_busy_overlay(rt);
             rt.end_view();
 
             st.view_ran = true;
@@ -501,9 +562,14 @@ impl WindowCtx {
             self.dispatch(rt, &path, &Event::Scroll { offset });
         }
 
-        // ③ 光栅化：消费脏区（只重画受影响的行带，其余像素保留上一帧）
+        // ③ 光栅化：消费脏区（只重画受影响的行带，其余像素保留上一帧）。
+        // `full_repaint` 模式：不看脏区，每帧整窗重绘（确定性优先）。
         st.layout_pending = self.track.has_layout_dirty();
-        let (damage, damage_all) = self.track.take_damage();
+        let (mut damage, mut damage_all) = self.track.take_damage();
+        if self.cfg.full_repaint {
+            damage.clear();
+            damage_all = true;
+        }
         st.damage = damage;
         st.damage_all = damage_all;
         st.paint_pending = dirty.contains(Dirty::PAINT) || st.damage_all || !st.damage.is_empty();
@@ -513,6 +579,9 @@ impl WindowCtx {
 
         // ④ 上屏：M4 由 softbuffer 消费（`present_with_damage`）；M3 到此"像素已就绪"
         st.present_pending = dirty.contains(Dirty::PRESENT) || st.paint_pending;
+
+        // ⑤ 刷新时钟：下一帧何时该醒（定时器 / 动画帧），供 `next_wakeup` 汇总
+        self.next_clock = rt.next_deadline(self.id);
 
         st
     }
@@ -524,6 +593,12 @@ impl WindowCtx {
     ///
     /// 平台层负责定时唤醒（`ControlFlow::WaitUntil`）；打字会重置相位（光标常亮）。
     pub fn animate(&mut self, now: Instant) -> bool {
+        // loading 遮罩：spinner 相位由挂钟决定 ⇒ 每个动画帧只需把卡片标脏重绘
+        // （不重跑 `view()`，也不重排）
+        if let Some(card) = self.busy_card() {
+            self.track.mark_paint_dirty(card);
+        }
+
         let focused_input = self
             .track
             .focused
@@ -566,13 +641,55 @@ impl WindowCtx {
         }
     }
 
-    /// 下一次闪烁唤醒时刻（平台层据此设置 `ControlFlow::WaitUntil`）
+    /// 下一次需要唤醒的时刻（平台层据此设置 `ControlFlow::WaitUntil`）。
+    ///
+    /// 汇总**所有**唤醒源，平台层不必知道有哪些动画：
+    /// - 框架内部：光标闪烁、tooltip 计时、loading spinner；
+    /// - 时钟（[`crate::timer`]）：定时器到期、动画帧（`next_clock`，`frame()` 里刷新）。
+    ///
+    /// 没有任何来源 ⇒ `None`（平台用 `ControlFlow::Wait`：空闲零功耗）。
     pub fn next_wakeup(&self) -> Option<Instant> {
-        match (self.next_blink, self.tooltip.as_ref()) {
+        // 有遮罩（含"挂着等最短可见时间到点"的）⇒ 定时唤醒：驱动 spinner + 到点收尾
+        let spin = self
+            .has_busy
+            .then(|| Instant::now() + crate::overlay::SPIN_PERIOD);
+        let blink = match (self.next_blink, self.tooltip.as_ref()) {
             (Some(b), Some(t)) if t.layer.is_none() => Some(b.min(t.since + TOOLTIP_DELAY)),
             (_, Some(t)) if t.layer.is_none() => Some(t.since + TOOLTIP_DELAY),
             (b, _) => b,
+        };
+        [spin, blink, self.next_clock].into_iter().flatten().min()
+    }
+
+    // ── loading 遮罩（后台任务忙碌时由框架声明）──
+
+    /// 声明本帧的忙碌遮罩（无忙碌项或窗口关闭了自动遮罩 ⇒ 什么都不做）
+    fn push_busy_overlay(&mut self, rt: &Runtime) {
+        if !self.cfg.auto_busy_overlay {
+            return;
         }
+        let items = rt.busy_items(self.id);
+        if items.is_empty() {
+            return;
+        }
+        // spinner 实例跨帧保留（主题 accent 变了才重建）
+        let accent = rt.theme().accent;
+        if self.spinner.as_ref().map(|(c, _)| *c) != Some(accent) {
+            self.spinner = Some((
+                accent,
+                crate::custom::cell(crate::overlay::Spinner::new(accent)),
+            ));
+        }
+        let spinner = self.spinner.as_ref().unwrap().1.clone();
+        crate::overlay::push_busy_overlay(&mut self.view_buf, &items, spinner);
+    }
+
+    /// 遮罩卡片节点（loading 动画的标脏目标）。
+    ///
+    /// 结构固定：tag 层根 → 第一个子节点（卡片）。找不到 ⇒ `None`（没有遮罩）。
+    fn busy_card(&self) -> Option<NodeId> {
+        let root = self.track.root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)?;
+        self.track.children(root.node).first().copied()
     }
 
     // ── 事件 ──
@@ -773,6 +890,9 @@ impl WindowCtx {
             n.text.color = theme.tooltip_text;
             n.text.spec.font_size = 12.0;
             n.text.spec.wrap = false;
+            // 按**墨迹盒**参与尺寸与居中：节点高 = 墨迹高 ⇒ 上下各 6px 的 padding 对称，
+            // 字形视觉中心与卡片中心重合（行盒的 ascent/descent 不对称会让文本看着偏上）。
+            n.text.spec.optical_align = true;
             n.layout = n
                 .layout
                 .clone()
@@ -829,12 +949,36 @@ impl WindowCtx {
         }
     }
 
-    /// 逐帧钩子（动画）。`cx.damage(..)` 只标脏，不会重跑 `view()`
+    /// 逐帧钩子。`cx.damage(..)` 只标脏，不会重跑 `view()`。
+    ///
+    /// 每帧顺序（统一时钟，见 [`crate::timer`]）：
+    /// ① 到期定时器（回调在表外执行 ⇒ 回调里能安全地再建定时器）
+    /// ② 若上一帧请求过动画帧 ⇒ `ViewModel::on_animation`（带 `dt`）
+    /// ③ `ViewModel::on_tick`（框架既有钩子：光标闪烁相位等）
     pub fn tick(&mut self, rt: &Runtime, now: Instant) {
         // tooltip 会话推进（到时浮出 / 目标失效收回）
         self.update_tooltip(now);
+        let dt = now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
         let mut cx = Ctx::new(rt, self.id, EventView::tick());
+
+        // ① 定时器：取走到期的（表外执行，避免回调里借用到同一张表）
+        for mut timer in rt.take_due_timers(self.id, now) {
+            if let Some(mut cb) = timer.take_cb() {
+                cb(&mut cx);
+                timer.cb = Some(cb); // 周期定时器要还回去
+            }
+            rt.reschedule_timer(timer, now);
+        }
+
+        // ② 动画帧（经典 RAF 语义：回调里再 `cx.request_animation()` 才继续）
+        if rt.take_animation_request(self.id) {
+            self.view.on_animation(&mut cx, now, dt);
+        }
+
+        // ③ 既有逐帧钩子
         self.view.on_tick(&mut cx, now);
+
         if !cx.cmds().is_empty() {
             let cmds = cx.take_cmds();
             let d = apply_cmds(&mut self.track, &cmds);
@@ -843,7 +987,15 @@ impl WindowCtx {
     }
 
     /// 外部数据（后台线程 → UI 线程）
+    ///
+    /// 框架先消费自己的消息（任务进度 / 任务完成收尾，见 [`crate::task`]）：
+    /// - 进度消息 ⇒ 到此为止（驱动遮罩）；
+    /// - 任务完成 ⇒ 框架收尾（清任务表 + 收遮罩），**再**交给 `ViewModel::on_external`
+    ///   取载荷。
     pub fn external(&mut self, rt: &Runtime, data: ExternalData) {
+        if crate::task::on_task_message(rt, self.id, &data) {
+            return;
+        }
         let mut cx = Ctx::new(rt, self.id, EventView::external());
         self.view.on_external(&mut cx, data);
         if !cx.cmds().is_empty() {
@@ -923,21 +1075,40 @@ impl App {
         self.windows.iter_mut().find(|w| w.id == id)
     }
 
-    /// 逐窗口跑一帧；返回每个窗口的 `FrameStats`
+    /// 逐窗口跑一帧（**与平台层一帧同构**：消费外部事件 → tick（定时器/动画/on_tick）
+    /// → frame）；返回每个窗口的 `FrameStats`。
+    ///
+    /// 顺带消费 [`Runtime::take_pending_external`]（本地投递队列）：**没有平台唤醒器**
+    /// 时（无头测试、自己驱动帧）这就是"事件循环"，后台任务/自定义事件的投递会自动落地；
+    /// 有平台时队列恒空 ⇒ 零开销。
     pub fn frame_all(&mut self) -> Vec<(WindowId, FrameStats)> {
         let rt = self.rt.clone();
+        for (w, data) in rt.take_pending_external() {
+            if let Some(ctx) = self.windows.iter_mut().find(|c| c.id == w) {
+                ctx.external(&rt, data);
+            }
+        }
+        let now = Instant::now();
         self.windows
             .iter_mut()
-            .map(|w| (w.id, w.frame(&rt)))
+            .map(|w| {
+                w.tick(&rt, now);
+                (w.id, w.frame(&rt))
+            })
             .collect()
     }
 
-    /// 关闭窗口（注销其脏标志，丢弃其保留树）
+    /// 关闭窗口（注销其脏标志，丢弃其保留树）。
+    ///
+    /// 顺带**取消该窗口的后台任务**并清掉它的忙碌项（否则线程会继续跑到结束、
+    /// 结果却无人接收；见 [`crate::task`]）。
     pub fn close_window(&mut self, id: WindowId) -> bool {
         let before = self.windows.len();
         self.windows.retain(|w| w.id != id);
         let removed = self.windows.len() != before;
         if removed {
+            self.rt.cancel_tasks_of(id);
+            self.rt.cancel_timers_of(id);
             self.rt.unregister_window(id);
         }
         removed
@@ -1269,13 +1440,12 @@ mod tests {
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
         let ticks = Rc::new(Cell::new(0));
-        let id = app.window(WindowConfig::new(), Anim { ticks: ticks.clone() });
+        let _ = app.window(WindowConfig::new(), Anim { ticks: ticks.clone() });
         app.frame_all();
-
-        app.window_ctx_mut(id).unwrap().tick(&rt, Instant::now());
-        assert_eq!(ticks.get(), 1);
+        assert_eq!(ticks.get(), 1, "一帧 = 一次 on_tick");
 
         let stats = app.frame_all();
+        assert_eq!(ticks.get(), 2, "每帧都跑 on_tick");
         let st = &stats[0].1;
         assert!(!st.view_ran, "on_tick 只重绘，不重跑 view()");
         assert!(st.paint_pending);
@@ -3040,62 +3210,34 @@ mod tests {
 
     // ─────────────── M6：VirtualList（ScrollChanged + 组合）───────────────
 
-    /// **虚拟列表**（A 档组合函数）：只物化可见窗口的行。
-    ///
-    /// 原理：滚动容器内 = 顶部占位 + 可见行 + 底部占位（总高恒 = count × item_h，
-    /// 滚动条因此"诚实"）；`ScrollChanged` 事件把新偏移写回 `first` signal ⇒
-    /// view 重跑换一批行。滚动位置本身在保留树里（视图态），跨帧不丢。
-    fn virtual_list(
-        v: &mut ViewBuf,
-        first: &Signal<usize>,
-        count: usize,
-        item_h: f32,
-        viewport_h: f32,
-        label: impl Fn(usize) -> String,
-    ) {
-        let visible = (viewport_h / item_h).ceil() as usize + 1;
-        let first_i = first.get().min(count);
-        let last_i = (first_i + visible).min(count);
-
-        v.scroll(|s| {
-            s.height(viewport_h);
-            s.width(140.0);
-            let sig = first.clone();
-            let ih = item_h;
-            s.on(EventKind::ScrollChanged, move |cx| {
-                sig.set((cx.scroll_offset().1 / ih) as usize);
-            });
-            // 顶部占位（已滚过的行）
-            let top = first_i as f32 * item_h;
-            s.row(|sp| sp.height(top));
-            for i in first_i..last_i {
-                let text = label(i);
-                s.row(|r| {
-                    r.height(item_h);
-                    r.text(text).font_size(16.0);
-                });
-            }
-            // 底部占位（尚未滚到的行）
-            let bottom = (count - last_i) as f32 * item_h;
-            s.row(|sp| sp.height(bottom));
-        });
-    }
-
+    /// 用**框架 API**（`ViewBuf::virtual_list`）声明 1000 行长列表。
     struct LongList {
-        first: Signal<usize>,
+        vl: VirtualListState,
+        items: Vec<u32>,
     }
 
     impl ViewModel for LongList {
         fn view(self: &Rc<Self>, v: &mut ViewBuf) {
-            virtual_list(v, &self.first, 1000, 24.0, 240.0, |i| format!("Item {i}"));
+            v.scroll(|s| {
+                s.height(240.0);
+                s.width(140.0);
+                // 只物化可见窗口：窗口起点由 `vl` 记住，`ScrollChanged` 时自动回写
+                s.virtual_list(&self.vl, &self.items, |i| *i as u64, 24.0, 240.0, |v, i| {
+                    v.row(|r| {
+                        r.height(24.0);
+                        r.text(format!("Item {i}")).font_size(16.0);
+                    });
+                });
+            });
         }
     }
 
-    fn long_list() -> (Runtime, App, Rc<LongList>, WindowId) {
+    fn long_list_with(count: u32) -> (Runtime, App, Rc<LongList>, WindowId) {
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
         let vm = Rc::new(LongList {
-            first: Signal::new(&rt, 0),
+            vl: VirtualListState::new(&rt),
+            items: (0..count).collect(),
         });
         let id = app.window_erased(
             WindowConfig::new().size(200.0, 300.0),
@@ -3103,6 +3245,10 @@ mod tests {
         );
         app.frame_all();
         (rt, app, vm, id)
+    }
+
+    fn long_list() -> (Runtime, App, Rc<LongList>, WindowId) {
+        long_list_with(1000)
     }
 
     /// 滚动容器 = 内容根本身（`v.scroll` 在 view 顶层声明）
@@ -3121,6 +3267,25 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// 可见行 = `(item 下标, 行节点)`（行节点 = keyed item 的根，也是 key 所在处）
+    fn visible_rows(app: &App, id: WindowId) -> Vec<(u32, NodeId)> {
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let scroll = scroll_node(app, id);
+        let mut out = Vec::new();
+        for n in t.descendants(scroll) {
+            let Some(node) = t.get(n) else { continue };
+            if let Kind::Text(s) = &node.kind
+                && let Some(rest) = s.strip_prefix("Item ")
+                && let Ok(i) = rest.parse::<u32>()
+                && let Some(p) = t.parent_of(n)
+            {
+                out.push((i, p));
+            }
+        }
+        out
     }
 
     #[test]
@@ -3172,6 +3337,79 @@ mod tests {
                 .abs()
                 < 0.5
         );
+    }
+
+    /// **key 复用**：滚动后仍然可见的行必须复用原节点（`NodeId` 不变）
+    /// —— 这是"行内状态不丢"（选中 / 输入框 / 展开态）的前提。
+    #[test]
+    fn virtual_list_reuses_rows_by_key_when_scrolling() {
+        let (rt, mut app, _vm, id) = long_list();
+        let scroll = scroll_node(&app, id);
+
+        let before = visible_rows(&app, id);
+        assert_eq!(before.len(), 11, "窗口 240/24 + 1");
+
+        // 滚 5 行（120px）
+        app.window_ctx_mut(id)
+            .unwrap()
+            .track_mut()
+            .set_scroll_offset(scroll, (0.0, 120.0));
+        app.frame_all(); // 派发 ScrollChanged ⇒ 回写窗口起点
+        app.frame_all(); // view 重跑 ⇒ 换窗
+
+        let after = visible_rows(&app, id);
+        assert_eq!(after[0].0, 5, "窗口前移 5 行：{after:?}");
+        assert_eq!(after[10].0, 15);
+
+        // 重叠区（Item 5..=10）两帧都在 ⇒ 节点必须复用
+        for (idx, node) in before.iter().filter(|(i, _)| (5..=10).contains(i)) {
+            let (_, after_node) = after
+                .iter()
+                .find(|(i, _)| i == idx)
+                .unwrap_or_else(|| panic!("Item {idx} 应仍在窗口内"));
+            assert_eq!(
+                node, after_node,
+                "Item {idx} 的行节点应被 key 复用（而不是按下标重建）"
+            );
+        }
+        let _ = &rt;
+    }
+
+    /// 边界：空列表 / 起点越界都不能 panic、不能越界切片
+    #[test]
+    fn virtual_list_handles_empty_and_out_of_range() {
+        let (_rt, mut app, vm, id) = long_list_with(0);
+        assert!(visible_rows(&app, id).is_empty(), "空列表物化 0 行");
+        let scroll = scroll_node(&app, id);
+        assert!(
+            app.window_ctx(id).unwrap().track().get(scroll).unwrap().content_size.height < 0.5,
+            "空列表内容高为 0"
+        );
+
+        // 起点远超 count：clamp 后不物化任何行
+        vm.vl.set_first(99_999);
+        app.frame_all();
+        assert!(visible_rows(&app, id).is_empty());
+
+        // 只有 1 项时也正常
+        let (_rt2, app2, _vm2, id2) = long_list_with(1);
+        let rows = visible_rows(&app2, id2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 0);
+    }
+
+    /// `virtual_list` 的虚拟占位：内容总高 = count × item_h（滚动条因此"诚实"），
+    /// 且**没有**额外的占位节点（用内容列的 padding 撑，而非空 row）。
+    #[test]
+    fn virtual_list_pads_instead_of_inserting_spacer_nodes() {
+        let (_rt, app, _vm, id) = long_list();
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let scroll = scroll_node(&app, id);
+        // 滚动容器 → 内容列 → 11 行（没有第二个占位节点）
+        let col = t.children(scroll)[0];
+        assert_eq!(t.children(col).len(), 11, "内容列只放可见行");
+        assert_eq!(t.get(scroll).unwrap().content_size.height, 24.0 * 1000.0);
     }
 
     #[test]
@@ -3380,6 +3618,485 @@ mod tests {
     }
 
     // ─────────────── M5：主题 ───────────────
+
+    // ─────────────── 后台任务 + loading 遮罩（框架级） ───────────────
+
+    #[test]
+    fn background_task_shows_overlay_animates_and_delivers_its_result() {
+        use crate::task::TaskEvent;
+
+        /// 任务结果的落地目标
+        struct Worker {
+            report: Signal<Option<u32>>,
+        }
+        impl ViewModel for Worker {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.center();
+                    c.text(format!("report={:?}", self.report.get()));
+                });
+            }
+            fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
+                if let Some(ev) = data.downcast::<TaskEvent>()
+                    && let Some(r) = ev.payload.downcast::<u32>()
+                {
+                    self.report.set(Some(r));
+                }
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Worker {
+            report: Signal::new(&rt, None),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+
+        // 无头环境没有平台唤醒器 ⇒ 投递走本地队列（测试正好用它当"事件循环"）
+        assert!(!rt.is_online());
+
+        // 起任务 + 遮罩
+        let handle = rt.spawn_task_busy(id, "正在处理…", |ctx| {
+            ctx.progress(1, 2);
+            7u32
+        });
+
+        // 下一帧：view 重跑（遮罩是声明式的）⇒ 遮罩层出现在保留树里
+        let stats = app.frame_all();
+        assert!(stats[0].1.view_ran, "忙碌状态变化 ⇒ 重跑 view");
+        {
+            let w = app.window_ctx(id).unwrap();
+            assert!(
+                w.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_some(),
+                "遮罩层已声明"
+            );
+        }
+
+        // 动画：动画帧把**卡片**标脏（只重绘，不重跑 view），并给出下一次唤醒时刻
+        {
+            let ctx = app.window_ctx_mut(id).unwrap();
+            let _ = ctx.track_mut().take_damage(); // 清掉前面的脏区，只看动画帧贡献
+            ctx.animate(Instant::now());
+            let (damage, all) = ctx.track_mut().take_damage();
+            assert!(all || !damage.is_empty(), "有遮罩 ⇒ 动画帧有重绘义务");
+            assert!(ctx.next_wakeup().is_some(), "遮罩 ⇒ 定时唤醒（spinner）");
+        }
+        // 遮罩确实画到了屏幕上：卡片内的 padding 区应是卡片底色（不是窗口底色）
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            let track = ctx.track();
+            let root = track
+                .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+                .expect("遮罩层在")
+                .node;
+            let card = track.children(root)[0];
+            let r = crate::layout::rect_of(track, card);
+            let light = Theme::light();
+            assert_eq!(
+                pixel(ctx, (r.x + 10.0) as u16, (r.y + 10.0) as u16),
+                opaque(
+                    light.input_background.r,
+                    light.input_background.g,
+                    light.input_background.b
+                ),
+                "窗口里出现了遮罩卡片（{r:?}）"
+            );
+        }
+
+        // 等任务跑完（`frame_all` 会消费本地投递队列 ⇒ 等价于平台层的事件循环）
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while (!handle.is_done() || vm.report.get().is_none()) && Instant::now() < deadline {
+            app.frame_all();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        app.frame_all();
+
+        // 结果落地 + 遮罩自动收起
+        assert_eq!(vm.report.get(), Some(7), "任务返回值经 TaskEvent 落到 Signal");
+        assert!(
+            !rt.is_busy(id) && !rt.has_tasks(id),
+            "完成 ⇒ 任务表与忙碌项都清空"
+        );
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert!(
+                ctx.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_none(),
+                "完成 ⇒ 遮罩层消失"
+            );
+            assert!(
+                ctx.next_wakeup().is_none(),
+                "遮罩消失且没有聚焦输入框/tooltip ⇒ 回到零唤醒（空闲零功耗）"
+            );
+        }
+    }
+
+    // ─────────────── 统一时钟：定时器 / 动画帧 ───────────────
+
+    use crate::event::Emitter;
+    use crate::view::VirtualListState;
+    use std::cell::Cell;
+
+    /// 计时器 + 动画的观察 VM
+    struct Clocked {
+        timeouts: Rc<Cell<u32>>,
+        intervals: Rc<Cell<u32>>,
+        frames: Rc<Cell<u32>>,
+        last_dt_ms: Rc<Cell<u128>>,
+        /// 还要不要再要一帧（模拟"动画结束就停"）
+        keep_animating: Rc<Cell<bool>>,
+    }
+
+    impl ViewModel for Clocked {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.text("clock");
+            });
+        }
+
+        fn on_animation(self: &Rc<Self>, cx: &mut Ctx, _now: Instant, dt: std::time::Duration) {
+            self.frames.set(self.frames.get() + 1);
+            self.last_dt_ms.set(dt.as_millis());
+            if self.keep_animating.get() {
+                cx.request_animation(); // 经典 RAF：想继续就再要一帧
+            }
+        }
+    }
+
+    fn clocked_vm() -> Clocked {
+        Clocked {
+            timeouts: Rc::new(Cell::new(0)),
+            intervals: Rc::new(Cell::new(0)),
+            frames: Rc::new(Cell::new(0)),
+            last_dt_ms: Rc::new(Cell::new(0)),
+            keep_animating: Rc::new(Cell::new(true)),
+        }
+    }
+
+    #[test]
+    fn timeouts_fire_once_and_intervals_keep_firing_until_cancelled() {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = clocked_vm();
+        let id = app.window(
+            WindowConfig::new().size(200.0, 120.0),
+            Clocked {
+                timeouts: Rc::clone(&vm.timeouts),
+                intervals: Rc::clone(&vm.intervals),
+                frames: Rc::clone(&vm.frames),
+                last_dt_ms: Rc::clone(&vm.last_dt_ms),
+                keep_animating: Rc::clone(&vm.keep_animating),
+            },
+        );
+        app.frame_all();
+
+        // 一次性：立即到期 ⇒ 下一帧触发一次，之后不再有
+        rt.set_timeout(id, std::time::Duration::ZERO, {
+            let t = Rc::clone(&vm.timeouts);
+            move |_| t.set(t.get() + 1)
+        });
+        assert!(rt.next_deadline(id).is_some(), "有定时器 ⇒ 平台会定时唤醒");
+        app.frame_all();
+        assert_eq!(vm.timeouts.get(), 1);
+        assert!(rt.next_deadline(id).is_none(), "一次性定时器跑完就没了");
+        app.frame_all();
+        assert_eq!(vm.timeouts.get(), 1, "不会再触发");
+
+        // 周期：首次立即到期，之后每 1ms 一次；取消后停
+        let handle = rt.set_interval(id, std::time::Duration::ZERO, {
+            let i = Rc::clone(&vm.intervals);
+            move |_| i.set(i.get() + 1)
+        });
+        app.frame_all();
+        let after_first = vm.intervals.get();
+        assert!(after_first >= 1, "周期定时器触发");
+        std::thread::sleep(std::time::Duration::from_millis(3)); // 跨过下一个间隔
+        app.frame_all();
+        assert!(vm.intervals.get() > after_first, "还会继续触发");
+
+        handle.cancel();
+        let stopped = vm.intervals.get();
+        app.frame_all();
+        assert_eq!(vm.intervals.get(), stopped, "取消后不再触发");
+        assert!(rt.next_deadline(id).is_none());
+    }
+
+    #[test]
+    fn animation_frames_run_only_while_requested_and_expose_dt() {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = clocked_vm();
+        let id = app.window(
+            WindowConfig::new().size(200.0, 120.0),
+            Clocked {
+                timeouts: Rc::clone(&vm.timeouts),
+                intervals: Rc::clone(&vm.intervals),
+                frames: Rc::clone(&vm.frames),
+                last_dt_ms: Rc::clone(&vm.last_dt_ms),
+                keep_animating: Rc::clone(&vm.keep_animating),
+            },
+        );
+        app.frame_all();
+        assert_eq!(vm.frames.get(), 0, "没请求就不跑动画");
+
+        rt.request_animation(id);
+        app.frame_all();
+        assert_eq!(vm.frames.get(), 1, "请求一次 = 一帧");
+        assert!(rt.next_deadline(id).is_some(), "持续动画 ⇒ 平台持续唤醒");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        app.frame_all();
+        assert_eq!(vm.frames.get(), 2, "回调里再请求 ⇒ 连续跑");
+        assert!(vm.last_dt_ms.get() >= 1, "dt 是真实帧间隔（毫秒）");
+
+        // 停手：不再请求 ⇒ 动画停（空闲零功耗）
+        vm.keep_animating.set(false);
+        app.frame_all();
+        let last = vm.frames.get();
+        app.frame_all();
+        app.frame_all();
+        assert_eq!(vm.frames.get(), last, "不请求就不再跑");
+        assert!(rt.next_deadline(id).is_none());
+        assert!(app.window_ctx(id).unwrap().next_wakeup().is_none(), "回到零唤醒");
+    }
+
+    #[test]
+    fn custom_events_reach_on_external_through_the_frame_driver() {
+        struct Bus {
+            got: Signal<Vec<String>>,
+        }
+        impl ViewModel for Bus {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("bus");
+                });
+            }
+            fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
+                if let Some(s) = data.downcast::<String>() {
+                    self.got.update(|v| v.push(s));
+                }
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Bus {
+            got: Signal::new(&rt, Vec::new()),
+        });
+        let id = app.window_erased(
+            WindowConfig::new(),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+
+        // UI 线程发事件
+        assert!(rt.emit(id, "hello".to_string()));
+        // 跨线程（或业务层）用发射器发事件
+        let tx = Emitter::<String>::new(&rt, id);
+        let t = std::thread::spawn(move || tx.emit("world".to_string()));
+        assert!(t.join().unwrap());
+
+        app.frame_all(); // 帧驱动消费队列
+        let mut got = vm.got.get();
+        got.sort();
+        assert_eq!(got, vec!["hello".to_string(), "world".to_string()]);
+    }
+
+    /// `full_repaint`：不看脏区，每帧整窗重绘（逃生舱 / 残影对照工具）
+    #[test]
+    fn full_repaint_mode_always_redraws_the_whole_window() {
+        struct Page {
+            n: Signal<u32>,
+        }
+        impl ViewModel for Page {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text(format!("n={}", self.n.get()));
+                });
+            }
+        }
+
+        // 普通模式：只改一个文本 ⇒ 只重画那一小块
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Page {
+            n: Signal::new(&rt, 0),
+        });
+        let _id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        vm.n.set(1);
+        let st = app.frame_all();
+        assert!(!st[0].1.damage_all, "默认走脏区");
+        assert!(st[0].1.render.raster.pixels < 400 * 300, "不是整窗");
+
+        // 整窗重绘模式：同样只改一个文本，但整窗重画
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Page {
+            n: Signal::new(&rt, 0),
+        });
+        let _id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0).full_repaint(true),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        vm.n.set(1);
+        let st = app.frame_all();
+        assert!(st[0].1.damage_all, "full_repaint ⇒ 整窗脏");
+        assert_eq!(st[0].1.render.raster.pixels, 400 * 300, "整窗像素都重画");
+    }
+
+    /// 快活儿也要看得见遮罩：忙碌段在**两次出帧之间**开始又结束（小文件读盘的真实情形，
+    /// 完成消息往往先于下一帧被处理），配了最短可见时间后下一帧仍然画得出遮罩。
+    #[test]
+    fn a_fast_busy_section_still_shows_the_overlay() {
+        struct Empty;
+        impl ViewModel for Empty {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("主界面");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        rt.set_busy_min_visible(Duration::from_millis(300));
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
+        app.frame_all();
+
+        // 忙碌段瞬间开始又结束（中间没有出过帧）
+        let busy = rt.begin_busy(id, "正在打开…");
+        busy.finish();
+
+        // 下一帧：遮罩必须在 —— 没有它用户就什么都看不到
+        app.frame_all();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert!(
+                ctx.track()
+                    .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+                    .is_some(),
+                "最短可见期内遮罩要在"
+            );
+            assert!(ctx.next_wakeup().is_some(), "还要定时唤醒去收它");
+        }
+
+        // 到点 ⇒ 收掉；下一帧没有遮罩，回到零唤醒
+        assert!(rt.reap_busy(Instant::now() + Duration::from_millis(400)));
+        app.frame_all();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert!(
+                ctx.track()
+                    .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+                    .is_none(),
+                "到点 ⇒ 遮罩收起"
+            );
+            assert!(ctx.next_wakeup().is_none(), "遮罩收掉 ⇒ 回到零唤醒");
+        }
+    }
+
+    /// 整窗图片（PDF 预览那类）不得盖住浮层：遮罩是**后**声明的 Modal 层，必须压在图上。
+    ///
+    /// 症状来源：光栅层原先把图片 op 统一放到批次末尾 blit（"图片总在最上层"），
+    /// 于是预览图盖住了 loading 遮罩 —— 用户"看不到进度 modal"。
+    #[test]
+    fn busy_overlay_covers_a_full_window_image() {
+        struct Pic;
+        impl ViewModel for Pic {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                // 整窗一张纯红图（2×2 拉伸铺满）
+                v.image(std::sync::Arc::new(crate::ImageData {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![
+                        255, 0, 0, 255, 255, 0, 0, 255, //
+                        255, 0, 0, 255, 255, 0, 0, 255,
+                    ],
+                }))
+                .expand(true);
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(400.0, 300.0), Pic);
+        app.frame_all();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            assert_eq!(pixel(ctx, 200, 150), opaque(255, 0, 0), "先确认整窗都是图");
+        }
+
+        // 忙碌遮罩压上来：卡片底色必须出现在图上（旧实现这里还是红的）
+        let busy = rt.begin_busy(id, "正在打开…");
+        app.frame_all();
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            let root = ctx
+                .track()
+                .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+                .expect("遮罩层在")
+                .node;
+            let card = ctx.track().children(root)[0];
+            let r = crate::layout::rect_of(ctx.track(), card);
+            let light = Theme::light();
+            assert_eq!(
+                pixel(ctx, (r.x + 10.0) as u16, (r.y + 10.0) as u16),
+                opaque(
+                    light.input_background.r,
+                    light.input_background.g,
+                    light.input_background.b
+                ),
+                "遮罩卡片压在图片之上"
+            );
+        }
+        busy.finish();
+    }
+
+    /// 忙碌遮罩是 Modal 层 ⇒ 下层的按钮点不到（交互被挡住）
+    #[test]
+    fn busy_overlay_blocks_input_to_the_content_below() {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Counter {
+            count: Signal::new(&rt, 0),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+
+        // `Counter` 的 view 结构固定：内容根第 3 个子节点是个 row，里面第 1 个是「+1」按钮
+        let button = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            let row = w.track().children(root)[2];
+            w.track().children(row)[0]
+        };
+
+        tap_node(&mut app, &rt, id, button);
+        assert_eq!(vm.count.get(), 1, "平时点得到");
+
+        // 遮罩起来：同样点一下 ⇒ 下层按钮收不到
+        let busy = rt.begin_busy(id, "后台任务进行中…");
+        app.frame_all();
+        tap_node(&mut app, &rt, id, button);
+        assert_eq!(vm.count.get(), 1, "遮罩挡住下层交互");
+
+        // 收起遮罩 ⇒ 恢复交互
+        busy.finish();
+        app.frame_all();
+        tap_node(&mut app, &rt, id, button);
+        assert_eq!(vm.count.get(), 2, "遮罩消失后恢复交互");
+    }
 
     /// 跟随系统：OS 深色上报 ⇒ 重跑 view + 窗口底色跟随（未显式指定底色时）
     #[test]
@@ -3631,6 +4348,93 @@ mod tests {
                 .is_none(),
             "移开 ⇒ tooltip 层应消失"
         );
+    }
+
+    /// tooltip 的文本按**墨迹盒**居中：盒高 = 墨迹高 + 上下各 6px，
+    /// 于是字形上下留白相等（行盒 ascent/descent 不对称会让文本看着往上顶）。
+    /// 像素级验证：上下 padding 带是纯底色，字形只出现在中间那条墨迹带里。
+    #[test]
+    fn tooltip_text_is_centered_by_its_ink_box() {
+        struct T;
+        impl ViewModel for T {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("hover me").font_size(20.0).tooltip("i am a tooltip");
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(300.0, 200.0), T);
+        app.frame_all();
+
+        let target = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            w.track()
+                .children(root)
+                .iter()
+                .copied()
+                .find(|k| w.track().get(*k).is_some_and(|n| n.tooltip.is_some()))
+                .unwrap()
+        };
+        let center = {
+            let w = app.window_ctx(id).unwrap();
+            let r = crate::layout::rect_of(w.track(), target);
+            Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
+        };
+        app.window_ctx_mut(id).unwrap().pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos: center,
+            },
+        );
+        let now = Instant::now() + TOOLTIP_DELAY + Duration::from_millis(50);
+        app.window_ctx_mut(id).unwrap().tick(&rt, now);
+        app.frame_all();
+
+        let w = app.window_ctx(id).unwrap();
+        let tip_node = w
+            .track()
+            .roots_of(crate::track::Layer::Tooltip)
+            .next()
+            .expect("tooltip 层在")
+            .node;
+        let n = w.track().get(tip_node).unwrap();
+        assert!(n.text.spec.optical_align, "tooltip 走墨迹盒对齐");
+
+        let rect = crate::layout::rect_of(w.track(), tip_node);
+        let ink = lieui_text::TextEngine::ink_bounds("i am a tooltip", &n.text.spec)
+            .expect("tooltip 文本有墨迹");
+        assert!(
+            (rect.height - (ink.height() + 12.0)).abs() < 0.01,
+            "tooltip 盒高 = 墨迹高 + 12：{} vs {}",
+            rect.height,
+            ink.height()
+        );
+
+        // 远离圆角（左右各让 8px）取横带：上/下 padding 带必须是纯底色，
+        // 字形只出现在中间那条墨迹带里 ⇒ 上下留白相等。
+        let xs: Vec<u16> = ((rect.x + 8.0) as u16..=(rect.right() - 8.0) as u16).collect();
+        let bg = pixel(w, xs[0], (rect.y + 2.0) as u16);
+        let band_uniform = |y: u16| xs.iter().all(|x| pixel(w, *x, y) == bg);
+        assert!(
+            band_uniform((rect.y + 2.0) as u16),
+            "顶部 padding 带是纯底色"
+        );
+        assert!(
+            band_uniform((rect.bottom() - 2.0) as u16),
+            "底部 padding 带是纯底色"
+        );
+
+        let mid: Vec<u16> = ((rect.y + 6.0) as u16..(rect.y + 6.0 + ink.height()) as u16).collect();
+        let ink_px = mid
+            .iter()
+            .filter(|y| xs.iter().any(|x| pixel(w, *x, **y) != bg))
+            .count();
+        assert!(ink_px > 0, "中间墨迹带里应有字形像素");
     }
 
     #[test]

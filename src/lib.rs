@@ -22,6 +22,39 @@
 //! | [`focus`] | 焦点管理（`set_focus` / Tab 链 / `FocusState`） |
 //! | [`transform`] | 2D 仿射矩阵（绘制 / 命中 / 裁剪共用） |
 //! | [`app`] | `ViewModel` / `WindowView`（对象安全擦除）/ `WindowCtx` 帧驱动 / 多窗口 `App` |
+//! | [`theme`] | `Theme`（design token）+ `ThemeMode`（浅/深/跟随系统/自定义）|
+//! | [`task`] | 后台任务与跨线程通信：`Waker` / `spawn_task(_busy)` / 取消 / loading 遮罩状态 |
+//! | [`timer`] | 统一时钟：`set_timeout` / `set_interval` / `request_animation`（帧唤醒汇总）|
+//!
+//! ## 事件与时钟（速览）
+//!
+//! **两条入径，各自单一职责**：
+//!
+//! | 通道 | 承载 | API |
+//! |---|---|---|
+//! | 输入事件 | 指针 / 键盘 / IME / 滚动 | winit → `InputEvent`/`Event` → `dispatch`（用户 handler）|
+//! | **消息** | 自定义事件 / 后台任务 / 跨线程 | `Runtime::emit` / `Ctx::emit` / [`Emitter`] / `Runtime::emit_global` → `on_external` |
+//!
+//! 框架控制消息（开窗/关窗）单独走 `Ctx::request`（`RequestQueue`），别拿它当事件总线。
+//!
+//! **一个时钟**：定时器与动画帧统一在 [`timer`]，平台层只问
+//! `WindowCtx::next_wakeup()`（= 光标闪烁 / tooltip / 忙碌 spinner / 定时器 / 动画帧 的最早值）；
+//! 没有唤醒源就是 `ControlFlow::Wait`（空闲零功耗）。
+//!
+//! ## 后台任务与 loading 遮罩（速览）
+//!
+//! ```ignore
+//! // 事件处理器里：起任务 + 遮罩（进度 / 取消都自动接好）
+//! cx.spawn_task_busy("正在导出…", |ctx| {
+//!     for i in 0..n {
+//!         if ctx.is_cancelled() { return Err("已取消"); }
+//!         ctx.progress(i, n);
+//!         work(i);
+//!     }
+//!     Ok(summary)
+//! });
+//! // 结果在 on_external 里取：data.downcast::<TaskEvent>() -> ev.payload.downcast::<Result<..>>()
+//! ```
 //!
 //! ## 待补（里程碑）
 //!
@@ -40,12 +73,15 @@ pub mod hit;
 pub mod icon;
 pub mod input;
 pub mod layout;
+pub(crate) mod overlay;
 #[cfg(feature = "winit")]
 pub mod platform;
 pub mod reactive;
 pub mod render;
 pub mod style;
+pub mod task;
 pub mod theme;
+pub mod timer;
 pub mod track;
 pub mod transform;
 pub mod view;
@@ -72,11 +108,14 @@ pub use render::{
 };
 pub use transform::Affine;
 pub use style::{ImageFit, ImageStyle, PaintStyle, ShadowSpec, TextStyle};
+pub use event::Emitter;
+pub use task::{BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker};
+pub use timer::{FRAME_PERIOD, TimerHandle};
 pub use track::{
     Anchor, Axis, Flags, FocusPolicy, FocusState, ImageData, InteractionState, Key, Kind, KindDesc,
     KindTag, Layer, LayerOpts, Node, NodeId, Placement, Root, RootId, Track, Transform, Visibility,
 };
-pub use view::{DescRef, ViewBuf};
+pub use view::{DescRef, ViewBuf, VirtualListState};
 pub use window::WindowId;
 
 // 基础设施 crate 的便捷再导出。
@@ -90,16 +129,20 @@ pub mod prelude {
     pub use crate::app::{App, CloseAction, ExternalData, ViewModel, WindowConfig, WindowCtx};
     pub use crate::cmd::CmdBuf;
     pub use crate::custom::{self, CustomCell, CustomNode};
-    pub use crate::event::{Ctx, Event, EventKind, EventView, PointerButton, PointerId};
+    pub use crate::event::{Ctx, Emitter, Event, EventKind, EventView, PointerButton, PointerId};
     pub use crate::icon::{icon_char, icon_font_family};
     pub use crate::input::InputEvent;
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
+    pub use crate::task::{
+        BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker,
+    };
     pub use crate::theme::{Theme, ThemeMode};
+    pub use crate::timer::{FRAME_PERIOD, TimerHandle};
     pub use crate::track::{
         AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility,
     };
-    pub use crate::view::{DescRef, ViewBuf};
+    pub use crate::view::{DescRef, ViewBuf, VirtualListState};
     pub use lieui_geom::{Color, Point, Rect, Size};
     pub use crate::render::scene::Scene;
     pub use crate::transform::Affine;

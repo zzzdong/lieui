@@ -92,6 +92,10 @@ pub fn align(track: &mut Track, view: &ViewBuf) -> AlignStats {
                 {
                     r.opts = dr.opts.clone();
                 }
+                // 层根标签：布局后可按标签找回这个层（框架的 loading 遮罩靠它定位）
+                if dr.tag.is_some() && let Some(r) = track.root_mut(rid) {
+                    r.tag = dr.tag;
+                }
                 out.roots_created += 1;
                 // ⚠ 必须一并登记为"已认领"，否则末尾的"清理未认领根"会立刻把它删掉
                 claimed.push(rid);

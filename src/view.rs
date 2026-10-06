@@ -69,6 +69,47 @@ impl DescNode {
     }
 }
 
+/// 虚拟列表的视图态：记住"可见窗口起点"（item 下标）。
+///
+/// `Clone` 只是 `Rc` 引用计数 +1（可以放进多个 VM / 多处传阅）。
+/// 内部用 `Signal` 承载 —— 起点一变就触发 `view()` 重跑（R1 的既有回路）。
+#[derive(Clone)]
+pub struct VirtualListState {
+    first: Signal<usize>,
+}
+
+impl VirtualListState {
+    /// 造一个（需要 `Runtime`，与 `Signal` 一样）
+    pub fn new(rt: &crate::reactive::Runtime) -> Self {
+        Self {
+            first: Signal::new(rt, 0),
+        }
+    }
+
+    /// 当前窗口起点（item 下标）
+    pub fn first(&self) -> usize {
+        self.first.get()
+    }
+
+    /// 直接跳到某个 item（例如"定位到第 N 项"；越界由 [`ViewBuf::virtual_list`] 收敛）
+    pub fn set_first(&self, i: usize) {
+        self.first.set(i);
+    }
+
+    /// 给 `virtual_list` 注册 `ScrollChanged` 用
+    fn signal(&self) -> Signal<usize> {
+        self.first.clone()
+    }
+}
+
+impl std::fmt::Debug for VirtualListState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualListState")
+            .field("first", &self.first())
+            .finish()
+    }
+}
+
 /// 描述层根（`pub(crate)`）
 pub(crate) struct DescRoot {
     pub node: u32,
@@ -76,6 +117,9 @@ pub(crate) struct DescRoot {
     /// 声明它的父层（`DescRoot` 下标；`None` = Content）
     pub owner: Option<u32>,
     pub opts: LayerOpts,
+    /// 层根标签：布局后可用 `Track::root_by_tag` 找回这个层
+    /// （框架的 loading 遮罩靠它定位，用户也能给自己的层打标签）。
+    pub tag: Option<u64>,
 }
 
 /// 描述 arena：一次 `view()` 的产出
@@ -89,6 +133,8 @@ pub struct ViewBuf {
     root_stack: Vec<u32>,
     /// `keyed_list` 正在渲染 item（允许往"被 keyed 接管"的容器里推子节点）
     in_keyed_item: bool,
+    /// 下一个层根的标签（`modal_tagged` 用）
+    layer_tag: Option<u64>,
     /// 本帧的主题快照（框架在 `view()` 前注入；DSL 用它烘焙默认配色，设计 §3.10）
     theme: Theme,
 }
@@ -163,6 +209,7 @@ impl ViewBuf {
                     layer: Layer::Content,
                     owner: None,
                     opts: LayerOpts::for_layer(Layer::Content),
+                    tag: None,
                 });
                 self.root_stack.push(rid);
             }
@@ -464,7 +511,10 @@ impl ViewBuf {
     ///
     /// 约束（M1）：它会接管当前容器的子节点，必须在该容器里独占使用；
     /// `item` 闭包必须恰好产生一个子节点。
-    pub fn keyed_list<I, K, F>(&mut self, items: I, key_fn: fn(&I::Item) -> K, mut item: F)
+    ///
+    /// `key_fn` 收 `impl Fn`（不是 `fn` 指针）—— 这样它可以捕获环境
+    /// （例如 [`Self::virtual_list`] 内部把 `fn(&T)` 适配成 `fn(&&T)`）。
+    pub fn keyed_list<I, K, F>(&mut self, items: I, key_fn: impl Fn(&I::Item) -> K, mut item: F)
     where
         I: IntoIterator,
         K: Into<Key>,
@@ -503,11 +553,101 @@ impl ViewBuf {
         }
     }
 
+    /// **虚拟列表**：只物化可见窗口的行（滚动容器内使用）。
+    ///
+    /// 与 [`Self::keyed_list`] 的分工：`keyed_list` 管**身份复用**，本方法管**窗口切片**
+    /// —— 两者配合才能在滚动时既省节点又保住行内状态（选中、输入框、展开态……）。
+    ///
+    /// 机制：
+    /// 1. [`VirtualListState`] 记住窗口起点：`ScrollChanged` 时把偏移换算成 item 下标回写
+    ///    （只在**跨行**时才写，避免每帧无谓重跑 `view()`）；
+    /// 2. 内容列用 `padding_top = first × item_h` / `padding_bottom = 余量 × item_h`
+    ///    撑出**真实内容总高**（滚动范围与滚动条因此"诚实"），不需要插入空占位节点；
+    /// 3. 可见窗口 `[first, last)`（多一行缓冲）走 `keyed_list`，按 `key_fn` 复用节点。
+    ///
+    /// 约束：必须声明在**滚动容器**内（本方法接管当前容器的子节点）；
+    /// `item` 闭包必须恰好产生一个子节点（同 `keyed_list`）。
+    ///
+    /// `viewport_height` 需要显式给：`view()` 发生在布局**之前**，拿不到容器实测高度；
+    /// 填滚动容器的固定高度即可（高度是弹性的场合，填保守值或上一帧量到的值）。
+    ///
+    /// ```ignore
+    /// // VM：items: Vec<Row>、vl: VirtualListState
+    /// v.scroll(|s| {
+    ///     s.height(240.0).width(160.0);
+    ///     s.virtual_list(&self.vl, &self.items, |r| r.id, 24.0, 240.0, |v, r| {
+    ///         v.row(|row| {
+    ///             row.height(24.0);
+    ///             row.text(format!("#{} {}", r.id, r.title));
+    ///         });
+    ///     });
+    /// });
+    /// ```
+    pub fn virtual_list<T, K, F>(
+        &mut self,
+        state: &VirtualListState,
+        items: &[T],
+        key_fn: fn(&T) -> K,
+        item_height: f32,
+        viewport_height: f32,
+        item: F,
+    ) where
+        K: Into<Key>,
+        F: FnMut(&mut Self, &T),
+    {
+        let count = items.len();
+        let ih = if item_height.is_finite() && item_height > 0.0 {
+            item_height
+        } else {
+            1.0
+        };
+        let vh = if viewport_height.is_finite() && viewport_height > 0.0 {
+            viewport_height
+        } else {
+            ih
+        };
+        // 可见行数：满屏行数 + 1 行缓冲（滚动中不会看到空白；也容忍取整误差）
+        let visible = ((vh / ih).ceil() as usize).max(1) + 1;
+        let first = state.first().min(count);
+        let last = (first + visible).min(count);
+
+        // ① 滚动偏移 → 窗口起点
+        let sig = state.signal();
+        self.on(EventKind::ScrollChanged, move |cx| {
+            // 向下取整：保证"视口顶部露出半个行"时那一行也被物化（否则顶部会缺一块）
+            let next = (cx.scroll_offset().1 / ih).floor().max(0.0) as usize;
+            if sig.get() != next {
+                sig.set(next);
+            }
+        });
+
+        // ② 内容列（虚拟 padding 撑高）+ ③ 可见窗口（keyed 复用）
+        let mut item = item;
+        self.column(|col| {
+            col.padding_top(first as f32 * ih);
+            col.padding_bottom((count - last) as f32 * ih);
+            col.keyed_list(
+                items[first..last].iter(),
+                |t: &&T| key_fn(*t),
+                |v, t: &&T| item(v, *t),
+            );
+        });
+    }
+
     // ─────────────────── 层 ───────────────────
 
     /// Modal：默认 backdrop + 阻断下层（居中由层语义决定，不需要 anchor）
     pub fn modal(&mut self, f: impl FnOnce(&mut Self)) {
         self.layer(Layer::Modal, None, |_| {}, f);
+    }
+
+    /// 带标签的 Modal 层：语义同 [`Self::modal`]，且层根带 `tag`
+    /// （布局后可用 `Track::root_by_tag(tag)` 找回）。框架的 loading 遮罩用它做定位。
+    pub fn modal_tagged(&mut self, tag: u64, f: impl FnOnce(&mut Self)) {
+        let prev = self.layer_tag;
+        self.layer_tag = Some(tag);
+        self.modal(f);
+        self.layer_tag = prev;
     }
 
     /// 装饰层 / 水印：默认命中穿透
@@ -604,6 +744,7 @@ impl ViewBuf {
             layer,
             owner,
             opts,
+            tag: self.layer_tag.take(),
         });
 
         self.root_stack.push(rid);
@@ -640,6 +781,12 @@ impl ViewBuf {
     }
     pub fn padding_y(&mut self, p: f32) {
         self.cur().padding_y(p);
+    }
+    pub fn padding_top(&mut self, p: f32) {
+        self.cur().padding_top(p);
+    }
+    pub fn padding_bottom(&mut self, p: f32) {
+        self.cur().padding_bottom(p);
     }
     pub fn width(&mut self, w: f32) {
         self.cur().width(w);
@@ -730,6 +877,16 @@ impl<'a> DescRef<'a> {
         let l = &mut self.n().layout;
         l.padding[CSSDirection::Top as usize] = p;
         l.padding[CSSDirection::Bottom as usize] = p;
+        self
+    }
+
+    pub fn padding_top(mut self, p: f32) -> Self {
+        self.n().layout.padding[CSSDirection::Top as usize] = p;
+        self
+    }
+
+    pub fn padding_bottom(mut self, p: f32) -> Self {
+        self.n().layout.padding[CSSDirection::Bottom as usize] = p;
         self
     }
 
