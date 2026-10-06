@@ -2172,6 +2172,66 @@ mod tests {
         assert_eq!(&*seen.borrow(), &[2.0, 1.5]);
     }
 
+    /// **0×0 的窗口（= 最小化）跑完整帧不许 panic**：pixmap 退到 1×1、布局照跑，
+    /// 还原后能正常重绘。
+    ///
+    /// 这条**不是**上面那个崩溃的回归护栏（无头环境复现不出让容器变负高度的那套几何 ——
+    /// 真机那次是 Windows 最小化客户区 + 应用自身的固定高度 chrome 共同算出来的）。
+    /// 回归护栏在 `widgets::tests::scroll_parts_survives_collapsed_and_short_viewports`：
+    /// 它直接给滚动条喂"负高度 / 零高度 / 比最小 thumb 还矮"的视口，已验证去掉修复就 panic。
+    #[test]
+    fn a_minimized_window_frames_without_panicking() {
+        struct Tall;
+        impl ViewModel for Tall {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                // 照抄 pdfkit 侧栏的排布（行 + Stretch + 带 padding 的滚动容器）
+                v.column(|root| {
+                    root.expand(true);
+                    root.row(|body| {
+                        body.expand(true);
+                        body.align_items(crate::flex::FlexAlign::Stretch);
+                        body.container(|side| {
+                            side.width(220.0);
+                            side.padding(8.0);
+                            side.scroll(|sc| {
+                                sc.expand(true);
+                                sc.column(|list| {
+                                    for i in 0..200 {
+                                        list.text(format!("第 {i} 行")).height(20.0);
+                                    }
+                                });
+                            });
+                        });
+                    });
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new().size(300.0, 200.0), Tall);
+        app.frame_all();
+
+        // 最小化：winit 就是这么发尺寸的（0×0）
+        app.window_ctx_mut(id)
+            .unwrap()
+            .set_size(&rt, Size::new(0.0, 0.0));
+        app.frame_all(); // ← 以前在这里 panic
+
+        // 还原：布局与重绘都该恢复正常
+        app.window_ctx_mut(id)
+            .unwrap()
+            .set_size(&rt, Size::new(300.0, 200.0));
+        let st = app.frame_all()[0].1.clone();
+        assert!(st.layout.ran, "还原后重排");
+        assert!(st.paint_pending, "还原后重绘");
+        assert_eq!(
+            app.window_ctx(id).unwrap().pixmap().width(),
+            300,
+            "物理尺寸回到窗口宽"
+        );
+    }
+
     // ─────────────── M5：内置行为 + 双向绑定 ───────────────
 
     struct Controls {

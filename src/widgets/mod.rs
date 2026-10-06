@@ -280,7 +280,10 @@ fn scroll_parts(
     view_len: f32,
     vertical: bool,
 ) -> Option<(Rect, Rect)> {
-    if content_len <= view_len + 0.5 {
+    // `partial_cmp != Some(Greater)` 覆盖两种"不画"：没溢出（`Less`/`Equal`），
+    // 以及**任一尺寸是 NaN**（`partial_cmp` 返回 `None`）—— NaN 尺寸顺着布局流到几何
+    // 计算里只会画出一条 NaN 长的轨道，不如不画。
+    if content_len.partial_cmp(&(view_len + 0.5)) != Some(std::cmp::Ordering::Greater) {
         return None; // 没溢出就没滚动条
     }
     let (track_len, base, across) = if vertical {
@@ -288,8 +291,18 @@ fn scroll_parts(
     } else {
         (view.width - SCROLLBAR_INSET * 2.0, view.x + SCROLLBAR_INSET, view.bottom() - SCROLLBAR_WIDTH - SCROLLBAR_INSET)
     };
+    // 轨道长度必须为正。**窗口最小化时客户区是 0×0，布局会把容器高度算成负数**
+    // （实测 -26px），那样下面 `clamp(MIN_THUMB_LEN, track_len)` 的下界就大于上界 ——
+    // `f32::clamp` 会 panic（`min > max`），这正是"导出 PNG 后最小化窗口就崩"的根因。
+    let track_len = track_len.max(0.0);
+    if track_len <= 0.0 {
+        return None; // 没有可画的轨道
+    }
     let max_scroll = (content_len - view_len).max(0.0);
-    let thumb_len = (track_len * view_len / content_len).clamp(MIN_THUMB_LEN, track_len);
+    // 上下界必须有序：轨道比"最小 thumb"还短时（矮容器），把下界收敛到轨道长度 ——
+    // 于是 thumb 铺满整条轨道（仍是可见的"可滚动"提示，且 `travel = 0` 拖不动但不会崩）。
+    let thumb_len =
+        (track_len * view_len / content_len).clamp(MIN_THUMB_LEN.min(track_len), track_len);
     let travel = (track_len - thumb_len).max(0.0);
     let pos = base + travel * if max_scroll > 0.0 { (offset / max_scroll).clamp(0.0, 1.0) } else { 0.0 };
     let track_rect = if vertical {
@@ -1819,6 +1832,46 @@ mod tests {
             _ => false,
         });
         assert!(thumb_x_hit, "溢出 ⇒ 场景里有 thumb 矩形");
+    }
+
+    /// **回归（真机报障：导出 PNG 后最小化窗口就崩）**：窗口最小化 ⇒ 客户区 0×0
+    /// ⇒ 布局把容器高度算成**负数** ⇒ 滚动条 thumb 的 `clamp(MIN_THUMB_LEN, track_len)`
+    /// 上下界反序（实测 `min = 24.0, max = -29.99`）⇒ `f32::clamp` panic。
+    ///
+    /// 顺带钉住同源的另一个触发条件：容器**比最小 thumb（24px）还矮**时也会反序。
+    #[test]
+    fn scroll_parts_survives_collapsed_and_short_viewports() {
+        let tall = Size::new(220.0, 4000.0);
+
+        // ① 负高度（最小化后的真实情形）⇒ 没有轨道可画，而不是 panic
+        let neg = Rect::new(0.0, 0.0, 220.0, -25.99);
+        assert!(vscroll_parts(neg, tall, 0.0).is_none(), "负高度不画滚动条");
+
+        // ② 零高度 ⇒ 同上
+        let zero = Rect::new(0.0, 0.0, 220.0, 0.0);
+        assert!(vscroll_parts(zero, tall, 0.0).is_none());
+
+        // ③ 轨道比最小 thumb 还短：thumb 铺满轨道，长度合法（0 ≤ thumb ≤ track）
+        let short = Rect::new(0.0, 0.0, 220.0, 10.0);
+        let (track, thumb) = vscroll_parts(short, tall, 0.0).expect("矮容器仍给滚动条");
+        assert!(track.height > 0.0, "轨道长度为正");
+        assert!(thumb.height > 0.0, "thumb 长度为正");
+        assert!(
+            thumb.height <= track.height + 0.01,
+            "thumb 不比轨道长：{} vs {}",
+            thumb.height,
+            track.height
+        );
+
+        // ④ NaN 尺寸（布局一旦出 NaN 就会流到这里）⇒ 不画，而不是画出 NaN 几何
+        let nan = Rect::new(0.0, 0.0, 220.0, f32::NAN);
+        assert!(vscroll_parts(nan, tall, 0.0).is_none());
+
+        // ⑤ 正常情形不受影响：thumb 在轨道内、且不短于最小长度
+        let normal = Rect::new(0.0, 0.0, 220.0, 800.0);
+        let (track, thumb) = vscroll_parts(normal, tall, 0.0).expect("有滚动条");
+        assert!(thumb.height >= MIN_THUMB_LEN - 0.01, "thumb 不小于最小长度");
+        assert!(thumb.height < track.height, "内容溢出 ⇒ thumb 比轨道短");
     }
 
     /// 滚动条是**覆盖层**：必须画在子项（列表项）之后，否则会被盖住
