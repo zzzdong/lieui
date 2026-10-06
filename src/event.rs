@@ -880,6 +880,13 @@ pub struct RoutePlan {
 
 fn collect_from(track: &Track, id: NodeId, kind: EventKind, items: &mut Vec<HandlerSlot>) {
     if let Some(n) = track.get(id) {
+        // 禁用节点**不参与路由**（对齐 WinUI `IsEnabled=false`：输入整体不达）。
+        // 内置行为另有拦截（`widgets::handle` 开头就查 `enabled`），此前这里没查 ——
+        // 于是 `button(..).enabled(false).on_tap(..)` 照样触发（菜单里"禁用项"最典型：
+        // 剪切/删除的禁用态看着是灰的、点下去却真的执行）。
+        if !n.interaction.enabled {
+            return;
+        }
         for slot in &n.handlers {
             if slot.kind == kind {
                 items.push(slot.clone());
@@ -1058,6 +1065,45 @@ mod tests {
         assert_eq!(out.invoked, 3);
         // 内 → 外：2, 1, 0
         assert_eq!(*log.borrow(), vec![2, 1, 0]);
+    }
+
+    /// 禁用节点**不进路由**（对齐 WinUI `IsEnabled=false`）：它自己的处理器不跑，
+    /// 但**祖先**的处理器照跑（菜单里"禁用项"仍要能被父容器的轻关闭/取消逻辑看到）。
+    ///
+    /// 这条曾经是 bug：`enabled` 只挡了内置行为（`widgets::handle`）与焦点，
+    /// 用户 `on_tap` 照跑 ⇒ "剪切此页（禁用）"看着是灰的、点下去真的执行。
+    #[test]
+    fn disabled_nodes_are_skipped_but_ancestors_still_run() {
+        let (mut t, path) = chain(3);
+        let log = Rc::new(std::cell::RefCell::new(Vec::new()));
+        for (i, id) in path.iter().enumerate() {
+            let log = Rc::clone(&log);
+            t.get_mut(*id).unwrap().handlers.push(slot(
+                EventKind::Tapped,
+                false,
+                move |_| log.borrow_mut().push(i),
+            ));
+        }
+        // 最内层（2）禁用
+        t.get_mut(path[2]).unwrap().interaction.enabled = false;
+
+        let rt = Runtime::new();
+        let w = WindowId::new(1);
+        rt.register_window(w);
+        let mut cmds = CmdBuf::new();
+        let out = dispatch(
+            &rt,
+            w,
+            &t,
+            &path,
+            &Event::Simple {
+                kind: EventKind::Tapped,
+            },
+            &mut cmds,
+        );
+
+        assert_eq!(*log.borrow(), vec![1, 0], "禁用节点自己没跑，祖先照跑");
+        assert_eq!(out.invoked, 2);
     }
 
     #[test]
