@@ -612,13 +612,33 @@ impl ViewBuf {
         let last = (first + visible).min(count);
 
         // ① 滚动偏移 → 窗口起点
+        //
+        // 处理器挂在**最近的滚动容器祖先**上，而不是当前节点：调用点通常把虚拟列表
+        // 包在普通 column 里（最常见的"标题 + 列表"排布），挂到当前节点会永远收不到
+        // `ScrollChanged` ⇒ 窗口起点不推进 ⇒ 看起来"只有前若干项、滚下去没有新行"。
+        // 没有滚动祖先时退回当前节点（等价于旧行为）。
+        let cur = *self
+            .stack
+            .last()
+            .expect("virtual_list 必须在容器闭包内调用");
+        let host = self
+            .stack
+            .iter()
+            .rev()
+            .find(|&&idx| self.node(idx).layout.overflow_scroll)
+            .copied()
+            .unwrap_or(cur);
         let sig = state.signal();
-        self.on(EventKind::ScrollChanged, move |cx| {
-            // 向下取整：保证"视口顶部露出半个行"时那一行也被物化（否则顶部会缺一块）
-            let next = (cx.scroll_offset().1 / ih).floor().max(0.0) as usize;
-            if sig.get() != next {
-                sig.set(next);
-            }
+        self.node_mut(host).handlers.push(HandlerSlot {
+            kind: EventKind::ScrollChanged,
+            handler: Rc::new(move |cx: &mut crate::event::Ctx| {
+                // 向下取整：保证"视口顶部露出半个行"时那一行也被物化（否则顶部会缺一块）
+                let next = (cx.scroll_offset().1 / ih).floor().max(0.0) as usize;
+                if sig.get() != next {
+                    sig.set(next);
+                }
+            }),
+            handled_events_too: false,
         });
 
         // ② 内容列（虚拟 padding 撑高）+ ③ 可见窗口（keyed 复用）

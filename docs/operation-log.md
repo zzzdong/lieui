@@ -1854,3 +1854,26 @@ pdfkit `cargo test` 30 全绿 + `cargo clippy --all-targets` 0 警告。
 （`0.2.0 > 0.1.0`）⇒ crates.io 的 "latest" 一直被它占着，`cargo add lieui` 会拿到旧版。
 yank 之后（索引里 `yanked=true`）新解析会跳过它，直接落到 `0.1.0-alpha.2`；
 已有 lockfile 固定到它的旧用户不受影响（yank 只影响新解析，不删包）。
+
+## 2026-10-06 · 虚拟列表嵌在普通 column 里时滚不动（pdfkit 侧栏症状）
+
+**症状**：pdfkit 左侧栏只能看到前 19 行，滚下去不再出现新行（内容高度明明是"虚拟"的
+完整高度，滚动条也画得出来）。
+
+**根因**：`ViewBuf::virtual_list` 把 `ScrollChanged` 处理器挂在**当前节点**上。直接挂在
+滚动容器上时正常；一旦被包进普通 column（"标题 + 列表"是最常见排布，pdfkit 侧栏正是
+`scroll → column[标题, 虚拟列表]`），事件就永远不来 —— 只有 `overflow_scroll` 的节点
+才派发 `ScrollChanged` ⇒ 窗口起点不推进 ⇒ 永远只有第一窗。
+
+**修法**：沿 `ViewBuf::stack`（当前打开的容器链）向上找**最近的 `overflow_scroll`
+祖先**，把处理器挂在那里；找不到时退回当前节点（保持旧行为）。
+
+**顺带核对**（结论：本来就对）：虚拟 padding（`padding_top` / `padding_bottom`）**是**计入
+滚动容器 `content_size` 的 ⇒ 滚动条长度一直正确，这次只有"窗口不推进"这一个 bug。
+
+**测试 +1**：`app::virtual_list_nested_in_a_plain_column_still_advances_its_window`
+复现 pdfkit 的排布（滚动容器 → 普通 column → 虚拟列表），断言滚 10 行后窗口起点推进、
+且内容高度接近 1000 行。已做反向验证：把挂载点改回当前节点后该测试失败，报出的正是
+`["Item 0", …, "Item 10"]`（滚了但没换窗）。
+
+验证：lieui `cargo test --lib` 334 全绿 + clippy 0 警告。

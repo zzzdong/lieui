@@ -3412,6 +3412,85 @@ mod tests {
         assert_eq!(t.get(scroll).unwrap().content_size.height, 24.0 * 1000.0);
     }
 
+    /// 虚拟列表**包在普通 column 里**（"标题 + 列表"这种最常见排布）也必须能滚：
+    /// `ScrollChanged` 处理器要挂在最近的**滚动容器祖先**上。
+    ///
+    /// 症状（pdfkit 侧栏真实遇到）：处理器挂在当前节点 ⇒ 事件永远不来 ⇒ 窗口起点不推进，
+    /// 看起来"只有前 20 项、滚下去没有新行"。
+    #[test]
+    fn virtual_list_nested_in_a_plain_column_still_advances_its_window() {
+        struct Nested {
+            vl: VirtualListState,
+            items: Vec<u32>,
+        }
+        impl ViewModel for Nested {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.scroll(|sc| {
+                    sc.height(240.0);
+                    sc.width(160.0);
+                    sc.column(|list| {
+                        // 标题：普通行，虚拟列表在它下面
+                        list.text("页面").font_size(13.0);
+                        list.virtual_list(
+                            &self.vl,
+                            &self.items,
+                            |i| *i as u64,
+                            24.0,
+                            240.0,
+                            |v, i| {
+                                v.row(|r| {
+                                    r.height(24.0);
+                                    r.text(format!("Item {i}")).font_size(16.0);
+                                });
+                            },
+                        );
+                    });
+                });
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Nested {
+            vl: VirtualListState::new(&rt),
+            items: (0..1000).collect(),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(200.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+
+        let scroll = scroll_node(&app, id);
+        let before = visible_labels(&app, id);
+        assert_eq!(before.first().map(String::as_str), Some("Item 0"), "{before:?}");
+
+        // 内容高度按"虚拟"总高算 ⇒ 滚动条诚实（能一路滚到最后）
+        {
+            let ctx = app.window_ctx(id).unwrap();
+            let content = ctx.track().get(scroll).unwrap().content_size.height;
+            assert!(
+                content > 1000.0 * 24.0 * 0.9,
+                "内容高度应接近 1000 行（虚拟 padding 计入）：{content}"
+            );
+        }
+
+        // 滚 10 行 ⇒ 窗口起点推进（修复前不动，永远只有前 11 行）
+        app.window_ctx_mut(id)
+            .unwrap()
+            .track_mut()
+            .set_scroll_offset(scroll, (0.0, 240.0));
+        app.frame_all(); // 派发 ScrollChanged ⇒ 回写窗口起点
+        app.frame_all(); // view 重跑 ⇒ 换窗
+
+        let after = visible_labels(&app, id);
+        assert_eq!(
+            after.first().map(String::as_str),
+            Some("Item 10"),
+            "滚动后应物化新的窗口：{after:?}"
+        );
+    }
+
     #[test]
     fn scrolling_back_reveals_earlier_items() {
         let (_rt, mut app, _vm, id) = long_list();
