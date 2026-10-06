@@ -21,7 +21,7 @@ use vello_cpu::kurbo::{
 };
 use vello_cpu::peniko::color::{AlphaColor, Srgb};
 use vello_cpu::{
-    CompositeMode, Pixmap, PixmapMut, RasterizerSettings, RenderContext, Resources,
+    Pixmap, PixmapMut, RasterizerSettings, RenderContext, Resources, TargetInit,
 };
 
 use crate::render::scene::{Op, Scene};
@@ -260,6 +260,11 @@ pub struct Rasterizer {
     /// 逻辑尺寸（= 布局的窗口尺寸）
     logical: Size,
     scale: f32,
+    /// 累计"字形渲染失败"次数（vello_cpu 0.3 起 `fill_glyphs` 会返回 `Result`）。
+    ///
+    /// 失败只意味着**那一段文字没画出来**（例如字形 id 失效），不该让整帧崩 ⇒
+    /// 这里计数而不是 `unwrap`；非零时 `Debug` 输出里能看到（排查字体问题用）。
+    glyph_errors: u32,
 }
 
 impl Rasterizer {
@@ -282,6 +287,7 @@ impl Rasterizer {
             scratch: Pixmap::new(w, h),
             logical,
             scale,
+            glyph_errors: 0,
         }
     }
 
@@ -453,7 +459,13 @@ impl Rasterizer {
             let data = self.scratch.data_as_u8_slice_mut();
             if let Some(target) = PixmapMut::new(bw, bh, data) {
                 let settings = RasterizerSettings {
-                    composite_mode: CompositeMode::SrcOver,
+                    // vello_cpu 0.3 起 `CompositeMode` 被删掉，混合语义改由
+                    // **`TargetInit`** 表达（"目标画布怎么开始"），而且**默认值是
+                    // `Clear(透明)`** —— 直接用默认会把批次画布上已有的内容（尤其是
+                    // 前面手工 blit 进去的图片）整片擦掉。
+                    // 我们要的正是"画在已有内容之上"：`SrcOver` 保住了内容，也保住了
+                    // 目标的透明度提示（分段渲染 / 图片 z 序修复依赖这一点）。
+                    target_init: TargetInit::SrcOver,
                     ..Default::default()
                 };
                 self.ctx.render_with(target, &mut self.resources, settings);
@@ -594,11 +606,19 @@ impl Rasterizer {
                             continue;
                         }
                         self.ctx.set_paint(to_vello(*color));
-                        self.ctx
+                        // vello_cpu 0.3：`fill_glyphs` 返回 `Result`（此前是无声无息）。
+                        // 失败 = 这一小段文字没画出来（如字形 id 失效），不该让整帧崩 ⇒
+                        // 计数（`Debug` 里能看到），不 `unwrap`、也不逐次打日志刷屏。
+                        if self
+                            .ctx
                             .glyph_run(&mut self.resources, r.font())
                             .font_size(r.font_size())
                             .glyph_transform(glyph_transform)
-                            .fill_glyphs(glyphs.into_iter());
+                            .fill_glyphs(glyphs.into_iter())
+                            .is_err()
+                        {
+                            self.glyph_errors += 1;
+                        }
                     }
                 }
             }
@@ -609,7 +629,9 @@ impl Rasterizer {
                 let path = krect(*rect).to_path(0.01);
                 self.ctx.push_clip_path(&path);
             }
-            Op::PopClip => self.ctx.pop_clip_path(),
+            // 0.3：glifo 的 `DrawSink::pop_clip_path` 只是转发到内部固有的 `pop_clip`
+            // （用固有方法即可，不必为了一个别名把 glifo 拉成依赖）
+            Op::PopClip => self.ctx.pop_clip(),
 
             Op::PushOpacity { opacity } => self.ctx.push_opacity_layer(*opacity),
             Op::PopOpacity => self.ctx.pop_layer(),
@@ -623,6 +645,7 @@ impl std::fmt::Debug for Rasterizer {
             .field("logical", &self.logical)
             .field("scale", &self.scale)
             .field("size", &self.size())
+            .field("glyph_errors", &self.glyph_errors)
             .finish()
     }
 }
@@ -839,6 +862,11 @@ mod tests {
     ///
     /// （症状来源：PDF 预览是图片、loading 遮罩是后画的原语，旧实现把图片统一放到
     /// 批次末尾 blit ⇒ 遮罩被预览盖住，用户"看不到进度 modal"。）
+    ///
+    /// **这条同时是 vello_cpu 0.3 的陷阱护栏**：0.3 的
+    /// `RasterizerSettings::default()` 带 `target_init: Clear(透明)`，直接用默认会把
+    /// 批次画布上已有内容（尤其是前面手工 blit 的图片）整片擦掉 —— 改成 `Clear` 跑这条，
+    /// 图片像素会变成全透明（已验证）。
     #[test]
     fn primitives_after_an_image_are_painted_above_it() {
         let img = crate::track::ImageData {

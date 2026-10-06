@@ -10,4 +10,4 @@ description = "lieui 的文本测度与排版（parley 封装 + 缓存）"
 lieui-geom = { workspace = true }
 parley = { workspace = true }
 # 字形墨迹盒（ink bounds）：parley 内部即用同一份字体引擎，版本对齐避免重复编译
-skrifa = "0.44"
+skrifa = "0.48"

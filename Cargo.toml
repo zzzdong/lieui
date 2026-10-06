@@ -1,6 +1,6 @@
 [package]
 name = "lieui"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ resolver = "2"
 members = ["crates/lieui-geom", "crates/lieui-text", "crates/lieui-layout"]
 
 [workspace.package]
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -25,17 +25,17 @@ repository = "https://github.com/zzzdong/lieui"
 
 [workspace.dependencies]
 # path + version 双写：发布时 crates.io 按版本解析，本地按 path 解析
-lieui-geom = { path = "crates/lieui-geom", version = "0.1.0-alpha.3" }
-lieui-text = { path = "crates/lieui-text", version = "0.1.0-alpha.3" }
-lieui-layout = { path = "crates/lieui-layout", version = "0.1.0-alpha.3" }
-parley = "0.11.0"
+lieui-geom = { path = "crates/lieui-geom", version = "0.1.0-alpha.4" }
+lieui-text = { path = "crates/lieui-text", version = "0.1.0-alpha.4" }
+lieui-layout = { path = "crates/lieui-layout", version = "0.1.0-alpha.4" }
+parley = "0.11"
 
 [dependencies]
 lieui-geom = { workspace = true }
 lieui-text = { workspace = true }
 lieui-layout = { workspace = true }
 parley = { workspace = true }
-vello_cpu = "0.2"
+vello_cpu = "0.3"
 
 # 平台层（窗口 / 软渲染上屏 / 剪贴板）：关掉 default 特性即纯库形态，
 # 可自选 winit / 其他宿主接入
