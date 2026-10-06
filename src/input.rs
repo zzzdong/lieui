@@ -141,14 +141,23 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
                 ));
             }
 
-            // 点击合成：按下时的目标仍在释放链上（含自身）⇒ Tapped 发给它
+            // 点击合成：按下时的目标仍在释放链上（含自身）⇒ 点击事件发给它。
+            //
+            // **右键合成 `RightTapped`**（不是 `Tapped`）：否则"右键"会顺带触发所有
+            // 左键行为（勾选、按下、提交……）。需要上下文菜单的节点监听 `RightTapped`，
+            // 其余组件完全不受右键影响。
             if let Some(pressed) = track.pressed
                 && path.contains(&pressed)
             {
                 out.tapped = Some(pressed);
+                let kind = if button == PointerButton::Right {
+                    EventKind::RightTapped
+                } else {
+                    EventKind::Tapped
+                };
                 out.events.push((
                     hit::path_to(track, pressed),
-                    Event::pointer(EventKind::Tapped, pointer, pos, button),
+                    Event::pointer(kind, pointer, pos, button),
                 ));
             }
 
@@ -355,6 +364,36 @@ mod tests {
 
     const WINDOW: Size = Size::new(300.0, 100.0);
     const P: PointerId = PointerId(0);
+
+    /// 右键合成 `RightTapped`（而非 `Tapped`）：现有左键行为不该被右键触发
+    #[test]
+    fn right_button_synthesizes_right_tapped_instead_of_tapped() {
+        let (mut t, _root, kids) = setup();
+        let target = kids[0];
+        let pos = rect_of(&t, target).center();
+
+        let down = step(&mut t, InputEvent::Down { pointer: P, pos, button: PointerButton::Right });
+        let up = step(&mut t, InputEvent::Up { pointer: P, pos, button: PointerButton::Right });
+        let right: Vec<EventKind> = down
+            .events
+            .iter()
+            .chain(up.events.iter())
+            .map(|(_, e)| e.kind())
+            .collect();
+        assert!(right.contains(&EventKind::RightTapped), "右键 ⇒ RightTapped：{right:?}");
+        assert!(!right.contains(&EventKind::Tapped), "右键不该合成 Tapped：{right:?}");
+
+        let down = step(&mut t, InputEvent::Down { pointer: P, pos, button: PointerButton::Left });
+        let up = step(&mut t, InputEvent::Up { pointer: P, pos, button: PointerButton::Left });
+        let left: Vec<EventKind> = down
+            .events
+            .iter()
+            .chain(up.events.iter())
+            .map(|(_, e)| e.kind())
+            .collect();
+        assert!(left.contains(&EventKind::Tapped), "左键 ⇒ Tapped：{left:?}");
+        assert!(!left.contains(&EventKind::RightTapped));
+    }
 
     fn fixed(t: &mut Track, w: f32, h: f32) -> NodeId {
         let id = t.create(Kind::Box, None);
