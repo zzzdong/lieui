@@ -1877,3 +1877,102 @@ yank 之后（索引里 `yanked=true`）新解析会跳过它，直接落到 `0.
 `["Item 0", …, "Item 10"]`（滚了但没换窗）。
 
 验证：lieui `cargo test --lib` 334 全绿 + clippy 0 警告。
+
+## 2026-10-06 · 系统缩放（DPI）支持：契约固化 + 通知应用 + pdfkit 高 DPI 预览
+
+### 先摸清现状（结论：光栅侧早就对了，缺的是"通知"与"契约"）
+
+盘上一开始就有 `Rasterizer::scale`（`physical = logical × scale`）、`WindowCtx::set_scale_factor`、
+`Resized → 逻辑 = 物理 / scale`、`ScaleFactorChanged → set_scale_factor`。**但有个前提之前没被
+写下来，差点被当成 bug "修掉"**：
+
+1. **winit 0.30 的 `CursorMoved::position` 是 `PhysicalPosition<f64>`**（`winit-0.30.13/src/event.rs`
+   定义处），所以 `to_logical` 里那次除法是**必须**的，不是重复换算；
+2. **DPI 感知不用应用清单**：winit 的 `EventLoopBuilder` 默认 `dpi_aware: true`
+   （`platform_impl/windows/event_loop.rs` 的 `Default`），建循环时即调
+   `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`（逐级回退 V1 / `SetProcessDPIAware`）；
+3. **`WM_DPICHANGED` 时 winit 自己就保逻辑尺寸**（同上文件按"旧物理 → 旧逻辑 → 新物理"换算），
+   所以"拖到别的显示器后内容突然变小"并不会发生。
+
+### 框架侧改动
+
+- **`app.rs`**：`WindowCtx::set_scale_factor` 现在返回 `bool`（是否真的变了），并新增
+  `scale_epoch: u64` —— 变化时 +1 且**回调 `ViewModel::on_scale_changed(cx, scale)`**。
+  这是本轮最实质的缺口：缩放变化之前**没有任何通知**，应用按像素缓存的资源（PDF 页栅格、
+  缩略图）永远不失效 ⇒ 拖到 2× 屏上被拉伸发虚。非法 scale（NaN / 0 / 负）按"无变化"处理。
+- **`platform/mod.rs`**：
+  - 新增纯函数 `sane_scale` / `physical_to_logical` / `physical_size_to_logical` /
+    `logical_size_to_physical` —— 逻辑↔物理换算的**唯一**口径（`to_logical` 与 `Resized`
+    都改走它们），夹住 0/NaN 防"除零污染整条布局链"；
+  - `ScaleFactorChanged` 显式吃下 `inner_size_writer`：按 `逻辑 × 新 scale` 请求新尺寸
+    （Windows 上等价于 winit 的默认值，但**不依赖平台默认**；X11/Wayland 上不主动请求就会
+    只剩像素数不变 ⇒ 逻辑面积被除以 scale）；
+  - 模块头写清 **DPI 契约**（一个真源 = 逻辑尺寸；DPI 不改布局；光标为何要除；为何不需要清单）。
+
+### 未做（都是计划里就标注的，附原因）
+
+- **`ensure_dpi_awareness()`**：计划里打算用裸 FFI 调 `SetProcessDpiAwarenessContext`，
+  实际动手才发现本 crate 是 **`#![forbid(unsafe_code)]`**（`lib.rs:1`）—— `forbid` 无法局部豁免，
+  任何 FFI 都写不进来。改为**把做法写进模块文档**：`App::run` 已由 winit 默认覆盖；自带宿主
+  循环的嵌入方别关 `with_dpi_aware`（默认 true）即可。不引入 `windows-sys`（同样要 unsafe 才能调）。
+- **运行期 zoom**（无障碍放大）：计划里就是"视需要再开"，未做。它的口径是"光栅 scale 乘一个
+  系数、布局仍走逻辑坐标"，与本轮加的通知机制天然兼容。
+
+### 测试 +5（lieui 339 全绿）
+
+- `platform::cursor_position_is_converted_from_physical_to_logical`：钉住那次除法
+  （防后人当"重复换算"删掉 —— 那会让 2× 屏上点击全部错位一半）；
+- `platform::insane_scale_falls_back_to_one`（0/NaN/∞）、
+  `platform::physical_and_logical_sizes_round_trip`（双向自洽）、
+  `platform::physical_size_never_collapses_to_zero`（softbuffer 需要 `NonZeroU32`）；
+- `app::scale_change_notifies_the_view_model_and_bumps_the_epoch`：只通知一次、纪元 +1、
+  物理尺寸 = 逻辑 × 2、重复值与非法值都不打扰。
+
+### pdfkit：先修"半迁移导致的编译不过"，再补高 DPI 预览
+
+**盘面**（`git status` + 编译错误）：`ui/*` 与 `app/mod.rs`、`app/jobs.rs` 已是新 API，
+而 `app/model.rs`、`app/action.rs`、`app/controller.rs`、`ui/preview.rs` 还是 v3 之前的旧版
+（`lieui::widget::Widget` / `Container` / `use lieui::state`）⇒ **整个 bin 编译不过**，
+`render_page` 也少一个 `scale` 形参（`jobs.rs` 已按 3 参调用）。按 `ui/*` 的调用面重建：
+
+- `model.rs`：`AppState`（含 `pending` / `page_menu` / **派生缓存 `page_indices`**）、
+  `LoadedDocument { …, pdf: Arc<Pdf>, merged_from }`、`PendingAction` + `sync_derived()`
+  （顺带把越界的当前页/勾选收回来 —— 删页后这两者都可能指向不存在的页）；
+- `action.rs`：`Open/Add/Save/SaveAs/Split/Rotate*/Delete*/Extract/Select*/MovePage/DeletePage/
+  OpenPageMenu/TogglePage/SetCurrent/CancelPending`；
+- `controller.rs`：`PdfKitVm`（`state` / `tick: Signal<u32>` / `vl` / `scale` / 预览缓存）——
+  分发全部走 `cx.spawn_task_busy` + `JobDone` 回传，**没有一处重活留在 UI 线程**；
+  未保存守卫（`guard_unsaved` / `take_discarded`）与合并文档保护原样接回；
+- `ui/preview.rs`：改写成描述树，并接上**按 DPI 渲染**的位图；
+- `render/preview.rs`：`render_page(pdf, pn, scale)`（`x_scale`/`y_scale`，与 hayro 自己的
+  `render_pdf` 同口径），删掉随之无用的 `render_current` / `resize_rgba`；
+- 顺手修 `jobs.rs` 里一处**潜在编译错**：`paste_pages_job` 的 `step` 闭包按 `FnMut` 捕获
+  `progress`，缺 `mut`。
+
+**高 DPI 预览**（本轮 DPI 工作的落点）：
+
+- `PreviewKey = (页码, 设备像素尺寸)`，设备像素 = `逻辑 × DPI` ⇒ **缩放一变键就变**，
+  自动按新分辨率重渲染；页面**内容**变化（打开 / 旋转 / 删页 / 追加）键里看不出来，
+  由 `invalidate_preview()` 显式作废；
+- 显示尺寸 = 图像像素 ÷ DPI ⇒ 一个图像像素落在一个物理像素上（不再被光栅器放大）；
+- `ViewModel::on_scale_changed` → `PdfKitVm::set_scale`（记下比例 + 作废缓存），
+  `on_tick` 负责把缓存**烘热**（渲染放在 `on_tick` 而不是 `view()`：`view()` 必须无副作用，
+  且 `on_tick` 排在它之前 ⇒ `view()` 只读缓存）。
+
+**测试 +5（pdfkit 35 全绿）**：打开落地（重置当前页/勾选/侧栏滚动 + 派生缓存）、
+合并文档标脏与"绝不覆盖第一个文件"、未保存守卫的四种路径（不拦 / 挂起 / 取消 / 确认）、
+页面操作回传（页数收敛 + 标脏）、**DPI 预览按设备像素渲染且同键只渲一次**。
+最后一条做了反向验证：把 `dpi` 写死成 `1.0` 后它立刻失败（`按设备像素渲染`）。
+
+### 已知取舍 / 未验证
+
+- 预览栅格化仍是**同步**的（一页几十毫秒级）：键不变时只是一次 `RefCell` 查询，所以
+  "翻页 / 缩放"那一下会卡一帧。挪进 `spawn_task` 是明确的下一步（那时未命中要显示占位）。
+- `PREVIEW_BOX` 是常量（860×620 逻辑）：`view()` 发生在布局**之前**、拿不到实测尺寸，
+  而框架的图片没有"按比例适应"（`ImageStyle::fit` 只有 `Fill`）⇒ 宽高必须显式给。
+- **未在真实多显示器上验收**：本机无法切换显示器 DPI，DPI 结论均来自 winit 0.30.13 源码
+  （位置见上）与可无头验证的纯函数测试。需要一台 Windows 双屏（100% + 150/200%）拖一次
+  窗口来最终确认：界面变清晰、预览跟着变清晰、无内容缩水。
+
+验证：lieui `cargo test --lib` 339 全绿 + clippy 0 警告 + 示例编译通过；
+pdfkit `cargo test` 35 全绿 + `cargo clippy --all-targets` 0 警告。

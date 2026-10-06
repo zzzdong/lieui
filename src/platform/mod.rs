@@ -13,6 +13,27 @@
 //! 三条约定：
 //! 1. **逻辑 / 物理坐标**：布局与命中都吃**逻辑**像素，pixmap 与 softbuffer surface 是**物理**像素；
 //!    winit 给的光标位置是物理的 ⇒ 进 `InputEvent` 前除以 `scale`。
+//!
+//! ## DPI（系统缩放）契约
+//!
+//! - **一个真源**：逻辑尺寸（[`crate::app::WindowCtx::size`]）。物理尺寸恒等于
+//!   `round(逻辑 × scale)`，由光栅器（pixmap）与平台层（surface）各自从它推出来；
+//!   任何一侧都不单独记"自己那份像素数"。
+//! - **DPI 变化不改布局**：拖到别的显示器后**逻辑可用面积不变**，只是每逻辑像素占更多
+//!   物理像素（与 Windows / macOS 的系统缩放一致）。`WM_DPICHANGED` 时窗口的物理尺寸
+//!   必须跟着放大，否则逻辑面积会缩水 —— winit 在 Windows 上默认就是这么给的
+//!   （`platform_impl/windows/event_loop.rs` 里按 `旧尺寸 → 旧逻辑 → 新物理` 换算），
+//!   我们仍显式 `request_inner_size` 一次，好让这条契约不依赖平台默认值。
+//! - **光标**：winit 0.30 的 `WindowEvent::CursorMoved::position` 是
+//!   `PhysicalPosition<f64>`（见 `winit::event` 的定义），所以 [`physical_to_logical`]
+//!   除以 scale 是**必须**的，别当成重复换算删掉。
+//! - **DPI 感知**：Windows 上由 winit 的 `EventLoopBuilder` 默认完成
+//!   （`dpi_aware: true` ⇒ `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，
+//!   逐级回退到 V1 / `SetProcessDPIAware`），所以**不需要**应用清单里的 `dpiAware`，
+//!   lieui 也不必自己调 Win32（本 crate `#![forbid(unsafe_code)]`，做不了 FFI）。
+//!   **自带宿主循环的嵌入方**：建 `EventLoopBuilder` 时别关掉 DPI 感知即可 ——
+//!   winit 的默认值就是 `true`；若你显式 `with_dpi_aware(false)`，进程会退回
+//!   系统位图拉伸（整个界面发虚），且 `scale_factor()` 恒为 1.0。
 //! 2. **局部上屏**：只把脏区那几行从 pixmap 打包进 softbuffer 缓冲，再用 `present_with_damage`
 //!    提交；`age() == 0`（缓冲内容未定义）或整窗脏时退化为全量 `present()`。
 //! 3. **关闭守卫**：`CloseRequested` 先问 `ViewModel::on_close_request`，`Cancel` 可拦截。
@@ -29,7 +50,7 @@ use std::time::Instant;
 use lieui_geom::{Point, Rect, Size};
 use winit::application::ApplicationHandler;
 use winit::event_loop::ControlFlow;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
@@ -183,6 +204,44 @@ pub fn softbuffer_damage(
             }
         })
         .collect()
+}
+
+// ───────────────────────── DPI：逻辑 / 物理换算（纯函数，可无头测试）─────────────────────────
+
+/// 把 DPI 缩放夹到"能除"的范围（0 / NaN / 负数 ⇒ 1.0）。
+///
+/// 平台的 `scale_factor` 理论上恒 > 0，但**除零会污染整条布局链**（NaN 尺寸 ⇒ 全树失效），
+/// 所以入口统一夹一次。
+pub fn sane_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// 物理光标位置 → 逻辑坐标（命中测试吃逻辑坐标）。
+///
+/// winit 0.30 的 `WindowEvent::CursorMoved::position` 是 `PhysicalPosition<f64>`，
+/// 所以这个除法**不是重复换算**；模块头"DPI 契约"有论证。
+pub fn physical_to_logical(pos: PhysicalPosition<f64>, scale: f32) -> Point {
+    let s = sane_scale(scale);
+    Point::new(pos.x as f32 / s, pos.y as f32 / s)
+}
+
+/// 物理窗口尺寸 → 逻辑尺寸（`Resized` 事件用）。
+pub fn physical_size_to_logical(size: PhysicalSize<u32>, scale: f32) -> Size {
+    let s = sane_scale(scale);
+    Size::new(size.width as f32 / s, size.height as f32 / s)
+}
+
+/// 逻辑尺寸 → 物理窗口尺寸（DPI 变化时按"保住逻辑尺寸"请求新尺寸用）。
+pub fn logical_size_to_physical(size: Size, scale: f32) -> PhysicalSize<u32> {
+    let s = sane_scale(scale);
+    PhysicalSize::new(
+        (size.width.max(0.0) * s).round().max(1.0) as u32,
+        (size.height.max(0.0) * s).round().max(1.0) as u32,
+    )
 }
 
 // ───────────────────────── 运行器 ─────────────────────────
@@ -445,14 +504,16 @@ impl Runner {
 
     // ── 事件翻译 ──
 
-    fn to_logical(&self, id: WindowId, p: winit::dpi::PhysicalPosition<f64>) -> Point {
-        let scale = self
-            .app
+    /// 该窗口当前的 DPI 缩放（窗口不在 ⇒ 1.0）
+    fn window_scale(&self, id: WindowId) -> f32 {
+        self.app
             .window_ctx(id)
             .map(|c| c.scale_factor())
             .unwrap_or(1.0)
-            .max(0.001);
-        Point::new(p.x as f32 / scale, p.y as f32 / scale)
+    }
+
+    fn to_logical(&self, id: WindowId, p: PhysicalPosition<f64>) -> Point {
+        physical_to_logical(p, self.window_scale(id))
     }
 
     fn push_input(&mut self, id: WindowId, ev: InputEvent) {
@@ -616,23 +677,36 @@ impl Runner {
             }
 
             WindowEvent::Resized(size) => {
-                let scale = self
-                    .app
-                    .window_ctx(id)
-                    .map(|c| c.scale_factor())
-                    .unwrap_or(1.0)
-                    .max(0.001);
+                // 逻辑尺寸是**唯一真源**：物理尺寸只是它的 `× scale` 表现，
+                // 事件到达时按**当前** scale 换算回去（顺序在 DPI 变化后 ⇒ 已是新 scale）。
+                let scale = self.window_scale(id);
                 if let Some(ctx) = self.app.window_ctx_mut(id) {
-                    ctx.set_size(
-                        &rt,
-                        Size::new(size.width as f32 / scale, size.height as f32 / scale),
-                    );
+                    ctx.set_size(&rt, physical_size_to_logical(size, scale));
                 }
             }
 
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(ctx) = self.app.window_ctx_mut(id) {
-                    ctx.set_scale_factor(&rt, scale_factor as f32);
+            // 系统 DPI 变了（拖到别的显示器 / 系统改缩放比例）。
+            //
+            // 契约：**逻辑尺寸不变**，物理尺寸按新 scale 放大 ⇒ 显式请求一次
+            // `逻辑 × 新 scale`。winit 在 Windows 上默认已经算好同样的尺寸
+            // （`platform_impl/windows/event_loop.rs` 按"旧物理 → 旧逻辑 → 新物理"换算），
+            // 这里再写一次是为了不依赖平台默认值：X11/Wayland 上若不主动请求，
+            // 窗口会保持原像素数 ⇒ 逻辑面积被除以 scale（内容突然"变小"）。
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                mut inner_size_writer,
+            } => {
+                let scale = scale_factor as f32;
+                if scale.is_finite() && scale > 0.0 {
+                    if let Some(logical) = self.app.window_ctx(id).map(|c| c.size()) {
+                        // 失败（后端不支持同步改尺寸）不算错：平台的 `Resized` 会兜底。
+                        let _ = inner_size_writer.request_inner_size(logical_size_to_physical(
+                            logical, scale,
+                        ));
+                    }
+                    if let Some(ctx) = self.app.window_ctx_mut(id) {
+                        ctx.set_scale_factor(&rt, scale);
+                    }
                 }
             }
 
@@ -952,4 +1026,54 @@ mod tests {
     fn rect_of(r: &softbuffer::Rect) -> (u32, u32, u32, u32) {
         (r.x, r.y, r.width.get(), r.height.get())
     }
+
+    // ── DPI：逻辑 / 物理换算 ──
+
+    /// 光标：winit 给的是**物理**坐标 ⇒ 命中前必须除以 scale。
+    ///
+    /// 这条测试是**防回归的钉子**：曾经有人以为 winit 给的是逻辑坐标，
+    /// 差点把这行除法当成"重复换算"删掉（那会让 2× 屏上的点击全部错位一半）。
+    #[test]
+    fn cursor_position_is_converted_from_physical_to_logical() {
+        let p = PhysicalPosition::new(300.0, 150.0);
+        assert_eq!(physical_to_logical(p, 1.0), Point::new(300.0, 150.0));
+        assert_eq!(physical_to_logical(p, 2.0), Point::new(150.0, 75.0));
+        assert_eq!(physical_to_logical(p, 1.5), Point::new(200.0, 100.0));
+    }
+
+    /// 坏的 scale（0 / NaN / 负）不能把布局污染成 NaN：统一按 1.0 处理
+    #[test]
+    fn insane_scale_falls_back_to_one() {
+        let p = PhysicalPosition::new(10.0, 20.0);
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(sane_scale(bad), 1.0, "scale = {bad}");
+            assert_eq!(physical_to_logical(p, bad), Point::new(10.0, 20.0));
+        }
+    }
+
+    /// 窗口尺寸的双向换算自洽：`物理 → 逻辑 → 物理` 回到原值（非小数缩放时精确）
+    #[test]
+    fn physical_and_logical_sizes_round_trip() {
+        let logical = Size::new(800.0, 600.0);
+        for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let physical = logical_size_to_physical(logical, scale);
+            assert_eq!(physical.width, (800.0 * scale).round() as u32, "scale {scale}");
+            assert_eq!(physical.height, (600.0 * scale).round() as u32, "scale {scale}");
+            // 1.25 / 2 / 3 能精确回推；1.5 的 600 → 900 也精确
+            let back = physical_size_to_logical(physical, scale);
+            assert!(
+                (back.width - logical.width).abs() < 0.001
+                    && (back.height - logical.height).abs() < 0.001,
+                "scale {scale}: {back:?} != {logical:?}"
+            );
+        }
+    }
+
+    /// 尺寸至少 1×1：缩到 0 会让 softbuffer 的 `resize` 拿不到 `NonZeroU32`
+    #[test]
+    fn physical_size_never_collapses_to_zero() {
+        let p = logical_size_to_physical(Size::new(0.0, 0.0), 2.0);
+        assert_eq!((p.width, p.height), (1, 1));
+    }
+
 }

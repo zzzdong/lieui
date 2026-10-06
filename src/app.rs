@@ -227,6 +227,24 @@ pub trait ViewModel: 'static {
         CloseAction::Close
     }
 
+    /// 系统 DPI 缩放变了（窗口被拖到别的显示器 / 系统改了缩放比例）。
+    ///
+    /// **布局不用重排**——逻辑坐标系没变，变的只是"一个逻辑像素占几个物理像素"。
+    /// 需要你做的只有一件事：**按像素缓存的资源作废**（PDF 页栅格、缩略图、位图图标）。
+    /// 光栅器已经按新 scale 重建，几何 / 文本 / 图片都会以新分辨率重画；
+    /// 但你自己缓存的那份 `Vec<u8>` 还是旧分辨率的，放大后会发虚。
+    ///
+    /// ```ignore
+    /// fn on_scale_changed(self: &Rc<Self>, _cx: &mut Ctx, scale: f32) {
+    ///     self.scale.set(scale);      // 渲染时用它算目标像素尺寸
+    ///     self.cache.borrow_mut().clear();
+    /// }
+    /// ```
+    ///
+    /// 时机：窗口创建时（若系统缩放 ≠ 1.0）与之后每次变化各一次，都在**本帧 `view()` 之前**。
+    /// 初始值：没收到回调就按 `1.0` 处理（100% 缩放不会触发回调）。
+    fn on_scale_changed(self: &Rc<Self>, _cx: &mut Ctx, _scale: f32) {}
+
     /// 逐帧钩子（每帧都跑）；注意 `view()` 不会因此重跑，只重绘由 `cx.damage(..)` 指定的区域
     fn on_tick(self: &Rc<Self>, _cx: &mut Ctx, _now: Instant) {}
 
@@ -248,6 +266,7 @@ pub trait WindowView {
     fn on_animation(&self, cx: &mut Ctx, now: Instant, dt: std::time::Duration);
     fn on_external(&self, cx: &mut Ctx, data: ExternalData);
     fn on_close_request(&self, cx: &mut Ctx) -> CloseAction;
+    fn on_scale_changed(&self, cx: &mut Ctx, scale: f32);
 }
 
 /// 把 `Rc<V>` 包装成 `dyn WindowView` 的适配器。
@@ -276,6 +295,10 @@ impl<V: ViewModel> WindowView for VmAdapter<V> {
 
     fn on_close_request(&self, cx: &mut Ctx) -> CloseAction {
         V::on_close_request(&self.0, cx)
+    }
+
+    fn on_scale_changed(&self, cx: &mut Ctx, scale: f32) {
+        V::on_scale_changed(&self.0, cx, scale)
     }
 }
 
@@ -367,6 +390,12 @@ pub struct WindowCtx {
     last_tick: Instant,
     /// 本窗口的**时钟**下次到期时刻（定时器 / 动画帧；`frame()` 里刷新）
     next_clock: Option<Instant>,
+    /// DPI 缩放**变过几次**（初值 0）。
+    ///
+    /// 应用按像素缓存的资源（PDF 页栅格 / 缩略图 / 图标位图）用它做失效判据：
+    /// 纪元一变，旧栅格就是按错的物理分辨率渲染的（拖到 2× 屏上会发虚）。
+    /// 与 [`WindowCtx::set_scale_factor`] / `ViewModel::on_scale_changed` 配套。
+    scale_epoch: u64,
 }
 
 /// 悬停到 tooltip 浮出的延迟
@@ -411,6 +440,7 @@ impl WindowCtx {
             has_busy: false,
             last_tick: Instant::now(),
             next_clock: None,
+            scale_epoch: 0,
         }
     }
 
@@ -450,16 +480,42 @@ impl WindowCtx {
         rt.mark(self.id, Dirty::PAINT | Dirty::PRESENT);
     }
 
-    /// DPI 缩放变化（M4 由 winit 调用）：只改光栅分辨率 + 整窗脏，**不动布局**。
+    /// DPI 缩放变化（由平台层调用，Windows 上来自 winit `ScaleFactorChanged`）。
     ///
-    /// 注意：命中测试吃的是**逻辑**坐标，所以 winit 侧要把物理光标位置除以 scale。
-    pub fn set_scale_factor(&mut self, rt: &Runtime, scale: f32) {
-        if (self.renderer.scale() - scale).abs() < 1e-6 {
-            return;
+    /// **只改光栅分辨率，不动布局**：逻辑尺寸是唯一真源，DPI 变化不改变可用逻辑面积
+    /// （窗口的物理尺寸由平台层按 `逻辑 × 新 scale` 请求回来）。所以这里做三件事：
+    ///
+    /// 1. 重建 pixmap（`physical = logical × scale`）；
+    /// 2. 整窗脏 + `scale_epoch += 1`；
+    /// 3. 回调 [`ViewModel::on_scale_changed`] —— 应用按像素缓存的资源（页栅格 / 缩略图）
+    ///    该按新分辨率重建了，否则拖到 2× 屏上会被拉伸发虚。
+    ///
+    /// 返回是否真的变了（`scale` 非有限/≤0 或与当前一致 ⇒ `false`，不派发）。
+    ///
+    /// 注意：命中测试吃的是**逻辑**坐标，所以平台层要把 winit 的**物理**光标位置除以
+    /// scale（winit 0.30 的 `WindowEvent::CursorMoved::position` 就是物理坐标）。
+    pub fn set_scale_factor(&mut self, rt: &Runtime, scale: f32) -> bool {
+        if !scale.is_finite() || scale <= 0.0 || (self.renderer.scale() - scale).abs() < 1e-6 {
+            return false;
         }
         self.renderer.set_scale(scale);
         self.track.damage_whole_window();
+        self.scale_epoch += 1;
         rt.mark(self.id, Dirty::PAINT | Dirty::PRESENT);
+
+        let mut cx = Ctx::new(rt, self.id, EventView::external());
+        self.view.on_scale_changed(&mut cx, scale);
+        if !cx.cmds().is_empty() {
+            let cmds = cx.take_cmds();
+            let d = apply_cmds(&mut self.track, &cmds);
+            rt.mark(self.id, d);
+        }
+        true
+    }
+
+    /// DPI 缩放变过几次（见 `ViewModel::on_scale_changed`）
+    pub fn scale_epoch(&self) -> u64 {
+        self.scale_epoch
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -507,6 +563,8 @@ impl WindowCtx {
         // 放在帧首：快任务挂上遮罩后立刻结束的情况，也能保证遮罩被画出来过。
         rt.reap_busy(Instant::now());
         self.has_busy = rt.is_busy(self.id);
+        // 窗口尺寸登记（给 `view()` 里的"适应窗口"一类计算用；晚一帧无妨）
+        rt.set_window_size(self.id, self.size);
 
         // ⓪ 主题同步：全局主题变了 ⇒ 渲染器换 token 快照 + **整窗重绘**。
         // 窗口底色仅在"未显式指定"时跟随主题（`WindowConfig.background` 优先）。
@@ -2054,6 +2112,64 @@ mod tests {
         assert_eq!(ctx.size(), Size::new(800.0, 600.0), "逻辑尺寸不变");
         // 命中测试用逻辑坐标：内容根仍是 800×600 的逻辑矩形
         assert_eq!(app.window_ctx(id).unwrap().hit_target(Point::new(10.0, 10.0)).is_some(), true);
+    }
+
+    /// DPI 变化要**告知应用**：`on_scale_changed` 收到新比例，`scale_epoch` 递增
+    /// —— 应用按像素缓存的资源（页栅格 / 缩略图）靠这两个信号失效重建。
+    ///
+    /// 同时钉住"没变就不打扰"：同一个比例重复设置、非法比例（NaN / 0 / 负）都不触发。
+    #[test]
+    fn scale_change_notifies_the_view_model_and_bumps_the_epoch() {
+        struct Vm {
+            seen: Rc<std::cell::RefCell<Vec<f32>>>,
+        }
+        impl ViewModel for Vm {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("hi");
+                });
+            }
+            fn on_scale_changed(self: &Rc<Self>, _cx: &mut Ctx, scale: f32) {
+                self.seen.borrow_mut().push(scale);
+            }
+        }
+
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(
+            WindowConfig::new().size(800.0, 600.0),
+            Vm {
+                seen: Rc::clone(&seen),
+            },
+        );
+        app.frame_all();
+        assert!(seen.borrow().is_empty(), "没变过就不该通知");
+        assert_eq!(app.window_ctx(id).unwrap().scale_epoch(), 0);
+
+        let ctx = app.window_ctx_mut(id).unwrap();
+        assert!(ctx.set_scale_factor(&rt, 2.0), "变了 ⇒ true");
+        assert_eq!(ctx.scale_epoch(), 1);
+        assert_eq!(
+            ctx.physical_size(),
+            Size::new(1600.0, 1200.0),
+            "物理尺寸 = 逻辑 × 2"
+        );
+
+        // 同一个值 / 非法值：都不算"变化"
+        assert!(!ctx.set_scale_factor(&rt, 2.0), "重复设同一个值 ⇒ false");
+        assert!(!ctx.set_scale_factor(&rt, f32::NAN), "NaN ⇒ false");
+        assert!(!ctx.set_scale_factor(&rt, 0.0), "0 ⇒ false");
+        assert_eq!(ctx.scale_epoch(), 1, "纪元只该动一次");
+        assert_eq!(&*seen.borrow(), &[2.0], "只通知了那一次");
+
+        // 再变一次 ⇒ 纪元 +1、再通知一次（应用据此重建缓存）
+        assert!(app
+            .window_ctx_mut(id)
+            .unwrap()
+            .set_scale_factor(&rt, 1.5));
+        assert_eq!(app.window_ctx(id).unwrap().scale_epoch(), 2);
+        assert_eq!(&*seen.borrow(), &[2.0, 1.5]);
     }
 
     // ─────────────── M5：内置行为 + 双向绑定 ───────────────

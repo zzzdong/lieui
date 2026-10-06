@@ -113,6 +113,8 @@ pub(crate) struct RuntimeInner {
     pub(crate) timers: RefCell<Vec<crate::timer::Timer>>,
     /// 请求了下一动画帧的窗口（`request_animation`；每帧回调后清空，要持续就再请求）
     pub(crate) animating: RefCell<Vec<WindowId>>,
+    /// 每窗口的**逻辑像素尺寸**（帧驱动每帧写入；给 `view()` 里的"适应窗口"一类计算用）
+    pub(crate) window_sizes: RefCell<Vec<(WindowId, lieui_geom::Size)>>,
 }
 
 /// 待处理请求槽（类型擦除；**谁放谁取**）。
@@ -301,6 +303,28 @@ impl Runtime {
             .find(|(x, _)| *x == id)
             .map(|(_, f)| *f)
             .unwrap_or(Dirty::empty())
+    }
+
+    /// 记录窗口的逻辑像素尺寸（帧驱动每帧调用；用户代码只读）
+    pub(crate) fn set_window_size(&self, id: WindowId, size: lieui_geom::Size) {
+        let mut sizes = self.inner.window_sizes.borrow_mut();
+        match sizes.iter_mut().find(|(x, _)| *x == id) {
+            Some(slot) => slot.1 = size,
+            None => sizes.push((id, size)),
+        }
+    }
+
+    /// 窗口尺寸（**上一帧**的值；首次布局前为 `None`）。
+    ///
+    /// 给 `view()` 里"按视口算尺寸"的需求用（图片适应窗口、虚拟列表可见行数……）：
+    /// `view()` 在布局之前跑，拿不到实测值，用上一帧的尺寸是通行做法（晚一帧不影响交互）。
+    pub fn window_size(&self, id: WindowId) -> Option<lieui_geom::Size> {
+        self.inner
+            .window_sizes
+            .borrow()
+            .iter()
+            .find(|(x, _)| *x == id)
+            .map(|(_, s)| *s)
     }
 
     // ── view() 值守（防止在渲染函数里改状态）──
