@@ -1999,3 +1999,132 @@ pdfkit `cargo test` 35 全绿 + `cargo clippy --all-targets` 0 警告。
 **结果**：四个 crate 均已上传到 crates.io（`lieui-geom` / `lieui-text` / `lieui-layout` /
 `lieui` 0.1.0-alpha.3）。发布前 `cargo publish --dry-run --workspace` 四个 crate
 全部打包 + 验证通过；发布后 pdfkit 对新版本重新编译并测试（35 全绿）。
+
+## 2026-10-06 · pdfkit 改名 liepdf + 六个常用功能接线 + 撤销/重做
+
+### 改名：`pdfkit` → `liepdf`
+
+包名 / 窗口标题 / 页头文案都改了，**类型名 `PdfKitVm` → `AppVm`**（刻意中性：下次改名
+代码零改动）。git 目录名仍叫 `pdfkit`（没有任何东西依赖它，依赖是 `../lieui`）。
+
+### 六个"作业已就绪、UI 没入口"的功能接线
+
+`app/mod.rs` 早就写着"jobs 里有一批已写好、待接线的作业"。这轮把它们全接上：
+
+| 功能 | 入口 | 作业 |
+|---|---|---|
+| 插入页面（从文件） | 工具栏 `note_add` 弹层 / 每页右键「在此页后插入 PDF…」 | `insert_files_job` |
+| 插入空白页 | 同一弹层（A4 / Letter） | `insert_blank_job` |
+| 统一纸张 | 工具栏 `aspect_ratio` 弹层（统一为 A4 / Letter） | `normalize_sizes_job` |
+| 导出 PNG | 工具栏 `image`（选中页，未选则当前页） | `export_png_job` |
+| 粘贴页 | 工具栏 `content_paste` + 右键「复制此页 / 剪切此页」 | `paste_pages_job` |
+| 文档信息面板 | 工具栏 `info`（Modal） | `ops::doc_info`（纯内存、可在 UI 线程现算） |
+
+`JobDone` 契约一个都不用新增（早就位），`jobs.rs` 只改了 **1 处签名**：
+`export_png_job(pdf: Pdf)` → **`Arc<Pdf>`**（`hayro::Pdf` 不是 `Clone`，UI 侧只有 `Arc<Pdf>`，
+收 `Arc` 才能零拷贝搬进工作线程）。
+
+实现中才发现并修掉的四件事：
+
+1. **插入位置要在入口夹**：作业层不夹（越界直接 `InvalidPage`）⇒ `clamp_at` 收进
+   `1..=总页数+1`；
+2. **页号是"位置"不是对象**：文档变短后剪贴板里越界的页号必须失效 ⇒ 粘贴前按当前页数
+   过滤，全失效就提示"剪贴板里的页已不存在"；**剪切粘贴是一次性的**（源页随即被删、
+   页号随之失效）⇒ 立刻作废剪贴板；
+3. **弹层用互斥枚举**（`tools_menu: Option<ToolsMenu>`）而不是两个 `bool`：后者能表达
+   "两个都开着"这个不合法状态；
+4. lieui **没有 MenuBar 组件**，菜单是手搓的：锚点按钮 `.key(..)` + 层里
+   `v.popup_at(key, Placement::Below, ..)`（与页面右键菜单同一套机制）。
+
+### 撤销 / 重做（快照式）
+
+存"某次改动**之前**的整份状态"（`HistoryEntry`），不是命令式 —— 因为"删页"的逆操作要把
+删掉的页找回来，那等于存整份快照。三个要点：
+
+- **只在作业成功时入栈**（dispatch 时记 `pending`，`job_finish` 成功才 commit）⇒ 不留
+  "按下去什么也不发生"的空撤销；
+- `UNDO_LIMIT = 16`，超了丢最老的。这是**内存取舍**（每条是整份文档深拷贝），已在代码里
+  写明：处理几百 MB 的 PDF 会显著吃内存，真要支持得改增量/命令模式；
+- **打开新文档 ⇒ 历史作废**（跨文档撤销没有意义）。
+
+UI：工具栏最左 `undo`/`redo`（按 `can_undo()`/`can_redo()` 灰显）+ `Ctrl+Z` / `Ctrl+Y` /
+`Ctrl+Shift+Z`（挂在内容根的 `KeyDown` 上，映射抽成纯函数 `shortcut(ev)` 便于测）。
+
+### 顺带修掉一个真回归
+
+`JobDone::Added` 落地时漏了 `merged_from += added` ⇒ **「添加」文件后点「保存」会把追加的
+内容直接覆盖写回原文件**。补上，并为此给 `Restored` 契约加了 `merged_from`（否则撤销一次
+「添加」后来源计数不退回，「保存」会一直误判成合并文档）。
+
+工具栏现在 20 个图标按钮（≈650px）+ 侧栏 220 ⇒ `min_size` 从 `(720,480)` 提到
+`(900,480)`，否则最右侧「文档信息 / 已选择」会被挤出可视区。
+
+**测试**：pdfkit 46 全绿（导出按 scale / 弹层互斥 / 剪贴板往返与失效过滤 / 插入与统一纸张
+落地 / 位置夹紧 / 撤销重做往返 / 失败不入栈 / 历史上限与清空 / 追加涨来源数 / 快捷键映射）。
+
+## 2026-10-06 · 滚动条在窗口最小化时 panic（pdfkit 真机报障）
+
+**症状**（用户复现）：`cargo run --release` → 打开 PDF → 导出某页 PNG → **最小化 / 切窗口**
+⇒ 进程崩：`min > max, or either was NaN. min = 24.0, max = -29.992188`
+（release 的 `panic = "abort"` 让它变成 `STATUS_STACK_BUFFER_OVERRUN` 硬崩）。
+
+**根因**：`widgets::scroll_parts` 里的
+`thumb_len = (…).clamp(MIN_THUMB_LEN, track_len)`。`MIN_THUMB_LEN = 24.0` —— 与日志里的
+`min` 完全对上。链路：最小化 ⇒ winit 发 **0×0** 客户区 ⇒ 布局把侧栏滚动容器算成**负高度**
+（实测约 -26px：header/status 这些固定高度 + padding 减完还欠）⇒ `track_len` 为负 ⇒
+`f32::clamp` 的上下界反序 ⇒ panic。"导出后才出现"只是时序巧合，真条件是
+「窗口被压到 0 尺寸 + 侧栏有内容溢出」。
+
+**修法**（`scroll_parts`，三处防御）：
+
+- `track_len.max(0.0)`，`<= 0` 直接 `None`（没有可画的轨道）；
+- thumb 的 clamp 下界收敛成 `MIN_THUMB_LEN.min(track_len)` ⇒ **轨道比 24px 还矮**时
+  thumb 铺满轨道（`travel = 0`，拖不动但不崩）。这一条顺手修掉了与最小化**无关**的
+  同源 bug：任何比 24px 矮的滚动容器 + 内容溢出，以前都会炸；
+- "没溢出"的判断从 `!(content_len > view_len + 0.5)` 改成
+  `content_len.partial_cmp(&(view_len + 0.5)) != Some(Ordering::Greater)` ⇒ 顺便把
+  **NaN 尺寸**也挡掉（NaN 几何画出来还是 NaN），并且 clippy 干净（否定比较会被告警）。
+
+**测试 +2**：① `scroll_parts_survives_collapsed_and_short_viewports`（负高度 / 零高度 /
+10px 矮容器 / NaN 四种退化视口 + 正常情形）—— **已反向验证**：去掉 `max(0.0)` 那两行，
+它立刻 panic 在 `widgets/mod.rs:1844`；② `a_minimized_window_frames_without_panicking`
+（0×0 窗口跑完整帧 + 还原后正常重绘）。**诚实标注**：② 不是这个 bug 的护栏 —— 无头环境
+复现不出让容器变负高度的那套几何（试过照抄 pdfkit 排布 + 固定高度标题栏，仍不复现），
+护栏归 ①。
+
+## 2026-10-06 · 依赖升级：vello_cpu 0.3（+ skrifa 0.48 等），版本升到 alpha.4
+
+**动机**：把渲染栈升到当前版本。`vello_cpu 0.2 → 0.3` 是破坏性升级，代码只有三处要改，
+但其中一处是**真陷阱**。
+
+| 变更 | 适配 |
+|---|---|
+| `CompositeMode` 被删 | 混合语义改由 **`TargetInit`** 表达。**注意默认值是 `Clear(透明)`** —— 直接用 `RasterizerSettings::default()` 会把批次画布上已有内容（尤其前面手工 blit 的图片）整片擦掉。必须显式 `TargetInit::SrcOver`（"画在已有内容之上"），这也是分段渲染 / 图片 z 序修复依赖的前提 |
+| `RasterizerSettings` 字段变成 `render_mode` / `target_init` / `pixel_format` / `offset` | 同上 |
+| `RenderContext::pop_clip_path` 只剩 glifo `DrawSink` trait 版本 | 改用**固有方法** `pop_clip`（trait 版只是转发），不必为此把 glifo 拉成依赖 |
+| `fill_glyphs` 改为返回 `Result` | 不 `unwrap`、也不逐次打日志：失败只意味着"那一小段文字没画出来"，改为**计数** `glyph_errors` 并出现在 `Rasterizer` 的 `Debug` 里（可观测、不刷屏） |
+
+`TargetInit` 那个陷阱**已反向验证**：改成 `Clear` 后，图片 z 序测试
+`primitives_after_an_image_are_painted_above_it` 直接失败（图片像素变成全透明）——
+已在该测试的文档注释里写明"这条同时是 0.3 的陷阱护栏"。
+
+**其余升级**：`skrifa 0.44 → 0.48`（墨迹盒只用 `GlyphMetrics::bounds` 一个窄面）、
+`parley 0.11.1`、`softbuffer 0.4.8`、`arboard 3.6.1`（后三个 `cargo update` 自动到位）。
+
+**故意不升 `winit`**（仍是 0.30.13）：0.31 只有 `0.31.0-beta.3`（预发布），而本轮的
+DPI 契约（`ScaleFactorChanged` + `InnerSizeWriter::request_inner_size` + `dpi_aware` 默认值）
+都建立在 0.30 的 API 上，其中 `ScaleFactorChanged` 在上游正是"计划移除"的那一个。
+窗口后端刚稳定就跳 beta，收益远小于风险；要升请单独开一轮。
+
+**pdfkit 侧**：`hayro 0.8` 把渲染设置拆成 `RenderSettings`（行为）+ **`PixmapSettings`**
+（尺寸/底色），`render()` 从 4 参变 5 参 ⇒ `render::preview::render_page` 已适配
+（导出按 scale 的测试断言 200pt 页 @1x=200px、@2x=400px 仍成立 ⇒ 缩放确实生效）。
+`lopdf 0.45` / `rfd 0.17` 无需改动。pdfkit 树里 **只有一份 vello_cpu 0.3**
+（hayro 0.8 也用它）⇒ 不重复编译。
+
+**版本**：`0.1.0-alpha.3 → 0.1.0-alpha.4`（根 `Cargo.toml` 五处 + pdfkit 的 path 依赖
+version 规格 —— path 依赖也校验 version）。依赖破坏性变更 ⇒ 不发新版，crates.io 上的
+alpha.3 仍然指向 vello_cpu 0.2。
+
+验证：lieui `cargo test --lib` 341 全绿 + clippy 0 警告 + 示例编译通过；
+pdfkit `cargo test` 46 全绿。
