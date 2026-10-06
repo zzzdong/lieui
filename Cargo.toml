@@ -1,6 +1,6 @@
 [package]
 name = "lieui"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ resolver = "2"
 members = ["crates/lieui-geom", "crates/lieui-text", "crates/lieui-layout"]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -25,9 +25,9 @@ repository = "https://github.com/zzzdong/lieui"
 
 [workspace.dependencies]
 # path + version 双写：发布时 crates.io 按版本解析，本地按 path 解析
-lieui-geom = { path = "crates/lieui-geom", version = "0.1.0-alpha.1" }
-lieui-text = { path = "crates/lieui-text", version = "0.1.0-alpha.1" }
-lieui-layout = { path = "crates/lieui-layout", version = "0.1.0-alpha.1" }
+lieui-geom = { path = "crates/lieui-geom", version = "0.1.0-alpha.2" }
+lieui-text = { path = "crates/lieui-text", version = "0.1.0-alpha.2" }
+lieui-layout = { path = "crates/lieui-layout", version = "0.1.0-alpha.2" }
 parley = "0.11.0"
 
 [dependencies]

@@ -1833,3 +1833,15 @@ pdfkit `cargo test` 30 全绿 + `cargo clippy --all-targets` 0 警告。
   `remove_dir_all` 掉 ⇒ 追加文件改放自己的 `tmp_dir`。）
 
 验证：pdfkit `cargo test` 33 全绿 + `cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · 发布 0.1.0-alpha.2
+
+- **版本**：workspace 与三个子 crate 一并升到 `0.1.0-alpha.2`（子 crate 用
+  `version.workspace = true`，`[workspace.dependencies]` 的 path+version 规格同步改）；
+- **内容**：本日 6 个提交 —— 跨线程任务与 loading 遮罩、统一时钟（定时器/动画帧）、
+  自定义事件、虚拟列表升格、文本光学对齐按内容盒、脏区批次策略与图片 z 序修复、
+  右键语义、示例与文档；
+- **发布顺序**：`lieui-geom` → `lieui-text` → `lieui-layout` → `lieui`
+  （后者依赖前三个，版本必须已在索引里）；
+- **pdfkit**：path 依赖的 version 规格同步改为 `0.1.0-alpha.2`
+  （path 依赖也会校验 version，不一致直接解析失败）。
