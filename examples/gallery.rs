@@ -19,6 +19,7 @@
 //! 12. **图标**（Material Icons 字体：`icon` / `icon_button`）；
 //! 13. **Tab 焦点迁移**（框架默认行为，键盘聚焦画焦点框）。
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use lieui::prelude::*;
@@ -79,11 +80,40 @@ struct Gallery {
     /// 主题跟随系统（勾选 ⇒ `ThemeMode::System`）
     follow_system: Signal<bool>,
     last_action: Signal<String>,
+    /// 后台任务演示的结果文案
+    bg_result: Signal<String>,
+    /// 虚拟列表的窗口状态（记住可见窗口起点）
+    vl: VirtualListState,
+    vl_items: Vec<u32>,
+    /// 虚拟列表里被标记的行
+    vl_picked: Signal<HashSet<u32>>,
     wave: CustomCell,
     photo: std::sync::Arc<ImageData>,
 }
 
 impl Gallery {
+    /// 起一个 ~3 秒的后台任务：演示 loading 遮罩、进度上报、以及遮罩上的「取消」。
+    ///
+    /// 任务跑在**工作线程**（`Ctx::spawn_task_busy` = `Runtime::spawn_task_busy` +
+    /// 当前窗口）——UI 线程全程不卡，遮罩与进度由框架自动渲染（见 `lieui::task`）。
+    fn start_background_demo(&self, cx: &mut Ctx) {
+        const TOTAL: usize = 60;
+        cx.spawn_task_busy("正在处理 60 个分片…", |ctx| {
+            let started = std::time::Instant::now();
+            for i in 1..=TOTAL {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                ctx.progress(i, TOTAL); // 驱动遮罩上的进度条
+                if ctx.is_cancelled() {
+                    return format!("已取消（处理到 {i}/{TOTAL}）");
+                }
+            }
+            format!(
+                "完成 {TOTAL} 个分片，耗时 {} ms",
+                started.elapsed().as_millis()
+            )
+        });
+    }
+
     /// 菜单条按钮（`open_menu` 声明式互斥：只有一个菜单是打开的）
     fn menu_anchor(me: &Rc<Self>, v: &mut ViewBuf, name: &str) {
         let m = name.to_string();
@@ -207,6 +237,15 @@ impl Gallery {
 }
 
 impl ViewModel for Gallery {
+    /// 后台任务回传：框架**先**收尾（清任务表 + 收遮罩），再把 `TaskEvent` 交到这里。
+    fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
+        if let Some(ev) = data.downcast_ref::<TaskEvent>()
+            && let Some(msg) = ev.payload.downcast_ref::<String>()
+        {
+            self.bg_result.set(msg.clone());
+        }
+    }
+
     fn view(self: &Rc<Self>, v: &mut ViewBuf) {
         // 唯一的内容根：菜单栏（固定）+ 可滚动主体
         v.column(|c| {
@@ -309,6 +348,24 @@ impl ViewModel for Gallery {
             s.text("下拉选择").font_size(16.0);
             Gallery::combo_anchor(self, s);
 
+            // ── 后台任务 + loading 遮罩（框架级跨线程支持）──
+            self.divider(s);
+            s.text("后台任务（loading 遮罩 / 进度 / 取消）").font_size(16.0);
+            s.text("任务跑在工作线程，UI 不卡；遮罩上的「取消」会中断它")
+                .font_size(12.0)
+                .color(self.rt.theme().text_secondary);
+            s.row(|r| {
+                r.gap(10.0);
+                r.align_items(FlexAlign::Center);
+                r.button("跑 3 秒后台任务").on_tap_with({
+                    let me = Rc::clone(self);
+                    move |cx| me.start_background_demo(cx)
+                });
+                r.text(self.bg_result.get())
+                    .font_size(12.0)
+                    .color(self.rt.theme().text_secondary);
+            });
+
             // ── 图标（Material Icons 字体，名称即 codepoints 表里的名字）──
             // 垂直对齐说明：图标的行盒 = 字号见方的正方形（该字体行高系数 1.0），
             // 行上 `align_items(Center)` 按行盒交叉轴居中 ⇒ 不同字号混排天然对齐；
@@ -339,6 +396,57 @@ impl ViewModel for Gallery {
                     .color(self.rt.theme().text_secondary)
                     .wrap(false)
                     .optical_align(true);
+            });
+
+            // ── 虚拟列表（只物化可见行；10000 项也丝滑）──
+            self.divider(s);
+            s.text("虚拟列表（10000 项，只物化可见行）").font_size(16.0);
+            s.text("点一行标记它；滚走再滚回来，标记与滚动位置都在")
+                .font_size(12.0)
+                .color(self.rt.theme().text_secondary);
+            s.row(|r| {
+                r.gap(10.0);
+                r.align_items(FlexAlign::Center);
+                r.text(format!("已标记 {} 行", self.vl_picked.get().len()))
+                    .font_size(12.0)
+                    .color(self.rt.theme().text_secondary);
+                r.button("清空标记")
+                    .on_tap(act(self, |s: &Gallery| s.vl_picked.set(HashSet::new())));
+            });
+            s.scroll(|sc| {
+                sc.height(220.0);
+                sc.width(360.0);
+                sc.background(self.rt.theme().input_background);
+                sc.border(1.0, self.rt.theme().control_border);
+                sc.radius(6.0);
+                sc.virtual_list(
+                    &self.vl,
+                    &self.vl_items,
+                    |i| *i as u64,
+                    26.0,
+                    220.0,
+                    |v, i| {
+                        let idx = *i;
+                        let picked = self.vl_picked.get().contains(&idx);
+                        let me = Rc::clone(self);
+                        v.row(|row| {
+                            row.height(26.0);
+                            row.padding(6.0);
+                            row.on(EventKind::Tapped, move |_| {
+                                let mut set = me.vl_picked.get();
+                                if !set.remove(&idx) {
+                                    set.insert(idx);
+                                }
+                                me.vl_picked.set(set);
+                            });
+                            row.text(format!(
+                                "Item {idx}{}",
+                                if picked { "    ✓ 已标记" } else { "" }
+                            ))
+                            .font_size(13.0);
+                        });
+                    },
+                );
             });
 
             // ── 输入框 ──
@@ -418,6 +526,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sub_open: Signal::new(&rt, false),
         follow_system: Signal::new(&rt, false),
         last_action: Signal::new(&rt, String::new()),
+        bg_result: Signal::new(&rt, "（还没跑过后台任务）".to_string()),
+        vl: VirtualListState::new(&rt),
+        vl_items: (0..10_000).collect(),
+        vl_picked: Signal::new(&rt, HashSet::new()),
         wave: custom::cell(Wave { taps: 0 }),
         rt: rt.clone(),
         photo: std::sync::Arc::new(demo_image()),
