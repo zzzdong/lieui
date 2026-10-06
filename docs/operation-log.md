@@ -1970,9 +1970,32 @@ yank 之后（索引里 `yanked=true`）新解析会跳过它，直接落到 `0.
   "翻页 / 缩放"那一下会卡一帧。挪进 `spawn_task` 是明确的下一步（那时未命中要显示占位）。
 - `PREVIEW_BOX` 是常量（860×620 逻辑）：`view()` 发生在布局**之前**、拿不到实测尺寸，
   而框架的图片没有"按比例适应"（`ImageStyle::fit` 只有 `Fill`）⇒ 宽高必须显式给。
+  （`Runtime::window_size` 能给出**窗口**逻辑尺寸，但要的是"窗格"尺寸 —— 还要减掉侧栏与
+  header/toolbar/status；而且 `view()` 手里没有 `Runtime`/`WindowId`，只有 `on_tick` 能读。
+  所以真要做"跟随窗口"要么补一个 `view()` 能用的入口，要么把栅格化挪进作业后按窗格尺寸渲。）
 - **未在真实多显示器上验收**：本机无法切换显示器 DPI，DPI 结论均来自 winit 0.30.13 源码
   （位置见上）与可无头验证的纯函数测试。需要一台 Windows 双屏（100% + 150/200%）拖一次
   窗口来最终确认：界面变清晰、预览跟着变清晰、无内容缩水。
 
 验证：lieui `cargo test --lib` 339 全绿 + clippy 0 警告 + 示例编译通过；
 pdfkit `cargo test` 35 全绿 + `cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · 发布 0.1.0-alpha.3
+
+- **版本**：workspace 与三个子 crate 一并升到 `0.1.0-alpha.3`。子 crate 用
+  `version.workspace = true` ⇒ 只需改根 `Cargo.toml` 的 5 处（`package.version`、
+  `workspace.package.version`、三个 `workspace.dependencies` 的 path+version 规格）；
+- **内容**：系统缩放（DPI）支持 —— 逻辑/物理换算单一真源（`sane_scale` /
+  `physical_to_logical` / `physical_size_to_logical` / `logical_size_to_physical`）、
+  `scale_epoch` + `ViewModel::on_scale_changed` 把缩放变化通知给应用、
+  `ScaleFactorChanged` 显式按新 scale 请求物理尺寸；附带 `Runtime::window_size`
+  （帧驱动每帧登记每窗口逻辑尺寸）；
+- **发布顺序**：`lieui-geom` → `lieui-text` → `lieui-layout` → `lieui`
+  （后者依赖前三个，版本必须已在索引里）。本次用 cargo 1.97 的 `cargo publish --workspace`
+  —— 由 cargo 自己按依赖顺序逐个上传并等索引，不必再手工一个个发 + 等；
+- **pdfkit**：path 依赖的 version 规格同步改为 `0.1.0-alpha.3`
+  （path 依赖也会校验 version，不一致直接解析失败）。
+
+**结果**：四个 crate 均已上传到 crates.io（`lieui-geom` / `lieui-text` / `lieui-layout` /
+`lieui` 0.1.0-alpha.3）。发布前 `cargo publish --dry-run --workspace` 四个 crate
+全部打包 + 验证通过；发布后 pdfkit 对新版本重新编译并测试（35 全绿）。
