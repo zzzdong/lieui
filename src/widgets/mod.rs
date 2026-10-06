@@ -520,6 +520,22 @@ fn pad_top(n: &Node) -> f32 {
     n.layout.padding[lieui_layout::CSSDirection::Top as usize]
 }
 
+/// 内容盒：`rect` 去掉四边内边距。
+///
+/// 文本/墨迹应该落在**内容盒**里而不是 border box —— 否则"文本 + 对称内边距"的盒子
+/// （tooltip 就是典型）padding 会被吃掉，视觉上看着偏。
+fn content_rect(n: &Node, rect: Rect) -> Rect {
+    use lieui_layout::CSSDirection::{Bottom, Left, Right, Top};
+    let pad = |d: lieui_layout::CSSDirection| n.layout.padding[d as usize];
+    let (l, t, r, b) = (pad(Left), pad(Top), pad(Right), pad(Bottom));
+    Rect::new(
+        rect.x + l,
+        rect.y + t,
+        (rect.width - l - r).max(0.0),
+        (rect.height - t - b).max(0.0),
+    )
+}
+
 /// 归一化选区（无选区 ⇒ `None`）
 fn selection_of(caret: usize, anchor: usize) -> Option<(usize, usize)> {
     if caret == anchor {
@@ -681,7 +697,15 @@ pub(crate) fn draw(
         Kind::Text(_) => {
             if let Kind::Text(s) = &n.kind {
                 let spec = draw_spec(n);
-                push_text(cache, out, cull, s, &spec, text_color, rect, false, transform);
+                // 光学对齐时按**内容盒**放墨迹：节点高度 = 墨迹高 + padding，
+                // 若仍贴 border box 上缘，padding 会被吃掉（文本看着往上顶）。
+                // 非光学路径保持原样（行盒自带 leading，既有布局按 border box 定位）。
+                let r = if spec.optical_align {
+                    content_rect(n, rect)
+                } else {
+                    rect
+                };
+                push_text(cache, out, cull, s, &spec, text_color, r, false, transform);
             }
         }
 
@@ -1235,6 +1259,72 @@ mod tests {
             "绘制原点上移到墨迹上缘：{} vs {}",
             origin.y,
             rect.y - ink.top
+        );
+    }
+
+    /// 光学对齐 + padding：墨迹落在**内容盒**里（padding 不被吃掉）。
+    ///
+    /// tooltip 就是这种盒子（文本 + 上下各 6px）；若贴 border box 上缘，视觉上会往上顶。
+    #[test]
+    fn optical_align_keeps_the_padding_around_the_ink() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.add_root(Layer::Content, None, root);
+        let id = t.create(Kind::Text("tooltip".into()), None);
+        {
+            let n = t.get_mut(id).unwrap();
+            n.text = TextStyle::new().font_size(12.0);
+            n.text.spec.optical_align = true;
+            n.text.spec.wrap = false;
+            n.layout = n
+                .layout
+                .clone()
+                .padding_top(6.0)
+                .padding_bottom(6.0)
+                .padding_left(10.0)
+                .padding_right(10.0);
+        }
+        t.append_child(root, id);
+        layout(&mut t, Size::new(200.0, 200.0));
+
+        let rect = crate::layout::rect_of(&t, id);
+        let ink = lieui_text::TextEngine::ink_bounds("tooltip", &t.get(id).unwrap().text.spec)
+            .expect("tooltip 有墨迹");
+        assert!(
+            (rect.height - (ink.height() + 12.0)).abs() < 0.01,
+            "盒高 = 墨迹高 + 上下 padding：{} vs {}",
+            rect.height,
+            ink.height()
+        );
+
+        let scene = build(&t);
+        let Op::Text { origin, .. } = scene
+            .ops()
+            .iter()
+            .find(|op| matches!(op, Op::Text { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let ink_top = origin.y + ink.top;
+        let ink_left = origin.x;
+        assert!(
+            (ink_top - (rect.y + 6.0)).abs() < 0.01,
+            "墨迹上缘落在内容盒上缘（rect.y + 6）：{ink_top} vs {}",
+            rect.y + 6.0
+        );
+        assert!(
+            (ink_left - (rect.x + 10.0)).abs() < 0.01,
+            "墨迹左缘落在内容盒左缘（rect.x + 10）：{ink_left} vs {}",
+            rect.x + 10.0
+        );
+        // 上下留白相等 ⇒ 视觉居中
+        let bottom_gap = rect.bottom() - (ink_top + ink.height());
+        assert!(
+            ((ink_top - rect.y) - bottom_gap).abs() < 0.01,
+            "上下 padding 对称：上 {} vs 下 {}",
+            ink_top - rect.y,
+            bottom_gap
         );
     }
 
