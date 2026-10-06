@@ -1849,3 +1849,8 @@ pdfkit `cargo test` 30 全绿 + `cargo clippy --all-targets` 0 警告。
 **结果**：四个 crate 均已上传到 crates.io（`lieui-geom` / `lieui-text` / `lieui-layout` / `lieui`
 0.1.0-alpha.2）。发布前跑过 `cargo test --lib`（333 全绿）与全目标 `cargo check`；
 发布后 pdfkit 对新版本重新编译并测试（33 全绿）。
+
+**另：yank 掉 `0.2.0-beta.1`**。它是降版本之前那条线，semver 上高于 `0.1.0-alpha.2`
+（`0.2.0 > 0.1.0`）⇒ crates.io 的 "latest" 一直被它占着，`cargo add lieui` 会拿到旧版。
+yank 之后（索引里 `yanked=true`）新解析会跳过它，直接落到 `0.1.0-alpha.2`；
+已有 lockfile 固定到它的旧用户不受影响（yank 只影响新解析，不删包）。
