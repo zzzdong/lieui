@@ -13,7 +13,9 @@
 pub mod raster;
 pub mod scene;
 
-pub use raster::{RasterStats, Rasterizer, damage_batches, to_vello};
+pub use raster::{
+    RasterStats, Rasterizer, damage_batches, damage_batches_bands, damage_batches_union, to_vello,
+};
 pub use scene::{Op, Scene, SceneBuilder, SceneOptions, SceneStats, TextCache, kind_name};
 
 use lieui_geom::{Color, Rect, Size};

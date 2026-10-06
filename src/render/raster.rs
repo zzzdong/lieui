@@ -118,6 +118,134 @@ pub fn damage_batches(size: Size, damage: &[Rect], damage_all: bool) -> Vec<Rect
     out
 }
 
+/// 脏区 → **单个包围盒**批次（最简策略）。
+///
+/// 把全部脏区合并成一个 union 矩形（取整、裁边）。正确性与 [`damage_batches`] 等价
+/// （重画面积 ⊇ 脏区），实现只有几行，但"少量且分散的更新"会退化成接近整窗
+/// —— 见 `examples/damage_bench.rs` 里的策略对比。
+pub fn damage_batches_union(size: Size, damage: &[Rect], damage_all: bool) -> Vec<Rect> {
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return Vec::new();
+    }
+    let full = Rect::new(0.0, 0.0, size.width, size.height);
+    if damage_all {
+        return vec![full];
+    }
+    let mut acc: Option<Rect> = None;
+    for d in damage {
+        let Some(c) = d.intersect(&full) else { continue };
+        acc = Some(match acc {
+            None => c,
+            Some(a) => a.union(&c),
+        });
+    }
+    match acc {
+        Some(r) => {
+            let r = pixel_snap(r, size);
+            if r.width >= 1.0 && r.height >= 1.0 {
+                vec![r]
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    }
+}
+
+/// 脏区 → **水平行带**批次（介于"精确碎片"与"单包围盒"之间）。
+///
+/// 按 y 区间把脏区合并成若干**互不重叠**的水平带（每带取 x 的 union，相邻同 x 的带再合并）。
+///
+/// 相比精确碎片模式（[`damage_batches`]）：
+/// - 批次数少 ⇒ 批次间**不重叠** ⇒ 同一像素不会被重复合成（精确模式里重叠的碎片会）；
+/// - "要重画的矩形集合"由一条纯函数确定 ⇒ 场景剔除与批次**天然同源**（少一类 bug）；
+/// - 分散在多行的更新（列表多处变化）仍能保持局部，不会像单包围盒那样吃掉整窗。
+///
+/// 代价：同一行内左右分开的两块会合并成整行宽度（多画中间那段）。
+pub fn damage_batches_bands(size: Size, damage: &[Rect], damage_all: bool) -> Vec<Rect> {
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return Vec::new();
+    }
+    let full = Rect::new(0.0, 0.0, size.width, size.height);
+    if damage_all {
+        return vec![full];
+    }
+
+    // ① 裁剪 + 取整 + 去重
+    let mut rects: Vec<Rect> = Vec::new();
+    for d in damage {
+        let Some(c) = d.intersect(&full) else { continue };
+        let r = pixel_snap(c, size);
+        if r.width >= 1.0 && r.height >= 1.0 && !rects.contains(&r) {
+            rects.push(r);
+        }
+    }
+    if rects.is_empty() {
+        return Vec::new();
+    }
+
+    // ② 所有 y 边界（排序去重）⇒ 相邻边界构成互不重叠的水平区间
+    let mut ys: Vec<f32> = Vec::with_capacity(rects.len() * 2);
+    for r in &rects {
+        ys.push(r.y);
+        ys.push(r.bottom());
+    }
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+
+    // ③ 每个 y 区间：取覆盖它的矩形们的 x union
+    let mut out: Vec<Rect> = Vec::new();
+    for win in ys.windows(2) {
+        let (y0, y1) = (win[0], win[1]);
+        if y1 - y0 < 1.0 {
+            continue;
+        }
+        let mut xs: Option<(f32, f32)> = None;
+        for r in &rects {
+            if r.y <= y0 + 0.01 && r.bottom() >= y1 - 0.01 {
+                xs = Some(match xs {
+                    None => (r.x, r.right()),
+                    Some((a, b)) => (a.min(r.x), b.max(r.right())),
+                });
+            }
+        }
+        if let Some((x0, x1)) = xs
+            && x1 - x0 >= 1.0
+        {
+            out.push(Rect::new(x0, y0, x1 - x0, y1 - y0));
+        }
+    }
+
+    // ④ 相邻且 x 范围一致的带合并（减少批次数）
+    let mut merged: Vec<Rect> = Vec::with_capacity(out.len());
+    for r in out {
+        match merged.last_mut() {
+            Some(p) if (p.x - r.x).abs() < 0.01
+                && (p.width - r.width).abs() < 0.01
+                && (p.bottom() - r.y).abs() < 0.01 =>
+            {
+                p.height = r.bottom() - p.y;
+            }
+            _ => merged.push(r),
+        }
+    }
+    merged
+}
+
+/// 取整到整像素并裁到窗口内（三种策略共用的规范化）
+fn pixel_snap(c: Rect, size: Size) -> Rect {
+    let x0 = c.x.floor().max(0.0);
+    let y0 = c.y.floor().max(0.0);
+    let x1 = c.right().ceil().min(size.width);
+    let y1 = c.bottom().ceil().min(size.height);
+    Rect::new(
+        x0,
+        y0,
+        (x1 - x0).max(0.0),
+        (y1 - y0).max(0.0),
+    )
+}
+
 /// 光栅器：持有持久 pixmap、复用 scratch 与 vello 上下文。
 ///
 /// **坐标系**：场景（op）坐标是**逻辑**像素（布局坐标系），pixmap 是**物理**像素。
@@ -207,19 +335,32 @@ impl Rasterizer {
     ///
     /// 约定：`scene` 的第一条原语应当是不透明底色（`SceneBuilder` 保证），
     /// 否则批次里的旧像素不会被盖掉。
-    pub fn rasterize(&mut self, scene: &Scene, damage: &[Rect], damage_all: bool) -> RasterStats {
-        // 脏区是**逻辑**坐标 ⇒ 先乘 scale 变成物理像素
-        let physical_size = self.size();
+    /// 脏区（**逻辑**坐标）→ 物理像素批次（默认策略，见 [`damage_batches`]）。
+    ///
+    /// 批次决策与执行分离（[`Self::rasterize_batches`]）：这样剔除与光栅化可以
+    /// **共用同一个批次列表**（同源不再靠约定），也便于基准对比不同策略。
+    pub fn batches_for(&self, damage: &[Rect], damage_all: bool) -> Vec<Rect> {
         let scaled: Vec<Rect> = damage
             .iter()
-            .map(|d| Rect::new(
-                d.x * self.scale,
-                d.y * self.scale,
-                d.width * self.scale,
-                d.height * self.scale,
-            ))
+            .map(|d| {
+                Rect::new(
+                    d.x * self.scale,
+                    d.y * self.scale,
+                    d.width * self.scale,
+                    d.height * self.scale,
+                )
+            })
             .collect();
-        let batches = damage_batches(physical_size, &scaled, damage_all);
+        damage_batches(self.size(), &scaled, damage_all)
+    }
+
+    pub fn rasterize(&mut self, scene: &Scene, damage: &[Rect], damage_all: bool) -> RasterStats {
+        let batches = self.batches_for(damage, damage_all);
+        self.rasterize_batches(scene, &batches)
+    }
+
+    /// 按**给定的物理像素批次**光栅化（批次必须互不重叠，否则重叠区会被重复合成）
+    pub fn rasterize_batches(&mut self, scene: &Scene, batches: &[Rect]) -> RasterStats {
         let mut stats = RasterStats {
             batches: batches.len(),
             rasterized: !batches.is_empty(),
@@ -230,7 +371,7 @@ impl Rasterizer {
         }
 
         let scale = self.scale;
-        for batch in &batches {
+        for batch in batches {
             let bw = batch.width.round().clamp(1.0, f32::from(u16::MAX)) as u16;
             let bh = batch.height.round().clamp(1.0, f32::from(u16::MAX)) as u16;
             let (x0, y0) = (batch.x.max(0.0) as usize, batch.y.max(0.0) as usize);
@@ -239,37 +380,22 @@ impl Rasterizer {
             self.ctx.reset_and_resize(bw, bh);
             let shift = KAffine::translate((-(batch.x as f64), -(batch.y as f64)))
                 * KAffine::scale(f64::from(scale));
-            // 图片 op 不走 vello（手动 blit，见 blit_images）；与 vello 原语分桶
-            let mut image_ops: Vec<&Op> = Vec::new();
-            for op in scene.ops() {
-                if matches!(op, Op::Image { .. }) {
-                    image_ops.push(op);
-                } else {
-                    self.submit(op, shift);
-                }
-            }
-            self.ctx.flush();
-
             if self.scratch.width() != bw || self.scratch.height() != bh {
                 self.scratch.resize(bw, bh);
             }
-            {
-                let data = self.scratch.data_as_u8_slice_mut();
-                if let Some(target) = PixmapMut::new(bw, bh, data) {
-                    let settings = RasterizerSettings {
-                        composite_mode: CompositeMode::SrcOver,
-                        ..Default::default()
-                    };
-                    self.ctx.render_with(target, &mut self.resources, settings);
-                }
-            }
-            self.ctx.reset();
 
-            // 图片 blit（SrcOver，写进批次画布）：
-            // 已知限制：blit 在该批次的所有 vello 原语之后 ⇒ 同批次内图片总在最上层
-            if !image_ops.is_empty() {
-                for op in &image_ops {
-                    if let Op::Image { image, rect, transform } = op {
+            // **按 op 顺序就地合成**：图片 op 绕开 vello（手动 blit），遇到它时必须先
+            // 把之前累积的原语渲染掉，否则同批次内的图片会被画到所有原语之上 ——
+            // 表现为"后画的浮层/遮罩被图片盖住"（PDF 预览盖住 loading 遮罩就是这个）。
+            let mut pending = false;
+            for op in scene.ops() {
+                match op {
+                    Op::Image {
+                        image,
+                        rect,
+                        transform,
+                    } => {
+                        self.flush_segment(&mut pending, bw, bh);
                         // 逻辑 rect → 批次内物理坐标
                         let tb = transform.bounding_box(*rect);
                         let dst = Rect::new(
@@ -280,9 +406,13 @@ impl Rasterizer {
                         );
                         self.blit_image(image, dst);
                     }
+                    other => {
+                        self.submit(other, shift);
+                        pending = true;
+                    }
                 }
             }
-            self.ctx.reset();
+            self.flush_segment(&mut pending, bw, bh);
 
             // 拷回持久 pixmap（逐行；两侧都是 `PremulRgba8`，无需 unsafe）
             let pw = usize::from(self.pixmap.width());
@@ -309,8 +439,34 @@ impl Rasterizer {
         stats
     }
 
+    /// 把当前累积的 vello 原语渲染进批次画布（`pending` 复位）。
+    ///
+    /// 只在**图片边界**与**批次结尾**调用：这样图片与原语严格按 op 顺序合成。
+    /// 没有待渲染原语时是 no-op（连续多张图片不会白跑一遍）。
+    fn flush_segment(&mut self, pending: &mut bool, bw: u16, bh: u16) {
+        if !*pending {
+            return;
+        }
+        *pending = false;
+        self.ctx.flush();
+        {
+            let data = self.scratch.data_as_u8_slice_mut();
+            if let Some(target) = PixmapMut::new(bw, bh, data) {
+                let settings = RasterizerSettings {
+                    composite_mode: CompositeMode::SrcOver,
+                    ..Default::default()
+                };
+                self.ctx.render_with(target, &mut self.resources, settings);
+            }
+        }
+        self.ctx.reset();
+    }
+
     /// 手动 blit：把 RGBA8（**直通 alpha**）图片按 contain 方式缩放进 `dst`
     /// （批次内物理像素矩形），最近邻采样，SrcOver 写入批次画布（premultiplied）。
+    ///
+    /// 已知限制：不走 vello ⇒ **不参与 `PushClip` 裁剪栈**（滚动容器里的图片不会被裁），
+    /// 采样是最近邻。z 序已按 op 顺序处理（见 `flush_segment`）。
     fn blit_image(&mut self, image: &crate::track::ImageData, dst: Rect) {
         if dst.width <= 0.0 || dst.height <= 0.0 || image.width == 0 || image.height == 0 {
             return;
@@ -513,6 +669,129 @@ mod tests {
         (r, stats)
     }
 
+    // ── 三种批次策略的不变量（覆盖完备 + 行带互不重叠） ──
+
+    fn cases() -> Vec<Vec<Rect>> {
+        vec![
+            vec![Rect::new(10.0, 10.0, 20.0, 20.0)],
+            vec![
+                Rect::new(0.0, 0.0, 20.0, 20.0),
+                Rect::new(100.0, 0.0, 20.0, 20.0),
+                Rect::new(0.0, 60.0, 20.0, 20.0),
+                Rect::new(100.0, 60.0, 20.0, 20.0),
+            ],
+            (0..6)
+                .map(|i| Rect::new(20.0, 5.0 + i as f32 * 10.0, 30.0, 8.0))
+                .collect(),
+            vec![
+                // 同带里左右两块（行带会合并成整行宽）
+                Rect::new(5.0, 20.0, 20.0, 10.0),
+                Rect::new(90.0, 25.0, 20.0, 10.0),
+            ],
+        ]
+    }
+
+    /// 像素级完备性：脏矩形里的**每个像素**都要落在某个批次里（否则漏画 ⇒ 残影）。
+    ///
+    /// 注意不能要求"某个批次完整包含某个脏矩形"——行带会**按 y 切开**矩形，
+    /// 覆盖依然完备，只是分布在不同带里。
+    fn covers_every_pixel(batches: &[Rect], damage: &[Rect]) -> bool {
+        for d in damage {
+            let x0 = d.x.floor() as i32;
+            let y0 = d.y.floor() as i32;
+            let x1 = d.right().ceil() as i32;
+            let y1 = d.bottom().ceil() as i32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = lieui_geom::Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                    if !batches.iter().any(|b| b.contains(p)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// 每个策略的输出都必须**覆盖所有脏像素**
+    #[test]
+    fn every_strategy_covers_all_damage() {
+        for damage in cases() {
+            for (name, batches) in [
+                ("exact", damage_batches(size(), &damage, false)),
+                ("union", damage_batches_union(size(), &damage, false)),
+                ("bands", damage_batches_bands(size(), &damage, false)),
+            ] {
+                assert!(!batches.is_empty(), "{name} 不该空");
+                assert!(
+                    covers_every_pixel(&batches, &damage),
+                    "{name} 漏像素：{damage:?} -> {batches:?}"
+                );
+            }
+        }
+    }
+
+    /// 行带的额外不变量：**互不重叠**（重叠会让同一像素被重复光栅化）
+    #[test]
+    fn bands_never_overlap() {
+        for damage in cases() {
+            let bands = damage_batches_bands(size(), &damage, false);
+            for (i, a) in bands.iter().enumerate() {
+                for b in bands.iter().skip(i + 1) {
+                    assert!(
+                        !a.intersects(b),
+                        "行带不应重叠：{a:?} 与 {b:?} 相交"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 行带按 y 聚合：上下分离的两块 ⇒ 两个带，而**不是**整窗（对比单包围盒）
+    #[test]
+    fn bands_stay_local_where_union_covers_everything() {
+        let damage = vec![
+            Rect::new(10.0, 5.0, 20.0, 10.0),
+            Rect::new(10.0, 65.0, 20.0, 10.0),
+        ];
+        let bands = damage_batches_bands(size(), &damage, false);
+        assert_eq!(bands.len(), 2, "上下两块 ⇒ 两个带：{bands:?}");
+        let px: f32 = bands.iter().map(|r| r.width * r.height).sum();
+        assert!(px < W * H * 0.2, "只画两块附近：{px}");
+
+        let union = damage_batches_union(size(), &damage, false);
+        let upx: f32 = union.iter().map(|r| r.width * r.height).sum();
+        assert!(upx > px * 3.0, "单包围盒会吃掉整窗（{upx} vs {px}）");
+    }
+
+    /// 脏区为空 / 整窗脏：三种策略一致
+    #[test]
+    fn strategies_agree_on_the_trivial_cases() {
+        assert!(damage_batches(size(), &[], false).is_empty());
+        assert!(damage_batches_union(size(), &[], false).is_empty());
+        assert!(damage_batches_bands(size(), &[], false).is_empty());
+
+        let full = vec![Rect::new(0.0, 0.0, W, H)];
+        for b in [
+            damage_batches(size(), &full, true),
+            damage_batches_union(size(), &full, true),
+            damage_batches_bands(size(), &full, true),
+        ] {
+            assert_eq!(b, vec![Rect::new(0.0, 0.0, W, H)]);
+        }
+    }
+
+    /// `batches_for` 与 `rasterize` 的批次决策一致（解耦后仍同源）
+    #[test]
+    fn batches_for_matches_the_rasterize_path() {
+        let r = Rasterizer::with_scale(size(), 2.0);
+        let damage = vec![Rect::new(10.0, 10.0, 20.0, 20.0)];
+        let via_helper = r.batches_for(&damage, false);
+        // 逻辑 → 物理（2×）后与直接调用纯函数的物理批次一致
+        let scaled = vec![Rect::new(20.0, 20.0, 40.0, 40.0)];
+        assert_eq!(via_helper, damage_batches(Size::new(W * 2.0, H * 2.0), &scaled, false));
+    }
+
     fn px(r: &Rasterizer, x: u16, y: u16) -> PremulRgba8 {
         let pix = r.pixmap();
         pix.data()[usize::from(y) * usize::from(pix.width()) + usize::from(x)]
@@ -554,6 +833,42 @@ mod tests {
         // 矩形外仍是背景
         assert_eq!(px(&r, 1, 1), PremulRgba8::from_u8_array([255, 255, 255, 255]));
         assert_eq!(px(&r, 7, 7), PremulRgba8::from_u8_array([255, 255, 255, 255]));
+    }
+
+    /// 图片不再"永远在最上层"：图片**之后**的原语必须能盖住它。
+    ///
+    /// （症状来源：PDF 预览是图片、loading 遮罩是后画的原语，旧实现把图片统一放到
+    /// 批次末尾 blit ⇒ 遮罩被预览盖住，用户"看不到进度 modal"。）
+    #[test]
+    fn primitives_after_an_image_are_painted_above_it() {
+        let img = crate::track::ImageData {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                255, 0, 0, 255, 255, 0, 0, 255, // 全红
+                255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        };
+        let blue = Color::rgba(0, 0, 255, 255);
+        let red = Color::rgba(255, 0, 0, 255);
+        let (r, _) = raster(vec![
+            // (10,10) 起 20×20 的红图
+            Op::Image {
+                image: std::sync::Arc::new(img),
+                rect: Rect::new(10.0, 10.0, 20.0, 20.0),
+                transform: Affine::IDENTITY,
+            },
+            // 图**之后**画一条蓝条，压在图上
+            Op::Rect {
+                rect: Rect::new(12.0, 12.0, 6.0, 6.0),
+                radius: 0.0,
+                color: blue,
+                transform: Affine::IDENTITY,
+            },
+        ]);
+        expect(px(&r, 14, 14), blue); // 后画的盖住图
+        expect(px(&r, 25, 25), red); // 蓝条之外仍是图
+        expect(px(&r, 2, 2), BG); // 图之外是底色
     }
 
     #[test]
