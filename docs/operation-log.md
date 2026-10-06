@@ -1845,3 +1845,7 @@ pdfkit `cargo test` 30 全绿 + `cargo clippy --all-targets` 0 警告。
   （后者依赖前三个，版本必须已在索引里）；
 - **pdfkit**：path 依赖的 version 规格同步改为 `0.1.0-alpha.2`
   （path 依赖也会校验 version，不一致直接解析失败）。
+
+**结果**：四个 crate 均已上传到 crates.io（`lieui-geom` / `lieui-text` / `lieui-layout` / `lieui`
+0.1.0-alpha.2）。发布前跑过 `cargo test --lib`（333 全绿）与全目标 `cargo check`；
+发布后 pdfkit 对新版本重新编译并测试（33 全绿）。
