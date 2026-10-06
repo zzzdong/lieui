@@ -1238,3 +1238,598 @@ M5 第六段已落地"token → 烘焙"的主题机制（`Theme` + `light()/dark
   tooltip 主题同步并入既有 `tooltip_opens_after_hover_delay_and_closes_on_leave`。
 
 验证：`cargo test --lib` 284 全绿；`cargo clippy --lib --examples` 0 警告；gallery 编译通过。
+
+## 2026-10-06 · 跨线程通信 + loading 遮罩（框架级补齐）
+
+**动机**：pdfkit 合并多个 PDF 时在 UI 线程同步跑 ⇒ 窗口僵死（上一轮只能在应用层自己拼：
+`run_with_handle` 拿句柄 + 手写线程 + 手写遮罩）。框架该把这条链路做完整。
+
+此前只有三件套：`RepaintHandle`（平台层 `Send` 句柄）、`ExternalData`（类型擦除载荷）、
+`ViewModel::on_external`（UI 线程落地）。缺口：取句柄必须改启动方式、没有任务抽象
+（进度/取消/完成/生命周期）、没有遮罩、无头不可测。
+
+### 三层 API（新增 `src/task.rs`）
+
+| 层 | API |
+|---|---|
+| 唤醒 | `Waker` trait（平台无关）· `Runtime::{set_waker, waker, wake, is_online, take_pending_external}` |
+| 任务 | `Runtime::{spawn_task, spawn_task_busy}` · `TaskHandle{cancel, is_done, is_running}` · `TaskCtx{post, progress, is_cancelled, cancel_token, wake}` · `CancelToken` |
+| 遮罩 | `Runtime::begin_busy(..) -> BusyToken`（RAII，Drop 即收起）· `BusyToken{set_label, set_progress, cancellable, finish}` · `Runtime::{busy_items, is_busy}` |
+
+设计要点：
+
+1. **`Waker` 抽象 ⇒ 框架可无头**：winit 平台由 `RepaintHandle` 实现，`platform::run` 自动
+   `set_waker`（**不再必须用 `run_with_handle`** —— 老 API 保留）。没有平台时退化成 Runtime
+   内部的**本地队列**，`App::frame_all` 像事件循环一样消费它 ⇒ 单测能跑通"任务 → 投递 →
+   落地"的完整闭环（不需要真窗口）。
+2. **完成 = 一条消息**：任务返回值包成 `TaskEvent { id, payload }` 投递。`WindowCtx::external`
+   先让框架收尾（清任务表 + 收遮罩），**再**交给 `on_external`（用户 `downcast` 自己的类型）。
+   进度消息 `TaskProgress` 由框架完全消费（驱动遮罩），不打扰用户。
+3. **取消是协作式的**：`CancelToken`（`Arc<AtomicBool>`）。三种触发：点火遮罩「取消」、
+   窗口关闭（`App::close_window` 现在会取消该窗口的全部任务）、显式 `TaskHandle::cancel`。
+   线程不可强杀，语义是"任务轮询后自行收敛"。
+4. **panic 兜底**：任务体用 `catch_unwind` 包住 ⇒ panic 也走收尾路径（投递 `TaskFailed`），
+   否则遮罩会永远挂在屏幕上（任务永远不会"完成"）。
+5. **遮罩自带「取消」按钮**：`spawn_task_busy` 默认把它接到该任务的 `CancelToken`。
+
+### loading 遮罩（新增 `src/overlay.rs`）
+
+- **声明式 Modal 层**：由忙碌项驱动 —— `view()` 跑完后框架追加
+  `modal_tagged(BUSY_OVERLAY_TAG)`；忙碌项清空就不再声明 ⇒ 下一帧 `align` 的 stale 清理
+  自动删层（零手工增删）。
+- 视觉：Modal backdrop（主题 token）+ 居中卡片（标题行 = 三点脉冲 spinner + 文案；
+  确定进度 ⇒ 进度条 + `done / total`；可取消 ⇒ 「取消」按钮）。
+- **动画不重跑 `view()`**：spinner 是 `CustomNode`（相位读挂钟）⇒ `WindowCtx::animate`
+  每 `SPIN_PERIOD`(33ms) 只把**卡片矩形**标脏重绘；`next_wakeup` 在有遮罩时返回定时唤醒
+  （遮罩消失 ⇒ 回到空闲零功耗）。
+- 配套通用能力：`ViewBuf::modal_tagged(tag)` + `Track::root_by_tag(tag)`（层根标签，
+  用户也能给自己的层打标签）、`WindowConfig::auto_busy_overlay(false)`（想自己画遮罩时关掉）。
+
+### Ctx 糖
+
+事件处理器里不必再存 `rt` / `window`：`Ctx::{spawn_task, spawn_task_busy, begin_busy, waker}`。
+
+### 测试 +19
+
+- task（12）：本地队列往返、平台 waker 注入与 `is_online`、`TaskEvent` 载荷落地、遮罩进度与
+  自动收起、点遮罩取消、协作式取消、窗口关闭取消（连带清遮罩项）、多任务按窗口堆叠、
+  **panic 兜底**、`BusyToken` RAII 与进度更新、取消按钮回调；
+- overlay（4）：spinner 三点落在框内且不重叠、遮罩是带 tag 的 Modal 层且卡片是层根首子节点、
+  忙碌清空后层被清理、可取消 ⇒ 描述里出现按钮；
+- app（2）：**端到端**（起任务 → 遮罩出现 → 动画帧标脏卡片 → 结果落地 Signal → 遮罩消失且
+  回到零唤醒）、遮罩阻断下层按钮交互（Modal 语义）；
+- 示例：新增 `examples/background_task.rs`；gallery 新增「后台任务」演示段（3 秒任务 +
+  实时进度 + 可取消）。
+
+验证：`cargo test --lib` 301 全绿；`cargo clippy --lib --examples` 0 警告；全部示例编译通过。
+
+## 2026-10-06 · 事件系统与 winit 事件循环的统一（自定义事件 / 定时器 / 动画帧）
+
+**问题**（设计复盘）：事件入径本是三条并行、语义重叠的通道，且帧唤醒来源散落：
+
+| # | 入径 | 现状问题 |
+|---|---|---|
+| 1 | winit → `InputEvent`/`Event` → `dispatch` | 只承载"输入"，自定义事件无处可去 |
+| 2 | `AppEvent::External` → `WindowCtx::external` → `on_external` | 只有"从线程投递"这一半能力（`TaskCtx::post`），UI 线程内没有对应入口 |
+| 3 | `Ctx::request` → `RequestQueue` → `drain_requests` | 与 #2 语义重叠（都是延迟投递），却只能 UI 线程内用 |
+| 4 | 帧唤醒 | `WindowCtx::next_wakeup` 手写 if-else 汇总（闪烁 / tooltip / spinner），每加一种动画要改两处 |
+
+**结论：不引入第四种机制，收敛成"两条入径 + 一个时钟"**。
+
+- 输入事件（#1）保持原样：它有自己完整的语义（命中、路由、捕获、IME）。
+- **消息**：#2 升格为通用通道 —— 自定义事件、任务结果、跨线程数据全走 `Waker`
+  （平台 `EventLoopProxy` ↔ 无头本地队列）。#3 降级为**框架控制消息**（开窗/关窗），
+  文档明确"别拿它当事件总线"。
+- **时钟**（#4）：定时器与动画帧做成 `Runtime` 侧的一份表，平台层回到"只问下次何时醒"。
+
+**为什么不做 `App<UserEvent>` 泛型化**（像 winit 那样）：泛型会传染到 `App` / `WindowConfig` /
+`Rc<dyn WindowView>` 的擦除层，并让"无头可测"变难。运行时 `downcast`（`ExternalData`）
+在类型安全（发射器 `Emitter<T>` 仍是编译期类型化的）+ 擦除层不变之间取得平衡。
+
+### 新增：自定义事件（`event.rs`）
+
+- `Runtime::emit(window, msg) -> bool` / `Ctx::emit(msg)`；
+- `Emitter<T>`（`Clone + Send + Sync`，内部只存 `WakerSlot` ⇒ 天然可跨线程，**无需 unsafe**）；
+- `Runtime::emit_global(Arc<T>)` 广播到所有窗口；
+- 分发语义不变：`WindowCtx::external` 先让框架消费内部消息（任务/定时器），再 `on_external`。
+
+### 新增：统一时钟（`src/timer.rs`）
+
+- `Runtime::set_timeout(window, dur, f)` / `set_interval(..) -> TimerHandle{cancel, is_active}`；
+  回调是 `FnMut(&mut Ctx)`（UI 线程，可改状态/开窗/起任务），**`TimerHandle` 的 Drop 不取消**
+  （`let _ =` 写法不该自杀）；
+- `Runtime::request_animation(window)` + `ViewModel::on_animation(cx, now, dt)`（经典 RAF 语义：
+  回调里再请求才继续；`on_tick` 仍是每帧都跑）；
+- `Runtime::next_deadline(window)`（定时器最早到期 ∪ 动画帧时刻）；
+  `WindowCtx::next_wakeup()` 汇总裁剪 = 闪烁 / tooltip / spinner / 时钟，平台层零改动；
+- 窗口关闭清定时器（与任务取消并列）。
+
+### 顺带修掉的两个"名不副实"
+
+- `Ctx::damage_all()` 以前只是 `request_repaint()` 的别名（**不产生脏区** ⇒ 自绘动画什么都画不出来），
+  现在真的走 `Cmd::DamageAll` → `track.damage_whole_window()`；`request_repaint()` 保留原语义并写清区别。
+- `App::frame_all()` 以前只跑 `frame()`，不跑 `tick()` ⇒ 无头驱动下定时器/动画**根本不触发**。
+  现在与平台层一帧同构：消费外部事件 → tick（定时器 → 动画 → `on_tick`）→ frame。
+
+### 测试 +12
+
+timer（4）：一次性到期即消失、周期重排直到 cancel、动画请求一次性 + 驱动 deadline、
+按窗口隔离与关窗清理；event（5）：`emit` 落本地队列、`emit_global` 广播、`Emitter` 跨线程
+（编译期 `Send + Sync` 断言 + 真线程投递）、`request` 与 `emit` 互不干扰、
+`ExternalData` 为统一载荷；app（3）：定时器一次性/周期/取消、动画帧只在请求时跑且 `dt` 真实、
+自定义事件（UI 线程 + 线程内发射器）经帧驱动到达 `on_external`。
+
+示例：新增 `examples/event_clock.rs`（自绘相位动画 + 每秒 interval + 3 秒 timeout 发自定义事件 +
+跨线程发射器）。
+
+验证：`cargo test --lib` 313 全绿；`cargo clippy --lib --examples` 0 警告；全部示例编译通过。
+
+## 2026-10-06 · 脏区机制的成本核算与取舍（附基准 + `full_repaint` 逃生舱）
+
+**背景**：有人问"脏区剔除值不值得，是否干脆有 dirty 就整窗重绘"。先把真实成本量出来再决定。
+
+### 现有实现规模（生产代码约 330 行 + 测试约 150 行）
+
+| 环节 | 位置 | 规模 |
+|---|---|---|
+| 脏区登记（矩形集 + 整窗标志 + 节点→脏区换算） | `track.rs`（`damage`/`damage_all`/`damage_rect`/`damage_whole_window`/`take_damage`/`damage_bounds`/`mark_paint_dirty`） | ~30 行 |
+| 登记点散布（重排、位移、层增删、主题、cmd） | `layout.rs` / `align.rs` / `app.rs` / `cmd.rs` | ~40 行 |
+| 场景剔除（按脏区裁原语） | `render/scene.rs` | ~15 行 |
+| 脏区 → 光栅批次（裁剪/取整/去重/退化阈值） | `render/raster.rs::damage_batches` | 37 行 |
+| 批次光栅化（scratch 复用 + 逐行拷回） | `render/raster.rs::rasterize` | 101 行 |
+| 剔除与批次同源（防擦除） | `render/mod.rs` | ~30 行 |
+| 局部上屏（物理换算 + `present_with_damage`） | `platform/mod.rs` | ~75 行 |
+
+关键字（damage/脏区/dirty）在源码里共 315 行，含注释与测试。
+
+### 实测（`examples/damage_bench.rs`，1280×720，release）
+
+```text
+节点  151 | 整窗 4.6ms (921600px) | 局部  49µs (588px) | 空闲 0.5µs | 94×
+节点  601 | 整窗 2.6ms (921600px) | 局部 114µs (588px) | 空闲 1.6µs | 22×
+节点 1801 | 整窗 7.2ms (921600px) | 局部 388µs (637px) | 空闲 5.7µs | 19×
+```
+
+两个结论：
+
+1. **脏区把光栅化从 ms 拉回 µs**（整窗占 60fps 预算的 15~43%），空闲帧几乎为零
+   ——"有脏才画"确实成立，**不该退化**。
+2. **局部重绘耗时随节点数线性增长**（49µs → 388µs）：瓶颈已不在光栅化，而在
+   **每帧全量重建场景 + 剔除**（O(N)）。下一步该做的是增量场景 / 保留 draw list，
+   而不是继续抠脏区。
+
+### bug 风险（两类，都有真实案例）
+
+- **漏标**（登记不完备 ⇒ 残影）：换主题没标整窗脏（`Dirty::PAINT` 单独无效）、
+  文本"测度换行口径"与绘制不一致、`CustomNode` 自绘改了状态没 `cx.damage(..)`。
+- **多剔**（剔除与绘制不一致 ⇒ 擦除）：整窗回退时场景仍按细碎脏区剔除
+  （gallery 嵌套滚动整页空白那个 bug）、同批次内图片 blit 与 vello 原语的顺序。
+
+缓解：`damage_batches` 的自动退化阈值（碎片 > 8 或面积 > 45% ⇒ 整窗）把最危险的
+"碎片场景"引到安全路径；`Cmd::DamageAll` 提供"拿不准就整窗"的兜底。本轮还修了两处
+同类问题：`Ctx::damage_all()` 名不副实（不产生脏区）、`App::frame_all()` 不跑 tick。
+
+### 与 compositor 的关系（结论写进代码注释）
+
+**不是一回事，是正交的两层**：
+
+- **compositor（合成器）** 回答"**怎么叠**"：把多来源（窗口 surface / 层 / 图元）按层序
+  与透明度合成最终画面。本库的"层序遍历 + SrcOver 到一张 pixmap"就是**简易 compositor**
+  （内容层 / 弹层 / Modal 遮罩的层序合成）。
+- **damage（脏区）** 回答"**这次要重算哪里**"：现代合成器一律以脏区为单位增量合成
+  （Wayland `surface.damage`、Win32 `WM_PAINT` 的 update region、macOS `setNeedsDisplayInRect`）。
+  我们的对应链路：`Track.damage` → 场景剔除 + 批次光栅化（软件合成）→
+  `softbuffer::present_with_damage`（把脏区交给**系统合成器**）。
+
+所以两者可以各自独立演进（换 GPU 后端时脏区机制照样有效）。
+
+### 落地
+
+- `WindowConfig::full_repaint(bool)`：整窗重绘逃生舱（默认 off）。用途：残影类 bug 的
+  一键对照（打开后残影消失 ⇒ 某处漏标脏区）、正确性优先于性能的场景。帧里就一行
+  `damage.clear(); damage_all = true;`。
+- `examples/damage_bench.rs`：把上面的测量固化成可复跑的基准（带结论注释）。
+- 测试 +1：`full_repaint_mode_always_redraws_the_whole_window`（同一改动在两种模式下
+  的 raster 像素数：局部 < 整窗 = 400×300）。
+
+验证：`cargo test --lib` 314 全绿；`cargo clippy --lib --examples` 0 警告；全部示例编译通过。
+
+## 2026-10-06 · 评估"多碎片 → 单包围盒"简化：实测否决，但找到了真瓶颈
+
+### 做了什么（为评估提供可测工具，默认行为不变）
+
+- 三种策略都实现成**纯函数**：`damage_batches`（现状·精确碎片）、`damage_batches_union`
+  （单包围盒）、`damage_batches_bands`（水平行带：按 y 合并成互不重叠的带）。
+- `Rasterizer::rasterize` 拆成 **`batches_for`（批次决策）+ `rasterize_batches`（执行）**
+  —— 决策与执行解耦，剔除与光栅化可以共用同一批次列表（同源不再靠约定），也便于注入策略做基准。
+- `examples/damage_bench.rs` 增加"策略对比"与"真实光栅化耗时"两段。
+
+### 实测（1280×720，场景 2000 原语，release，30 次平均）
+
+| 场景 | 精确碎片（现状） | 单包围盒 | 水平行带 |
+|---|---|---|---|
+| 滚动 16 条横带 | 1 批 / 921600px / **2.15ms** | 1 批 / 870400px / **1.89ms** | 16 批 / 409600px / **8.39ms** |
+| 分散 4 块（四角） | 4 批 / 24000px / **1.84ms** | 1 批 / 830800px / **2.21ms** | 2 批 / 74400px / **1.12ms** |
+| 同列 6 行 | 6 批 / 36000px / **2.64ms** | 1 批 / 46000px / **0.46ms** | 6 批 / 36000px / **2.63ms** |
+
+### 结论
+
+1. **成本模型**：`每帧 ≈ 2.5ns/px × 像素数 + ~0.4ms × 批次数`（2000 op 场景）——
+   因为 `rasterize_batches` 里**每个批次都把整个场景的 op 重放一遍**。
+   于是**批次数是最贵的维度**，像素数反而是次要的。
+2. **现状的"碎片 > 8 或面积 > 45% ⇒ 退化整窗"是对的**：它把批次数压回 1。
+3. **单包围盒（简化方案）否决**：实现更简单、3 个场景里 1 快 2 慢，且"少量分散更新"场景
+   像素膨胀无上界（四角 4 块：24000 → 830800px，35×）；对"状态栏/多面板各自刷新"这类
+   UI 是明显倒退。
+4. **水平行带**像素最省（滚动 −56%），但当前**实测最慢**（8.39ms）——瓶颈不在策略，
+   而在"每批重放全场景"。**换策略不能解决问题**。
+5. **真瓶颈与下一步**：做 **per-batch op 裁剪**（每批只提交与它相交的 op；剔除用的包围盒
+   逻辑 `scene::push` 里已经有了），把每批成本从 O(全场景 op) 降到 O(相交 op)。
+   预估滚动场景 16 批：`16 × ~25µs + 1.0ms 像素 ≈ 1.4ms` < 现状 2.15ms；
+   做完之后行带/精确碎片都能兑现像素优势，单包围盒就更没必要了。**（本轮未做，留待决定）**
+
+### 测试 +5
+
+三策略**像素级完备性**（脏矩形里每个像素都落在某批次内——注意行带会把矩形按 y 切开，
+不能断言"某批次完整包含某矩形"）、行带**互不重叠**、行带**局部性**（上下分离两块 ⇒ 两个带，
+而单包围盒吃掉整窗）、平凡情形（空 / 整窗）三策略一致、`batches_for` 与 `rasterize` 同源。
+
+验证：`cargo test --lib` 319 全绿；`cargo clippy --lib --examples` 0 警告。
+
+## 2026-10-06 · 虚拟列表升格为框架 API（`ViewBuf::virtual_list`）
+
+**背景**：虚拟化此前只是测试里的 40 行 A 档组合函数（`app.rs::tests::virtual_list`），
+examples 没有任何演示，pdfkit 侧栏是反例（`for pn in 1..=total`，1000 页 ≈ 近万节点）。
+
+### API
+
+- `VirtualListState`（`Clone`；内部一个 `Signal<usize>`）记住"可见窗口起点"；
+- `ViewBuf::virtual_list(&state, items: &[T], key_fn: fn(&T) -> K, item_h, viewport_h, item)`
+  —— 必须在**滚动容器**内声明；`ScrollChanged` 时把偏移换算成起点写回
+  （**只在跨行时才写**，避免每帧无谓重跑 `view()`）。
+
+### 相对旧内联实现的三处改进
+
+1. **空占位节点 → 虚拟 padding**：内容列 `padding_top = first×item_h` /
+   `padding_bottom = 余量×item_h` 撑出真实内容总高（滚动条因此"诚实"），
+   比"上下两个空 row"少一个节点，也不必给框架加 `content_size` 覆盖字段。
+2. **改用 `keyed_list` 复用**：旧版按下标对齐——纯文本行看不出问题，但**行内有状态
+   （选中 / 输入框 / 展开态）时滚动一屏就会错配**；新版按 `key_fn` 匹配
+   （测试断言：重叠行在滚动前后 `NodeId` 不变）。
+3. **窗口起点向下取整**（`floor` 而非 `round`）：偏移落在半行时，视口顶部露出的那一行
+   也要物化，否则顶部会缺一块。
+
+### 顺带的框架小改
+
+- `keyed_list` 的 `key_fn` 从 `fn` 指针放宽为 `impl Fn`（`virtual_list` 内部要适配
+  `fn(&T)` → `fn(&&T)`，需要捕获）；现有调用点不受影响；
+- 新增 `DescRef::padding_top` / `padding_bottom`（与既有 `padding_y` 配对）。
+
+### 测试（+3 新 / 2 改）
+
+- 新增：**key 复用**（滚动后重叠行 `NodeId` 不变）、**边界**（空列表 / 起点越界 / 单项）、
+  **虚拟占位**（内容列只放可见行、内容高 = `count × item_h`）；
+- 改造：原"只物化可见窗口"与"滚回去能看到更早的项"两个测试改走新 API —— 断言不变、
+  行为一致（等于给新 API 做了回归）。
+
+### gallery
+
+新增「虚拟列表（10000 项）」演示段：点行标记 + 已标记计数 + 清空标记。
+
+验证：`cargo test --lib` 322 全绿；`cargo clippy --lib --examples` 0 警告；示例编译通过。
+
+## 2026-10-06 · pdfkit 侧栏接上虚拟列表（第 2 步）
+
+**前置**：pdfkit 原来依赖 crates.io 的 `lieui 0.1.0-alpha.1`（拿不到新 API）⇒
+`Cargo.toml` 改为 `{ path = "../lieui", version = "0.1.0-alpha.1" }`。
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `Cargo.toml` | lieui 依赖改 path（本地 crate），`Cargo.lock` 随之更新 |
+| `app/model.rs` | `AppState` 加 `page_indices: Vec<u32>`（派生的页索引缓存）+ `sync_derived()`（页数没变就零开销）/ `page_indices()` |
+| `app/controller.rs` | `update()` 里统一 `sync_derived()`（**所有**状态变更的唯一入口 ⇒ 不会漏刷新）；`PdfKitVm.vl: VirtualListState` |
+| `ui/sidebar.rs` | `for pn in 1..=total` → `virtual_list(&vm.vl, st.page_indices(), …)`；固定行外框 `ITEM_H = 80`；`infos` 改为**借用**（原先每帧 `clone()` 全量 PageInfo） |
+
+### 过程中踩到 / 修掉的两个坑
+
+1. **行的外框高必须**等于**虚拟步长**。最初把行高设 76（内容 64 + padding 12）、步长 80
+   （差 4 当"视觉间距"），结果内容总高少了 `可见行数 × 4` ⇒ 滚动条与滚动位置会漂。
+   测试（内容总高 ≈ `count × ITEM_H`）当场抓到。现在行外框 = 80，间距由行内留白提供。
+2. 侧栏内容 = 「页面」标题 + 虚拟列表 ⇒ 滚动容器的 `content_size` 比 `count × ITEM_H`
+   多一个标题高；断言要按区间写（`[list_h, list_h + 60)`）而不是等号。
+
+### 测试（+2）
+
+- `sidebar_materializes_only_the_visible_pages`：500 页文档只建 **< 40 行**节点（实测 19 行），
+  且内容总高 ≈ `500 × 80`（虚拟 padding 撑出来的滚动范围）；
+- `page_indices_follow_the_page_count`：文档关闭 ⇒ 页索引清空且不物化任何页行。
+
+验证：`cargo test`（pdfkit）24 全绿；`cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · 框架补右键语义 + pdfkit 四项优化
+
+### 框架：右键终于有语义了（`src/input.rs`）
+
+以前右键被合成为普通 `Tapped`（"右键也会触发左键行为"：勾选、按下、提交……）。
+现在 `Up` 分支按按键分派：`PointerButton::Right` ⇒ `EventKind::RightTapped`，其余 ⇒ `Tapped`。
+`RightTapped` 早在 `EventKind` 里、但**从未被派发**（本轮补上）。测试 +1。
+
+### pdfkit（四项）
+
+1. **tooltip**：toolbar 全部图标按钮 + 侧栏上下移都挂 `.tooltip(..)`（框架层 600ms 延迟、
+   自动翻转/钳位/主题配色）；顺手删掉 toolbar 顶部"v3 暂无 tooltip 组件"的旧说明。
+2. **线程划分**：新增 `src/app/jobs.rs` —— 打开 / 保存 / 页面操作 / 拆分提取的**纯逻辑**
+   （`Send`，不碰 UI 状态）。UI 线程只做"选路径 → `cx.spawn_task_busy(..)` → `job_finish` 落地"。
+   - 删掉 pdfkit 自造的 `bg.rs`（`BgHandle` / `BgMsg` / `spawn_merge`）与自写遮罩
+     `ui/busy.rs` + `AppState.busy`（改用框架遮罩：线程/进度/取消全免费）。
+   - `LoadedDocument.pdf`：`Rc<Pdf>` → `Arc<Pdf>` ⇒ 整个结构 `Send`，后台算好的
+     **文档整包搬回** UI 线程（UI 侧连重新解析都省了）。
+3. **统一打开入口**：删除"合并 PDF"独立模式 —— `MergeState`、7 个 `Merge*` 动作、
+   `merge_*` 方法族、`ui/merge.rs` 整文件、toolbar 的合并按钮全部移除。
+   「打开」改为 `pick_files()`：**单选 = 普通打开；多选 = 按顺序合并成一个工作区文档**，
+   之后照常预览 / 编辑 / 保存 / 另存为。
+4. **页面右键菜单**：侧栏行容器监听 `RightTapped` → `state.page_menu` → 声明式
+   `popup_at(行 key, Placement::Below)` 弹「上移一页 / 下移一页 / 删除此页」
+   （越界项 `.enabled(false)`；点别处由框架 `Dismissed` 轻关闭）。
+   注册在**行容器**而非行主体：checkbox 与图标按钮是它的兄弟子树，冒泡也能到 ⇒ 整行可右键。
+
+### 测试
+
+- lieui +1：`right_button_synthesizes_right_tapped_instead_of_tapped`（323 全绿）。
+- pdfkit：`jobs` 5（单文件打开 / 多文件顺序合并 / 空输入与坏文件 / 页面操作三段 /
+  保存与提取落盘）、controller 4（打开落地文案 / 页面操作落地与页码收敛 / 菜单状态独立 /
+  保存清 dirty 且路径跟随）、侧栏 2（500 页只物化可见行、页数变化同步）⇒ 26 全绿。
+
+验证：lieui `cargo test --lib` 323 全绿 + clippy 0 警告；pdfkit `cargo test` 26 全绿 +
+`cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · 多文件打开的进度反馈（细分进度 + 明细文案 + 可取消）
+
+**问题**：批量打开多个 PDF 时只有"每个文件一格"的粗进度（5 个文件 ⇒ 5 跳），
+单个大文件全程只有不确定动画；而且**打开过程不响应取消**（遮罩上的按钮点了没用）。
+
+### 框架侧（`task.rs` / `overlay.rs`）
+
+- `TaskCtx::progress_with(done, total, detail)`：进度与**明细文案**一条消息一次唤醒。
+  意义在于 `done/total` 可以比"文件数"更细（把每个文件拆成"读盘/解析/合并"三格），
+  于是**进度条在大文件内部也会走**；`detail` 是可以给人看的一行字。
+- `BusyItem.detail` + `BusyToken::set_detail(..)`（UI 线程侧的忙碌段同样能用）。
+- 遮罩渲染：有 `detail` 就显示它，否则退回 `done / total`（既有调用者行为不变）。
+
+### pdfkit 侧（`jobs.rs` / `controller.rs`）
+
+- `open_job(paths, cancel, progress)`：新增 `OpenProgress { done, total, detail }`；
+  每个文件占 3 格（读取 / 解析 / 合并），`total = 文件数 × 3` ——
+  首个文件没有合并步骤，但它的块仍占满，末尾多一格收尾，无论几个文件比例都不失真。
+  文案形如 `第 2 / 3 个文件 · 正在合并 b.pdf`、收尾 `正在生成预览…`。
+- **取消接上了**：每个阶段边界查 `CancelToken`（遮罩上的「取消」按钮由框架默认接到它），
+  取消后返回 `已取消打开（<阶段>）` ⇒ 状态栏可见、遮罩自动收起。
+- `controller::open`：改为 `ctx.progress_with(..)` + `ctx.cancel_token()`；
+  开始时先写状态栏（`正在打开 N 个文件（按顺序合并）…`），遮罩标题同文案。
+
+### 测试
+
+- lieui +3：`progress_with` 携带明细（进度与文案都跟着上报走）、`BusyToken::set_detail`、
+  遮罩**优先显示明细**（有明细就不再显示 `done / total`）。
+- pdfkit：改写 2 个打开测试（单文件三格 `(0,3)→(1,3)→(2,3)`；3 文件 9 格且 `done` 严格
+  单调、`读取` 3 次 / `合并` 2 次、文案点名当前文件），新增取消测试（预置取消 ⇒
+  `已取消打开`）⇒ 27 全绿。
+
+验证：lieui `cargo test --lib` 326 全绿 + clippy 0 警告 + 示例编译通过；
+pdfkit `cargo test` 27 全绿 + `cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · tooltip 文本走墨迹盒居中（附带修"光学对齐吃掉 padding"）
+
+**问题**：tooltip 卡片是"文本 + 上下各 6px 内边距"，但文本按**行盒**绘制 —— 行盒的
+ascent/descent 不对称（12px 字号下约 1px 偏差），于是上下留白看着不相等、文本略往上顶。
+
+**修法**（两处，第二处是顺带发现的真 bug）：
+
+1. `WindowCtx::open_tooltip_layer`：tooltip 的文本节点置 `spec.optical_align = true` ——
+   节点高变成**墨迹高**，于是上下 padding 对称、字形视觉中心与卡片中心重合。
+2. `widgets::Kind::Text`：光学对齐路径改为按**内容盒**（`content_rect(n, rect)`，rect 去掉四边
+   padding）放墨迹。此前 `push_text` 的 `(ink, center=false)` 分支把墨迹上缘对到 **border box**
+   上缘 ⇒ padding 被吃掉（节点高 = 墨迹 + 12，却只在下方留 12）——只加 (1) 反而更偏。
+   Input 组件一直是按 padding 定位的（`pad_top`/`pad_left`），这次把文本节点也统一过来；
+   非光学路径保持原样（行盒自带 leading，既有布局按 border box 定位，不动的风险最小）。
+
+**测试 +2**（都做了"去掉修正就会红"的验证）：
+
+- `widgets::optical_align_keeps_the_padding_around_the_ink`：盒高 = 墨迹高 + 12、
+  墨迹上/左缘落在内容盒上缘、上下 padding 相等。去掉修正后报
+  `墨迹上缘落在内容盒上缘：0 vs 6`；
+- `app::tooltip_text_is_centered_by_its_ink_box`（**像素级**）：tooltip 浮出后，
+  盒高 = 墨迹高 + 12；上/下 padding 横带是纯底色、字形只出现在中间墨迹带里。去掉修正后报
+  `顶部 padding 带是纯底色`。
+
+注：pdfkit 依赖的是 crates.io 上的 `lieui 0.1.0-alpha.1`，看不到本地的这些修复
+（要生效需改回 `path = "../lieui"` 或发版）。
+
+验证：lieui `cargo test --lib` 328 全绿 + clippy 0 警告。
+
+## 2026-10-06 · loading 遮罩的图标/文本光学对齐 + pdfkit 依赖核对
+
+### 遮罩卡片文本走墨迹盒（`overlay.rs`）
+
+上一轮修 tooltip 时发现的同类问题：遮罩标题行是 `[spinner(18×18), 文本]` + `align_items(Center)`，
+行盒居中让**盒中心**对齐，但字形墨迹在行盒里偏 ~1px（ascent/descent 不对称）⇒ 标题与
+三点 spinner 的视觉中心对不齐。改用 `optical_align(true)`（盒高 = 墨迹高 ⇒ 墨迹中心 = 盒中心）；
+明细行同理（间距按墨迹算，卡片里的 14px 才均匀）。
+
+顺带排查了框架自绘的图标混排面：`view.icon(..)` 本身就是"带图标字体的 `Kind::Text`"、
+`icon_button` 是按钮（字形双轴居中，无参照物不显偏），checkbox/radio/switch 的方框在自己
+矩形内居中 —— 框架内需要墨迹对齐的**只有 tooltip 与遮罩标题**，均已覆盖。
+用户界面里的"图标 + 文本"混排按 gallery 的建议自行加 `.optical_align(true)`。
+
+测试 +1：`overlay_texts_are_ink_aligned_with_the_spinner` —— spinner 与标题的矩形中心重合、
+标题盒高 = 墨迹高（⇒ 墨迹中心即盒中心）、明细行同走墨迹盒。
+
+### pdfkit 的依赖核对（结论：**本来就是本地 path**）
+
+`pdfkit/Cargo.toml` 一直是 `lieui = { path = "../lieui", version = "0.1.0-alpha.1" }`：
+
+- `cargo tree -p pdfkit` ⇒ `lieui v0.1.0-alpha.1 (D:\code\rust\lieui)`（含 `crates/lieui-*` 三个子 crate）；
+- `Cargo.lock` 的 lieui 条目**没有** `source = ` 行（= path 依赖），全树只有这一个 lieui；
+- pdfkit 根目录无 `.cargo/`、无 `vendor/`，没有 patch 干扰；
+- 佐证：pdfkit 正在用**本次会话新加**的本地 API（`Ctx::progress_with` / `Ctx::cancel_token`），
+  发布版里根本没有这些 —— 若走 registry 早就编译不过。
+
+（更正：此前一轮我判断"pdfkit 用的是 crates.io 版本"有误 —— 当时只在 registry 缓存里查到
+了 API 就下了结论，没有核对 `cargo tree`。依赖本就是本地的，因此 tooltip 墨迹修复、
+`progress_with` 等改动对 pdfkit **立即生效**。）
+
+验证：lieui `cargo test --lib` 329 全绿 + clippy 0 警告；pdfkit `cargo test` 27 全绿（对着本地 lieui）。
+
+## 2026-10-06 · pdfkit 打开 PDF 的三处状态问题（确认门 / 合并文档 / 侧栏归零）
+
+起因：复盘"已打开 PDF 后再点「打开」"的实际行为 —— 旧实现**静默整体替换**：`finish_open`
+无条件换掉 `loaded`、`dirty = false`（编辑无提示丢失）、`vl`（侧栏滚动位置）不重置；
+另外多文件合并后 `loaded.path` 只是第一个文件，「保存」会把合并结果覆盖掉它。
+
+### ① 打开 / 关闭 统一确认门（`PendingAction`）
+
+把只有关闭才有的守卫推广成一件事的两个入口：
+
+- `AppState.confirm_close: bool` → `pending: Option<PendingAction>`，`PendingAction { Close, Open(Vec<PathBuf>) }`；
+- `open()` 拆成「选路径 → `guard_unsaved(Open(files))` → `start_open(cx, files)`」：
+  有未保存改动就挂起待办、弹确认；**确认后不再让用户重选文件**（路径在弹窗前就选好了）；
+- 弹窗文案 / 确认按钮由 `pending` 决定（「不保存退出」/「不保存并打开」）；
+- `on_close_request`：弹窗已是「退出」⇒ 放行（第二次确认）；原本是「打开」⇒ **改写待办**为退出
+  （文案随之切换）—— 否则弹窗开着点关窗会静默丢编辑（旧代码的 `confirm_close` 短路也有这个洞）；
+- `take_discarded()` 取动作时**只在「退出」抹 dirty**：「打开」先不动 —— 打开失败时旧文档的编辑
+  必须仍是"未保存"，成功后由 `finish_open` 重新算。
+
+### ② 合并文档不再糊里糊涂覆盖第一个文件
+
+- `LoadedDocument.merged_from: usize` 记住来源文件数；
+- `finish_open`：`dirty = 文件数 > 1`（合并结果在磁盘上并不存在，如实标脏）；
+- `save()`：`merged_from > 1` ⇒ 直接改走「另存为」并给状态栏提示，**绝不覆盖参与合并的第一个文件**；
+- 「另存为」默认名用 `merged_<原名>`（`save_as_default_name`）；
+- 落盘后（`JobDone::Saved`）`merged_from = 1`、`dirty = false` ⇒ 之后「保存」恢复正常。
+
+### ③ 侧栏滚动位置归零
+
+`finish_open` 补 `self.vl.set_first(0)`。虚拟列表的窗口起点是 VM 侧状态、不跟着文档走，
+留着它会让新文档停在上一份的滚动位置（第 1 页在视口外；新文档更短时还会因为
+`virtual_list` 的 `first.min(count)` 先渲染一帧空窗口）。
+
+### 测试 +3（30 全绿）
+
+- `unsaved_edits_guard_opening_and_closing_alike`：无改动不拦 / 有改动挂起且**确认前 dirty 不掉** /
+  取消后编辑仍在 / 打开确认不抹 dirty（失败语义）/ 退出确认抹 dirty / 幂等；
+- `merged_open_is_dirty_and_never_overwrites_the_first_file`：`merged_from=2`、`dirty=true`、
+  `path` 仍是第一个文件、`vl` 归零、默认名 `merged_a.pdf`、另存为后回到普通文档；
+- `single_file_open_clears_dirty_and_resets_the_sidebar_scroll`。
+
+验证：pdfkit `cargo test` 30 全绿 + `cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · 快活儿看不见遮罩（pdfkit 报告）→ busy 最短可见时间
+
+**症状**：pdfkit 里已打开一个 PDF，再点「打开」选新文件 —— **看不到"正在打开"的遮罩**。
+
+**定位**（实测支撑）：`open_job` 打开一个 1 页 PDF 只要 **4.5ms**（debug；release 更快），
+而一帧（1100×780 全窗重绘 + softbuffer 上屏）是十几毫秒量级。平台的完成消息走
+`user_event` → `ctx.external`（收遮罩），比"下一帧"先到 —— 于是那一帧里忙碌项已经没了，
+**遮罩一帧都没画出来**。（多文件合并耗时长，所以那时能看见；这也解释了为什么只在快路径上暴露。）
+
+### 修法：busy 最短可见时间（框架能力）
+
+- `Runtime::set_busy_min_visible(Duration)`（默认 `ZERO` = 老行为，不等待）；
+- `BusyItem` 增 `since` / `hide_at`；`end_busy` 若"才出现就结束"则不立刻移除，而是记下
+  `hide_at = since + min`；帧驱动每帧开头 `Runtime::reap_busy(now)` 收掉到点的项
+  （`WindowCtx::frame` 里调，保证"先收尾、再声明遮罩"的顺序）；
+- `WindowCtx.has_busy`（每帧刷新）取代原来的"有遮罩卡片就唤醒"判断 ⇒ 挂着等收尾的那段时间
+  仍有 30fps 唤醒（驱动 spinner + 到点收尾）；收干净后回到零唤醒；
+- pdfkit：`run_windowed()` 里 set 400ms —— 快点也有反馈，长任务不受影响（`now >= since+min` 时
+  照旧立即收起）。
+
+默认零 ⇒ 既有测试与行为完全不变（331 全绿）。
+
+### 测试 +2（都验证过"去掉修正就会红"）
+
+- `task::busy_overlay_is_held_for_the_minimum_visible_time`：任务表已清空但遮罩项还在
+  ⇒ 到点前不 reap、到点后 reap 掉、幂等；
+- `app::a_fast_busy_section_still_shows_the_overlay`：忙碌段在两次出帧之间开始又结束
+  （`begin_busy` + 立刻 `finish`），下一帧遮罩**必须在**、`next_wakeup` 有值；到点后层消失、
+  回到零唤醒。
+
+验证：lieui `cargo test --lib` 331 全绿 + clippy 0 警告；pdfkit `cargo test` 30 全绿 +
+`cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · 图片盖住浮层（真凶）：光栅层不再把图片统一放到批次末尾
+
+**症状（pdfkit 复报）**：加上"最短可见时间"后**仍然看不到"正在打开"遮罩**；用户直接指出
+"应该是 PDF 预览挡住了 modal"。**诊断正确** —— 这不是层序问题，是光栅层内部顺序：
+
+`rasterize_batches` 里图片 op 绕开 vello（手动 blit），原实现把它**收集到批次末尾统一 blit**：
+
+```rust
+// 旧代码注释（原文）：已知限制：blit 在该批次的所有 vello 原语之后 ⇒ 同批次内图片总在最上层
+```
+
+于是预览图（`Op::Image`）盖住了它**之后**声明的 Modal 背板与卡片（`Op::Rect`）—— 层序、
+描述顺序、`align` 都没错，只有光栅合成顺序错了。M4 时代记录在案的"已知限制"（当时陈列馆里
+图片不与浮层重叠，就没暴露）在 PDF 预览这种"整窗图片 + 浮层"场景下变成硬伤。
+
+### 修法：按 op 顺序就地合成（`raster.rs`）
+
+- 新增 `Rasterizer::flush_segment(pending, bw, bh)`：把当前累积的 vello 原语 `flush` +
+  `render_with`（SrcOver 合成进批次画布）后 `reset`；
+- 批次内的循环改为**顺序遍历**：遇到 `Op::Image` ⇒ 先 `flush_segment`（把之前的原语落地），
+  再把图片 blit 到当前位置；普通 op ⇒ `submit` 累积；批次结尾再 `flush_segment`。
+- 关键性质：每段只渲染**自己的**原语（`reset` 后场景为空）⇒ 几何总量不变，代价只是
+  "图片边界处多一次 `render_with` 的固定开销"；**连续多张图片**之间没有原语 ⇒ 不额外分段
+  （`pending` 为假时 `flush_segment` 是 no-op）。
+- 仍未支持：图片不参与 `PushClip` 裁剪栈（滚动容器里的图片不会被裁）、最近邻采样
+  ——已在 `blit_image` 的文档里写明。
+
+### 测试 +2（都验证过"改回旧行为就会红"）
+
+- `raster::primitives_after_an_image_are_painted_above_it`（像素级）：图之后画的蓝条必须压在
+  红图上；旧行为下 `(14,14)` 是红 ⇒ FAILED；
+- `app::busy_overlay_covers_a_full_window_image`（端到端）：整窗图片 + 忙碌遮罩 ⇒ 遮罩卡片
+  底色必须出现在图上；旧行为下该像素仍是红（= 用户看到的"预览挡住 modal"）⇒ FAILED。
+
+验证：lieui `cargo test --lib` 333 全绿 + clippy 0 警告 + 示例编译通过；
+pdfkit `cargo test` 30 全绿 + `cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · pdfkit 新增「添加」：把更多 PDF 续到当前文档末尾
+
+**动机**：多文件合并只能在「打开」那一次选定，之后没法再往工作区里加文件。
+
+### 语义分工（这次刻意做得不对称）
+
+| | 基准 | 未保存改动 | 当前页 / 勾选 | 落盘 |
+|---|---|---|---|---|
+| **打开** | 磁盘上的新文件 | 先过确认门（可丢） | 重置（归 1 / 清空） | `merged_from` = 文件数 |
+| **添加** | **内存里那份文档**（含编辑） | **不动、不确认** | **保持不变** | `merged_from += 本批文件数` |
+
+「添加」不丢任何东西（当前编辑就是基准的一部分），所以**不需要**确认门 —— 这是它与
+「打开」的本质差别。
+
+### 改动
+
+- `jobs::append_job(doc, files, cancel, progress)`：在**已有文档**后面逐文件 `merge_pdfs_mem`，
+  末尾 `reparse` 出新的预览数据；进度 `total = n×3 + 1`（每文件 读/解析/追加 三格 + 收尾一格），
+  文案形如 `第 2 / 3 个文件 · 正在追加 b.pdf`，阶段边界查 `CancelToken`（取消 ⇒
+  `已取消添加（<阶段>）`）；
+- `OpenProgress` 更名 `FileProgress`（打开与追加共用）；
+- `JobDone::Added { result, added }` + `job_finish` 分支：换掉 doc/pdf/infos、`merged_from += added`、
+  `dirty = true`（内存 ≠ 磁盘 ⇒「保存」照旧走另存为）、当前页与勾选不动，状态栏
+  `已添加 2 个文件（2 -> 6 页，共 3 个来源）`；
+- `Action::Add` + `controller::add()`：没打开任何文档时退化成「打开」（按钮不至于点不动）；
+- 工具栏在 `total > 0` 时显示 `playlist_add` 按钮（tooltip：*添加 PDF：把更多文件的页面追加到当前文档末尾*）。
+
+### 测试 +3（33 全绿）
+
+- `jobs::append_job_appends_pages_to_the_existing_document`：2 + 3 + 1 = 6 页、预览数据同步、
+  7 格进度单调不提前报满、文案点名"正在追加 b.pdf"；
+- `jobs::append_job_can_be_cancelled`：预置取消 ⇒ `已取消添加`；
+- `controller::added_files_land_and_keep_the_current_page_and_selection`：页数 2→6、`merged_from` 1→3、
+  **当前页与勾选不变**、`dirty` 置位、状态栏文案。
+  （写测试时踩到一次测试隔离问题：复用了 `vm_with_pages` 的临时目录，被同进程另一个用例
+  `remove_dir_all` 掉 ⇒ 追加文件改放自己的 `tmp_dir`。）
+
+验证：pdfkit `cargo test` 33 全绿 + `cargo clippy --all-targets` 0 警告。
