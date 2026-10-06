@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 
-use lieui_geom::{Color, Rect};
+use lieui_geom::{Color, Point, Rect};
 use lieui_layout::{CSSDirection, Dimension, FlexAlign, FlexDirection, FlexStyle};
 
 use crate::event::{EventKind, HandlerSlot};
@@ -37,6 +37,9 @@ pub(crate) struct DescNode {
     pub tab_stop: bool,
     pub tab_index: i32,
     pub handlers: Vec<HandlerSlot>,
+    /// 挂在本节点上的右键菜单（[`crate::menu::ContextMenu`]；`None` = 无）。
+    /// 由框架的"上下文菜单会话"读取：右键命中链里最深带它的节点胜出。
+    pub context_menu: Option<crate::menu::ContextMenu>,
     /// 双向绑定（对齐时覆盖到节点，**不**置脏）
     pub bindings: Bindings,
     pub children: Vec<u32>,
@@ -50,6 +53,7 @@ impl DescNode {
             kind,
             key: None,
             tooltip: None,
+            context_menu: None,
             layout: FlexStyle::default(),
             paint: PaintStyle::default(),
             text: TextStyle::default(),
@@ -157,6 +161,21 @@ impl ViewBuf {
         d.on(kind, f);
     }
 
+    /// 上下文菜单：挂到**当前容器**上（[`DescRef::context_menu`] 的样式糖版本）。
+    ///
+    /// 在 `container(|c| ..)` / `row(|c| ..)` 闭包里给容器挂菜单时用这个 ——
+    /// 闭包参数是 `&mut ViewBuf`，拿不到 `DescRef`：
+    ///
+    /// ```ignore
+    /// v.container(|row| {
+    ///     row.text("第 1 页");
+    ///     row.context_menu(|m| { m.item("复制").on_tap(..); });
+    /// });
+    /// ```
+    pub fn context_menu(&mut self, f: impl Fn(&mut crate::menu::MenuRef<'_>) + 'static) {
+        self.cur().context_menu(f);
+    }
+
     pub(crate) fn set_theme(&mut self, t: Theme) {
         self.theme = t;
     }
@@ -244,6 +263,27 @@ impl ViewBuf {
         let idx = self.push_desc(KindDesc::Box);
         self.node_mut(idx).layout.flex_direction = FlexDirection::Column;
         self.with_container(idx, f);
+    }
+
+    /// [`Self::container`] + 返回该容器自己的元素引用。
+    ///
+    /// 写**组合构件**（菜单项、卡片行、可点击列表行……）时需要：闭包里造完子节点后，
+    /// 还要给**容器本身**设 `hover_background` / 挂 `on_tap` / 标 `disabled`。
+    /// `container` 返回 `()`，那些设置只能落在"当前容器"上（也就是闭包内），
+    /// 于是组合件只能自己建节点 —— 这扇门就是给它们用的。
+    ///
+    /// ```ignore
+    /// // 行：容器自己带 hover 底色与点击，点哪都算
+    /// let row = v.container_ref(|row| {
+    ///     row.text("第 1 页");
+    /// });
+    /// row.radius(4.0).hover_background(t.control_hover).on_tap(|| println!("hi"));
+    /// ```
+    pub fn container_ref(&mut self, f: impl FnOnce(&mut Self)) -> DescRef<'_> {
+        let idx = self.push_desc(KindDesc::Box);
+        self.node_mut(idx).layout.flex_direction = FlexDirection::Column;
+        self.with_container(idx, f);
+        DescRef { v: self, idx }
     }
 
     /// 滚动容器（`overflow_scroll` + 裁剪）
@@ -676,6 +716,9 @@ impl ViewBuf {
     }
 
     /// 锚定浮层：`anchor` 是**节点 key**（布局后才解析成 rect）
+    ///
+    /// 位置与那一行的 rect 有关（`Placement::Below` = 行的左边缘下方），
+    /// **与鼠标位置无关** —— 要"贴着右键点出现"请用 [`Self::popup_at_point`]。
     pub fn popup_at(
         &mut self,
         anchor_key: impl Into<Key>,
@@ -689,6 +732,49 @@ impl ViewBuf {
             |opts| {
                 opts.anchor = Some(Anchor {
                     target: crate::track::AnchorTarget::Key(key),
+                    placement,
+                });
+            },
+            f,
+        );
+    }
+
+    /// 锚定浮层到**某个逻辑坐标点** —— 右键菜单"贴着鼠标出现"的声明式用法。
+    ///
+    /// 与 [`Self::popup_at`] 只差锚点：一个是"某个节点的 rect"，一个是你给的点。
+    /// **定位规则完全一致**（实现上把点当作零尺寸矩形），所以：
+    ///
+    /// - `Placement::Below` ⇒ 菜单左上角在点的下方 `ANCHOR_GAP`（4px）；
+    /// - 点贴近下边缘 ⇒ 自动翻到点上方；贴近右边缘 ⇒ 自动平移回视口内
+    ///   （不会跑出窗口 —— 这正是 [`Self::popup_at`] 里 `Fixed` 做不到的）；
+    /// - 锚点**不需要有对应节点**，所以锚在虚拟列表行上也安全
+    ///   （行被回收/滚出窗口都不会让菜单失去定位）。
+    ///
+    /// `pos` 是**逻辑坐标**（与布局、命中同一坐标系）：从窗口事件拿到的物理光标
+    /// 位置要先除以 `scale`（见 [`crate::platform::physical_to_logical`]）。
+    ///
+    /// ```ignore
+    /// // 右键时把光标位置（逻辑）存进状态，菜单按那个点声明
+    /// if let Some(pos) = st.menu_at {
+    ///     let me = Rc::clone(vm);
+    ///     v.popup_at_point(pos, Placement::Below, |p| {
+    ///         p.on(EventKind::Dismissed, move |_| me.close_menu());
+    ///         // …菜单项
+    ///     });
+    /// }
+    /// ```
+    pub fn popup_at_point(
+        &mut self,
+        pos: Point,
+        placement: Placement,
+        f: impl FnOnce(&mut Self),
+    ) {
+        self.layer(
+            Layer::Popup,
+            None,
+            |opts| {
+                opts.anchor = Some(Anchor {
+                    target: crate::track::AnchorTarget::Point(pos),
                     placement,
                 });
             },
@@ -715,6 +801,36 @@ impl ViewBuf {
             },
             f,
         );
+    }
+
+    /// **框架内部**：往描述树末尾追加一个"贴光标"的菜单弹层（`DescRef::context_menu` 会话用）。
+    ///
+    /// 为什么由框架"追加"而不是让 app 自己声明：菜单的**开关**本身就是框架状态
+    /// （谁被右键了、光标在哪），app 侧只该声明"这个元素**有**菜单"。
+    /// 追加进同一份描述树后，它就是一个普通的 `Layer::Popup` 根 ⇒ 对齐、脏区、
+    /// 轻关闭、锚定落位全部复用现成 machinery（与 loading 遮罩同一手法）。
+    ///
+    /// 层根打上 [`crate::menu::CTX_MENU_TAG`] 标签，好让框架认回"这个弹层是我的"
+    /// （app 自己声明的 popup 同在 `Layer::Popup` 组内，顺序会漂）。
+    pub(crate) fn push_context_menu(
+        &mut self,
+        at: lieui_geom::Point,
+        builder: &crate::menu::ContextMenu,
+    ) {
+        let prev = self.layer_tag;
+        self.layer_tag = Some(crate::menu::CTX_MENU_TAG);
+        self.layer(
+            Layer::Popup,
+            None,
+            |opts| {
+                opts.anchor = Some(Anchor {
+                    target: crate::track::AnchorTarget::Point(at),
+                    placement: Placement::Below,
+                });
+            },
+            |p| p.menu(|m| builder(m)),
+        );
+        self.layer_tag = prev;
     }
 
     /// 拖拽预览（最高层）
@@ -1073,6 +1189,40 @@ impl<'a> DescRef<'a> {
         self
     }
 
+    /// **右键菜单**（对齐 WinUI `ContextFlyout`）：右键该节点时，框架在**光标处**弹出这个菜单。
+    ///
+    /// 与"自己管状态 + [`Self::popup_at_point`]"那套写法的区别：状态、触发、定位、关闭
+    /// 全在框架里，应用**一行状态都不用加**。闭包在弹层被渲染时才跑，所以捕获到的
+    /// `Rc` 状态总是当下的值。
+    ///
+    /// 框架负责的部分（对齐 `ContextFlyout` 的默认行为）：
+    ///
+    /// - **贴光标**出现（不是锚在节点左边缘），下方放不下自动翻上方、靠边自动平移回视口；
+    /// - 命中链里**最深**带菜单的节点胜出（子元素的菜单优先于祖先的）；
+    /// - 点菜单外 / 点别的行的右键 ⇒ 收起；**菜单项被点击后也收起**；
+    /// - 目标节点被回收（列表滚走、页面关闭、该项不再声明菜单）⇒ 自动收起。
+    ///
+    /// 键盘调用（菜单键 / `Shift+F10`）与级联子菜单暂不支持 —— 见 [`crate::menu`] 模块文档。
+    ///
+    /// ```ignore
+    /// v.column(|c| {
+    ///     for row in rows {
+    ///         c.text(&row.title).context_menu(|m| {
+    ///             m.item("复制").on_tap_with(act(self, |s| s.copy(row.id)));
+    ///             m.separator();
+    ///             m.item("删除")
+    ///                 .enabled(row.deletable)          // 禁用项不响应点击
+    ///                 .accelerator("Del")
+    ///                 .on_tap_with(act(self, |s| s.delete(row.id)));
+    ///         });
+    ///     }
+    /// });
+    /// ```
+    pub fn context_menu(mut self, f: impl Fn(&mut crate::menu::MenuRef<'_>) + 'static) -> Self {
+        self.n().context_menu = Some(std::rc::Rc::new(f));
+        self
+    }
+
     pub fn opacity(mut self, o: f32) -> Self {
         self.n().paint.opacity = o.clamp(0.0, 1.0);
         self
@@ -1139,6 +1289,20 @@ impl<'a> DescRef<'a> {
     /// 无参回调 → 包一层（用户态最常用的形态）
     pub fn on_tap(self, f: impl Fn() + 'static) -> Self {
         self.on(EventKind::Tapped, move |_| f())
+    }
+
+    /// 挂一个**已经装箱**的处理器（[`crate::event::Handler`] = `Rc<dyn Fn(&mut Ctx)>`）。
+    ///
+    /// 给**组合构件**用：菜单那种"先把属性攒成规格、闭包结束再统一建树"的写法，
+    /// 处理器是先存进规格的（要能被 `clone`/多次转移），没法再走 [`Self::on`] 的
+    /// `impl Fn` 入口 —— 那条路只能现场装箱。
+    pub fn handler(mut self, kind: EventKind, h: crate::event::Handler) -> Self {
+        self.n().handlers.push(HandlerSlot {
+            kind,
+            handler: h,
+            handled_events_too: false,
+        });
+        self
     }
 
     /// 需要 `cx`（如请求重绘、开窗）时用这个
@@ -1320,6 +1484,30 @@ mod tests {
                 }),
             Some(Key::Str("more".into()))
         );
+    }
+
+    #[test]
+    fn popup_at_point_records_a_point_anchor() {
+        let mut v = ViewBuf::new();
+        v.begin();
+        v.column(|c| {
+            c.text("body");
+        });
+        v.popup_at_point(Point::new(120.0, 60.0), Placement::Below, |p| {
+            p.text("菜单项");
+        });
+
+        let popup = v
+            .roots
+            .iter()
+            .find(|r| r.layer == Layer::Popup)
+            .expect("应声明了 Popup 层");
+        match &popup.opts.anchor.as_ref().unwrap().target {
+            crate::track::AnchorTarget::Point(p) => {
+                assert_eq!(*p, Point::new(120.0, 60.0), "锚点就是那个点");
+            }
+            other => panic!("点锚点应记为 Point：{other:?}"),
+        }
     }
 
     #[test]

@@ -73,6 +73,7 @@ pub mod hit;
 pub mod icon;
 pub mod input;
 pub mod layout;
+pub mod menu;
 pub(crate) mod overlay;
 #[cfg(feature = "winit")]
 pub mod platform;
@@ -101,6 +102,7 @@ pub use event::{
 pub use focus::FocusChange;
 pub use input::{InputEvent, InputStep};
 pub use layout::LayoutStats;
+pub use menu::{ITEM_HEIGHT, MENU_MIN_WIDTH, MenuItemRef, MenuRef};
 pub use reactive::{Dirty, Runtime, Signal, act, act1};
 pub use render::{
     Op, RasterStats, Rasterizer, RenderStats, Renderer, Scene, SceneBuilder, SceneOptions,
@@ -132,6 +134,7 @@ pub mod prelude {
     pub use crate::event::{Ctx, Emitter, Event, EventKind, EventView, PointerButton, PointerId};
     pub use crate::icon::{icon_char, icon_font_family};
     pub use crate::input::InputEvent;
+    pub use crate::menu::{MenuItemRef, MenuRef};
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
     pub use crate::task::{

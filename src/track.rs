@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use lieui_geom::{Color, Rect, Size};
+use lieui_geom::{Color, Point, Rect, Size};
 use lieui_layout::{ComputedLayout, FlexStyle};
 use lieui_text::TextEngine;
 
@@ -614,6 +614,15 @@ pub enum AnchorTarget {
     Key(Key),
     /// 直接指定节点（框架内部用法：tooltip 锚到任意 hover 节点，不要求有 key）
     Node(NodeId),
+    /// 锚到一个**逻辑坐标点**（典型用途：右键菜单"贴着鼠标出现"）。
+    ///
+    /// 定位时它被当成一个**零尺寸的退化矩形**（`Rect::new(x, y, 0, 0)`），
+    /// 于是翻转与视口钳制逻辑与锚节点**完全一致**：`Below` 落在 `y + ANCHOR_GAP`，
+    /// 下方放不下就翻到上方，靠近右/下边缘时自动平移回视口内。
+    ///
+    /// 用 [`crate::view::ViewBuf::popup_at_point`] 声明（它会顺带填好 `Layer::Popup`
+    /// 的默认视觉与关闭策略）。
+    Point(Point),
 }
 
 /// 浮层锚点：布局后才解析成 rect（避免"rect 还没算出来"的老问题）
@@ -726,6 +735,8 @@ pub struct Node {
     pub key: Option<Key>,
     /// 悬停提示（框架级 tooltip：hover 该节点 600ms 后自动浮出；`None` = 无）
     pub tooltip: Option<String>,
+    /// 挂在该节点上的右键菜单（框架的"上下文菜单会话"读取；`None` = 无）
+    pub context_menu: Option<crate::menu::ContextMenu>,
     /// **测度时实际使用的换行宽度**（布局引擎写回；绘制复用同一约束，
     /// 避免"测度按约束换行、绘制不换行"的顶对齐错位）
     pub text_wrap: Option<f32>,
@@ -779,6 +790,7 @@ impl Node {
             kind,
             key,
             tooltip: None,
+            context_menu: None,
             text_wrap: None,
             layout: FlexStyle::default(),
             paint: PaintStyle::default(),
@@ -864,7 +876,11 @@ pub struct Track {
     pub focused: Option<NodeId>,
     /// 指针捕获（多指针）
     pub captures: Vec<(PointerId, NodeId)>,
-    /// 光标闪烁相位（窗口级：同一时刻只有焦点输入框画光标；由帧驱动翻转）
+    /// 光标闪烁**相位**（窗口级：同一时刻只有焦点输入框画光标；由帧驱动翻转）
+///
+/// 分工：这里的 `blink_on` 是"当前该不该画光标"（**状态**，跟焦点节点走），
+/// "下一次翻转的时刻"（**时钟**）在 `WindowCtx` 的会话里 —— 它是一种唤醒源，
+/// 没焦点时为 `None` ⇒ 不产生定时唤醒 ⇒ 空闲零功耗。
     pub blink_on: bool,
 
     // ── 脏区（align / 事件阶段登记，渲染阶段消费）──

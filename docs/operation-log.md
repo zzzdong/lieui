@@ -2161,3 +2161,199 @@ pdfkit `cargo test` 46 全绿。
 
 **结果**：四个 crate 均已上传到 crates.io，`cargo search` 复核 latest 全部是
 `0.1.0-alpha.4`。
+
+## 2026-10-06 · 浮层锚点补上"点"：右键菜单可以贴着鼠标出现
+
+### 起因（一个观察，不是一个需求）
+
+liepdf 侧栏的页右键菜单"位置不跟随鼠标"。查下来不是 bug：菜单用
+`v.popup_at(pn, Placement::Below, ..)`，锚的是**那一行**（key = 页号，由
+`virtual_list` 的 `key_fn` 自动贴上），于是落点 = 行的左边缘下方 4px（`ANCHOR_GAP`），
+翻转与钳制按视口算。**鼠标坐标在 `RightTapped` 处理器里就被丢掉了** —— 处理器只
+`dispatch(OpenPageMenu(pn))`。框架也确实**没有"锚到某点"的能力**：`Placement::Fixed{x,y}`
+虽然能写坐标，但它**跳过翻转与视口钳制**（`layout.rs:211` 明确排除），光标靠近窗口
+下/右边缘时菜单会跑出窗外。
+
+### 框架侧改动（3 处）
+
+- **`track.rs`：`AnchorTarget` 新增 `Point(Point)`** —— 锚到一个逻辑坐标点。定位时它被
+  当作**零尺寸的退化矩形**（`Rect::new(x, y, 0, 0)`），于是 `anchored_origin` 里那套
+  "翻转 → 钳制"**一字不改**就适用于点锚点：贴鼠标、贴近下边缘自动翻上方、贴近右边缘
+  自动平移回视口内。已有两处 `AnchorTarget` 的匹配都带兜底分支，无需改动。
+- **`layout.rs`：`anchored_origin` 的锚点解析改成直接产出 `Rect`**（原先先解 `NodeId`
+  再查 rect）；`Key` 查不到仍返回 `None`（保持原位），`Point` 不可能失败。
+- **`view.rs`：新增 `ViewBuf::popup_at_point(pos, placement, ..)`** —— 与 `popup_at`
+  只差锚点，层类型 / 默认视觉 / 关闭策略完全一致。`popup_at` 的文档补一句"位置与鼠标
+  无关，要贴鼠标用 `popup_at_point`"，避免下次又对着 `popup_at` 找原因。
+
+### 为什么值得单加变体（而不是让调用方自己用 `Fixed`）
+
+1. `Fixed` 不翻不钳 ⇒ 光标在窗口右下角时菜单**出界**，调用方得自己拿窗口尺寸再钳一遍
+   （而 `view()` 手里没有窗口尺寸，只有 `on_tick` 读得到 `Runtime::window_size`）；
+2. 点锚点**不需要有对应节点存在** ⇒ 可以放心锚在虚拟列表行上：行被回收 / 滚出窗口都不会
+   让菜单失去定位（`Key` 锚点在那种情况下会静默停在原位 —— 这是旧实现的隐藏坑）。
+
+### 测试 +6（lieui 347 全绿）
+
+`layout`：`point_anchor_puts_the_popup_under_the_cursor`、`point_anchor_flips_above_near_the_bottom`、
+`point_anchor_is_pulled_back_inside_the_window`、`point_anchor_needs_no_node`、
+`point_anchor_honors_other_placements`；`view`：`popup_at_point_records_a_point_anchor`。
+
+后两条断言**先弱后强**：初版"翻转 / 靠边"只断言了"结果在窗口内"，把点锚点临时退化成
+`(0,0)` 时它们照样通过（原点也在窗口内）⇒ 改成断言精确落点（贴边那条断言"右边缘正好
+贴住窗口右边缘"）。退化验证：5 条 layout 测试**全部变红**，恢复后全绿。
+
+### 未做
+
+- **`tooltip_at_point`**：tooltip 由框架自管、锚 hover 节点，不需要点锚点，先不加。
+- **liepdf 侧接线**：右键时把 `cx.event().pos`（已核实是**逻辑**坐标：按钮事件取
+  `self.cursor`，而 `cursor` 在 `CursorMoved` 时已 `/scale`）存进状态，菜单改用
+  `popup_at_point`。下一步做。
+
+验证：lieui `cargo test --lib` 347 全绿 + clippy 0 警告 + 示例编译通过；
+pdfkit `cargo test` 48 全绿（依赖方未被API 变更影响）。
+
+## 2026-10-06 · 菜单构件 + 上下文菜单（`ContextMenu` / 对齐 WinUI `MenuFlyout`）
+
+### 起因
+
+上一条记的是"右键菜单贴鼠标"（点锚点）。真正的问题是**整个菜单层是手搓的**：
+`grep "pub fn menu("` 在 `src/` 里 0 命中 —— liepdf 侧栏 7 个菜单项每个都是 8 行链式调用
+（`p.text(…).font_size(…).width(160).padding(6).radius(3).hover_background(…).enabled(…).on_tap_with(…)`），
+复制了一遍又一遍：行高、禁用态颜色、分隔线全靠每个调用点自觉，外观无法统一。
+
+### 第1 层：菜单构件（`p.menu`）
+
+新模块 `src/menu.rs`（`ViewBuf::menu` + `MenuRef` / `MenuItemRef`）：
+
+- **先攒规格、后统一渲染**：`m.item(…).checked(true).accelerator("Ctrl+C")` 里的属性都要
+  **回头改这一行**（前面插勾、右侧加快捷键）。若 `item()` 当场建行，后加的属性就只能
+  "往当前容器追加" ⇒ 勾选标记会跑到标签**后面**。所以 `MenuRef` 只往 `Vec<Kind>` 攒，
+  `menu()` 闭包结束后一次性渲染：哪些槽位出现、行高、内边距、配色集中在一处。
+- 顺带白拿两个 WinUI 行为：**勾选列 / 图标列按需出现**（没人勾选就不留空白列，
+  否则每个标签凭空缩进 18px）；**标签左对齐稳定**（定宽槽）。
+- `item` / `separator` / `icon` / `accelerator` / `checked` / `enabled` / `key` /
+  `on_tap` / `on_tap_with` / `on`；`MenuRef::min_width`（默认 168）。
+- 配色全部取主题 token（`control_hover` / `control_pressed` / `text_secondary` /
+  `control_border` / `control_radius`），**没有新 design token** ⇒ 不需要主题迁移。
+
+为此给 `view.rs` 开了三扇"给组合构件用的门"（都写在文档里）：
+`container_ref`（建容器并回传 `DescRef`）、`DescRef::handler`（挂已装箱的 `Rc` 处理器）、
+`ViewBuf::context_menu`（作用于当前容器的糖）。
+
+### 第 2 层：`.context_menu()`（元素挂饰，对齐 `ContextFlyout`）
+
+```rust
+v.container(|row| {
+    row.text("第 3 页");
+    row.context_menu(|m| {
+        m.item("复制此页").on_tap_with(tap(vm, Action::CopyPage(pn)));
+        m.separator();
+        m.item("删除此页").enabled(total > 1).on_tap_with(..);
+    });
+});
+```
+
+**状态、触发、定位、关闭全在框架里** —— 应用一行状态都不用加，也不用在 `view()` 里写
+`if let Some(menu)`。机制完全复刻 tooltip 会话（`WindowCtx.tooltip`）：
+
+1. `DescNode.context_menu: Option<Rc<dyn Fn(&mut MenuRef<'_>)>>`（对齐时搬进`Node`，
+   和 `handlers` 一样整体替换）；
+2. `WindowCtx.ctx_menu: Option<CtxMenuSession>`（target / at / builder）；
+3. 右键 `Down` ⇒ 命中链里**最深**带菜单的节点胜出；
+4. 渲染：框架在 `view()` 之后、`align` 之前往描述树里**追加**一个 `Layer::Popup` 根
+   （带 `CTX_MENU_TAG` 标签认领，与 loading 遮罩的 `modal_tagged` 同一手法）
+   ⇒ 对齐 / 脏区 / 轻关闭 / 锚定落位全部复用现成 machinery；
+5. 关闭：点菜单外、点菜单项后、**禁用项被点（不关）**、目标节点不再声明菜单（列表滚走）。
+
+### 顺带修一个真 bug：`enabled(false)` 之前不挡点击
+
+`collect_from` 只查处理器、不查 `enabled` ⇒ `button(…).enabled(false).on_tap(…)` **照样触发**
+（内置行为与焦点是挡住的，只有用户闭包漏了）。菜单里"剪切此页（禁用）"看着是灰的、
+点下去真的执行。现在禁用节点**不进路由**（祖先照跑），对齐 WinUI `IsEnabled=false`。
+
+### 三个必须记下来的坑
+
+1. **点菜单项后收起**的判据是"命中路径上有没有禁用节点"，不是"最深节点是否禁用"——
+   禁用行里的最深命中通常是 **spacer**（`flex_grow` 的空 Box 也会吃掉命中）。
+2. **禁用态不能只挂在行容器上**（会让命中最深点判不出来，见上）；也**不能**给子节点打
+   `enabled(false)` 来传播 —— 渲染层还会再乘一次半透明（`dim_if_disabled`）⇒ 灰两次。
+   颜色用 `text_secondary` 表达，行为交给路由阶段。
+3. **会话清掉必须当帧置 `Dirty::VIEW`**：`rt.mark` 落在 `take_dirty` **之后**会白等一帧，
+   而弹层是"注入进描述树"的 ⇒ 不重跑 `view()`，align 的 stale 清理就删不掉那一层，
+   **菜单留在屏幕上**。`drop_dead_context_menu` 因此返回布尔、由 `frame()` 并进本帧 `dirty`。
+
+（还有一个同类 bug 在开发过程中出现过：`drop_dead_context_menu` 一度在**没有会话时**也置
+VIEW ⇒ 每帧重跑 `view()`，把"空闲帧零开销"打挂了一整批测试 —— 判据里加一句
+"本来就有会话"就对了。）
+
+### 测试 +21（lieui 369 全绿 / liepdf 48 全绿）
+
+- `menu`（13 条）：结构（一项一行 + 分隔线）、分隔线是 1px 线 + 外边距、勾选/图标槽
+  按需出现且标签左对齐、快捷键贴右内边距、禁用项灰字 + `enabled=false`、点击挂在行上、
+  hover 底色取主题 token、宽度有下限但随内容变宽、`min_width` 可改、空菜单 / 空标签不崩、
+  贴光标定位。
+- `app`（8 条）：右键在光标处开菜单、无菜单处右键开不出、菜单内容来自构造器（闭包
+  在渲染时才跑 ⇒ 捕到当下值）、点菜单项执行并收起、**禁用项既不执行也不收起**、
+  点外面收起、右键别处菜单跟过去、目标不再声明菜单时自动收起。
+- `event`（1 条）：`disabled_nodes_are_skipped_but_ancestors_still_run`。
+
+### liepdf：删掉整套菜单状态
+
+侧栏每行改成 `row.context_menu(…)` 后：`AppState.page_menu` / `PageMenu` /
+`Action::OpenPageMenu` / `close_page_menu` / `page_context_menu()`（47 行）**全部删除**
+（`Action` 一度因`OpenPageMenu` 带 `Point` 而摘掉 `Eq` 推导，删掉变体后已还回去）。
+新增 `ui::tap_rc`（已经持有 `Rc` 的版本，给只能捕获 `Rc` 的 `'static` 闭包用）。
+
+`Cargo.toml` 换回 **path 依赖**（要用未发布的 `popup_at_point` / `menu` / `context_menu`）；
+发lieui 新版本后再换回 crates.io 规格。
+
+验证：lieui `cargo test --lib` 369 全绿 + clippy 0 警告+ 示例编译通过；
+liepdf `cargo test` 48 全绿 + `cargo clippy --all-targets` 0 警告。
+
+## 2026-10-06 · `WindowCtx` 收敛：抽出 `Sessions`（框架交互会话）
+
+### 起因
+
+`WindowCtx` 长到 17 个字段时就很可疑了：`tooltip` / `ctx_menu` / `next_blink` /
+`spinner` / `has_busy` 混在"视图态 / 渲染器 / 会话 / 时钟 / 派生缓存"里靠注释分辨。
+顺着查还发现一处**同一关切被劈成两半**：光标相位 `blink_on` 在 `Track`，
+时钟 `next_blink` 在 `WindowCtx`。
+
+### 结论：不该走 `Layer`，**会话 ≠ 层**的讨论记录
+
+`Layer` 描述的是"视口里的一棵子树 + z 序 + 焦点/关闭策略"；而这几个字段都不是子树：
+
+| 字段 | 实际是什么 |
+|---|---|
+| `tooltip` / `ctx_menu` | **会话**：目标 `NodeId` + 计时 + 它管的层 `RootId`（**会话*生产*层**） |
+| `next_blink` | 一个**时刻**（相位本身在 `Track::blink_on`） |
+| `spinner` | **跨帧保留实例的缓存**（真身是树里的 `Kind::Custom` 节点） |
+| `has_busy` | **派生快照**（`rt.is_busy(id)` 的每帧副本） |
+
+把它们塞进 `Layer`/`LayerOpts` 会让 `align` 变成"两层状态的管理者"，直接破掉
+"结构只由 `view()` 描述"这条不变量 ⇒ **层还是描述，会话单独集中**。
+
+### 改动
+
+- **新增 `struct Sessions`**（`derive(Default)`）：`tooltip` / `ctx_menu` /
+  `next_blink` / `spinner` 四个一伙，`WindowCtx` 只剩一个 `sess: Sessions` 字段。
+  文档里写明三件容易被后人改错的事：① 为什么它们不是层；② 为什么三个框架层的
+  生命周期不同却**是刻意的**（tooltip 文案静态 ⇒ 走 `add_framework_root`，align 不重建；
+  菜单 / loading 内容每帧都可能变 ⇒ 每帧注入描述树，由 align 增删）；
+  ③ `spinner` 缓存实例的理由（`Kind` 按 **Rc 指针**判等，每帧新建 cell 会被当成
+  "换数据"⇒ 动画每次从头转）。
+- **删掉 `has_busy`**：它是"够不着 `rt` 才不得不缓存"的产物。
+  `next_wakeup(&self)` → `next_wakeup(&self, rt: &Runtime)`，内部直接问
+  `rt.is_busy(self.id)`。调用方（平台层 / 测试）本来就持有 `rt` ——少一处可能过期的真相。
+  平台层因此多一行 `let rt = self.app.runtime();`（注释说明了由来）。
+- **`Track::blink_on` 补注释**：明确"状态 vs 时钟"的分工（ `blink_on` 跟焦点节点走，
+  `next_blink` 是唤醒源 ⇒ 无焦点恒 `None` ⇒ 空闲零功耗）。
+
+### 结果
+
+`WindowCtx` 17 → 13 字段；四种框架交互态有了共同的名字与归属说明；
+新加第五个框架层（菜单键触发、抽屉…）有现成模子可参考。
+
+验证：lieui `cargo test --lib` 369 全绿 + clippy 0 警告 + 示例编译通过；
+liepdf `cargo test` 48 全绿 + clippy 0 警告（纯重构，行为零变化）。

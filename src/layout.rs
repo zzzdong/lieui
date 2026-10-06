@@ -155,7 +155,7 @@ pub fn place_anchored_layers(track: &mut Track, window: Size) -> usize {
     moved
 }
 
-/// 求锚定层的目标原点（含翻转与钳制）；锚点 key 不存在 ⇒ `None`（保持原位）
+/// 求锚定层的目标原点（含翻转与钳制）；`Key` 锚点查不到 ⇒ `None`（保持原位）
 fn anchored_origin(
     track: &Track,
     layer: NodeId,
@@ -164,11 +164,18 @@ fn anchored_origin(
 ) -> Option<(f32, f32)> {
     let lr = track.get(layer).map(|n| n.rect()).unwrap_or_default();
     let (sw, sh) = (lr.width, lr.height);
-    let a = match &anchor.target {
-        crate::track::AnchorTarget::Key(key) => track.find_by_key(key)?,
-        crate::track::AnchorTarget::Node(id) => *id,
+    // 锚点矩形。**点锚点 = 零尺寸的退化矩形** —— 于是下面那套翻转 / 钳制逻辑
+    // 对"锚在鼠标上的右键菜单"一字不改地生效（贴鼠标；下方放不下翻上方；靠边平移回视口）。
+    let ar = match &anchor.target {
+        crate::track::AnchorTarget::Key(key) => {
+            let id = track.find_by_key(key)?;
+            track.get(id).map(|n| n.rect()).unwrap_or_default()
+        }
+        crate::track::AnchorTarget::Node(id) => {
+            track.get(*id).map(|n| n.rect()).unwrap_or_default()
+        }
+        crate::track::AnchorTarget::Point(p) => Rect::new(p.x, p.y, 0.0, 0.0),
     };
-    let ar = track.get(a).map(|n| n.rect()).unwrap_or_default();
 
     let mut p = anchor.placement;
     // 翻转：默认侧放不下 **且** 另一侧放得下才翻（避免在两个都放不下时来回抖动）
@@ -490,6 +497,98 @@ mod tests {
             .unwrap()
             .node;
         (t.get(anchor).unwrap().rect(), t.get(popup).unwrap().rect())
+    }
+
+    /// 内容根 + 一个**点锚点**的 popup（没有锚点节点 —— 点本身就是锚点）
+    fn point_anchored(px: f32, py: f32, placement: Placement) -> (Track, NodeId) {
+        let mut t = Track::new();
+        let content = t.create(Kind::Box, None);
+        t.add_root(Layer::Content, None, content);
+
+        let popup = t.create(Kind::Box, None);
+        let txt = text(&mut t, "菜单项", 14.0);
+        t.append_child(popup, txt);
+        let rid = t.add_root(Layer::Popup, None, popup);
+        t.root_mut(rid).unwrap().opts.anchor = Some(Anchor {
+            target: crate::track::AnchorTarget::Point(Point::new(px, py)),
+            placement,
+        });
+        (t, popup)
+    }
+
+    /// 布局 + 落位，返回层根 rect（点锚点没有"锚点 rect"可言）
+    fn place_point(t: &mut Track) -> Rect {
+        layout(t, WIN);
+        place_anchored_layers(t, WIN);
+        let popup = t
+            .roots()
+            .iter()
+            .find(|r| r.layer == Layer::Popup)
+            .unwrap()
+            .node;
+        t.get(popup).unwrap().rect()
+    }
+
+    /// 点锚点：菜单贴在**鼠标点**下方一个 `ANCHOR_GAP`，而不是"某个节点的左边缘"
+    #[test]
+    fn point_anchor_puts_the_popup_under_the_cursor() {
+        let (mut t, _) = point_anchored(120.0, 60.0, Placement::Below);
+        let pr = place_point(&mut t);
+        assert!((pr.x - 120.0).abs() < 0.5, "左上角与点横向对齐：{pr:?}");
+        assert!(
+            (pr.y - (60.0 + ANCHOR_GAP)).abs() < 0.5,
+            "点在菜单上方一个 ANCHOR_GAP：{pr:?}"
+        );
+    }
+
+    /// 点贴近下边缘 ⇒ 翻到点**上方**（与锚节点同一套翻转规则）
+    ///
+    /// 断言精确落点（而不是"在窗口内"）：否则锚点被忽略时也会通过 —— 那条断言太弱，
+    /// 曾经让"点锚点退化成原点"的错误实现蒙混过关。
+    #[test]
+    fn point_anchor_flips_above_near_the_bottom() {
+        let (mut t, _) = point_anchored(60.0, WIN.height - 4.0, Placement::Below);
+        let pr = place_point(&mut t);
+        let py = WIN.height - 4.0;
+        assert!(
+            (pr.bottom() - (py - ANCHOR_GAP)).abs() < 0.5,
+            "应翻到点上方一个 GAP：{pr:?}（点 y={py}）"
+        );
+        assert!(pr.y >= 0.0 && pr.bottom() <= WIN.height, "不出视口：{pr:?}");
+    }
+
+    /// 点贴近右边缘 ⇒ 平移回视口内、**右边缘正好贴住窗口右边缘**（`Fixed` 做不到这件事）
+    #[test]
+    fn point_anchor_is_pulled_back_inside_the_window() {
+        let (mut t, _) = point_anchored(WIN.width - 2.0, 40.0, Placement::Below);
+        let pr = place_point(&mut t);
+        assert!(
+            (pr.x - (WIN.width - pr.width)).abs() < 0.5,
+            "被平移到右边缘：{pr:?}"
+        );
+        assert!((pr.y - 44.0).abs() < 0.5, "纵向不受影响：{pr:?}");
+    }
+
+    /// 点锚点**不需要任何节点存在** ⇒ 锚在虚拟列表行上也安全
+    /// （行被回收 / 滚出窗口时，`Key` 锚点会失效并让菜单停在原位，点锚点不受影响）
+    #[test]
+    fn point_anchor_needs_no_node() {
+        let (mut t, _) = point_anchored(30.0, 30.0, Placement::Below);
+        assert_eq!(t.roots().len(), 2, "只有内容根 + 弹层根");
+        let pr = place_point(&mut t);
+        assert!((pr.y - (30.0 + ANCHOR_GAP)).abs() < 0.5, "{pr:?}");
+    }
+
+    /// 点锚点也能用 `RightOf`（贴着点的右侧），确认不是只对 `Below` 生效
+    #[test]
+    fn point_anchor_honors_other_placements() {
+        let (mut t, _) = point_anchored(100.0, 100.0, Placement::RightOf);
+        let pr = place_point(&mut t);
+        assert!(
+            (pr.x - (100.0 + ANCHOR_GAP)).abs() < 0.5,
+            "RightOf：点在菜单左侧一个 GAP：{pr:?}"
+        );
+        assert!((pr.y - 100.0).abs() < 0.5, "纵向与点对齐：{pr:?}");
     }
 
     #[test]

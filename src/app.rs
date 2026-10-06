@@ -27,7 +27,7 @@ use lieui_geom::Point;
 
 use crate::align::{AlignStats, align};
 use crate::cmd::{CmdBuf, apply_cmds};
-use crate::event::{Ctx, DispatchOutcome, Event, EventKind, EventView};
+use crate::event::{Ctx, DispatchOutcome, Event, EventKind, EventView, PointerButton};
 use crate::focus;
 use crate::hit;
 use crate::input::{self, InputEvent};
@@ -377,15 +377,10 @@ pub struct WindowCtx {
     renderer: Renderer,
     /// 底色是否由用户显式指定（true ⇒ 主题切换不再改窗口底色）
     explicit_background: bool,
-    /// 光标闪烁：下一次翻转时刻（None = 没有聚焦的输入框，不需要动画）
-    next_blink: Option<Instant>,
-    /// 框架 tooltip 会话（悬停带 `tooltip` 的节点 → 计时 → 浮出；移开/按下 → 消失）
-    tooltip: Option<TooltipSession>,
-    /// loading 遮罩的 spinner 实例（跨帧保留；`Color` = 主题 accent，变了就重建）
-    spinner: Option<(crate::geom::Color, crate::custom::CustomCell)>,
-    /// 本窗口当前还有忙碌项（每帧刷新）——`next_wakeup` 靠它决定要不要继续定时唤醒
-    /// （有遮罩就要 30fps 驱动 spinner，并给"最短可见时间"到点的收尾留出时机）
-    has_busy: bool,
+    /// 框架自管的交互会话（tooltip / 右键菜单 / 闪烁时钟 / loading spinner）
+    ///
+    /// 见 [`Sessions`] 的模块级说明：为什么聚在一起、为什么不装进 `Layer`。
+    sess: Sessions,
     /// 上一帧的时刻（算动画 `dt`）
     last_tick: Instant,
     /// 本窗口的**时钟**下次到期时刻（定时器 / 动画帧；`frame()` 里刷新）
@@ -407,8 +402,63 @@ struct TooltipSession {
     target: NodeId,
     /// 悬停开始时刻（arm 计时起点）
     since: Instant,
-    /// 已浮出的 tooltip 层根（None = 还在计时）
+    /// 已浮出的 tooltip 层根（`None` = 还在计时）
     layer: Option<crate::track::RootId>,
+}
+
+/// 一个打开着的**上下文菜单**会话（`DescRef::context_menu`）。
+///
+/// 状态全在框架里：app 只声明"这个元素有菜单"，**不用**自己存"谁被右键了 / 光标在哪"，
+/// 也不用在 `view()` 里写 `if let Some(menu) = …`。
+struct CtxMenuSession {
+    /// 被右键的节点（菜单挂在它的描述里）
+    target: NodeId,
+    /// 右键时的光标位置（逻辑坐标）—— 弹层锚点
+    at: Point,
+    /// 该节点的菜单构造器（对齐时从节点搬来）
+    builder: crate::menu::ContextMenu,
+}
+
+/// 框架自管的**交互会话**：每窗口一份、`WindowCtx` 里的一组临时运行态。
+///
+/// ## 它们为什么必须是同一种东西
+///
+/// 都是"框架替应用记住的、临时的交互状态"（目标节点 + 计时 + 实例），
+/// 都不属于 `view()` 的描述、也不属于应用 —— 所以放在一起，才能一眼看出
+/// "哪几样是框架在替你记的"，而不是散在一个 17 字段的 struct 里靠注释分辨。
+///
+/// ## 为什么**不**装进 `Layer` / `LayerOpts`
+///
+/// 层是**描述**（`view()` 声明、`align` 增删）；会话是**运行态**（活的计时与目标）。
+/// 混在一起会让 `align` 变成"两层状态的管理者"，直接破掉
+/// "结构只由 `view()` 描述"这条不变量。会话与层的关系是：**会话*生产*层，而不是层**。
+///
+/// ## 三个层的生命周期不同，是刻意而非巧合
+///
+/// 取决于"内容要不要每帧重算"：
+///
+/// - **tooltip**：文案静态 ⇒ 框架自己建一次子树、走 `add_framework_root`
+///   （`align` 不管它，也不重建内容）；
+/// - **右键菜单 / loading 遮罩**：内容每帧都可能变（菜单要捕当下值、忙碌项会变）
+///   ⇒ 每帧**注入**进描述树，由 `align` 增删。
+#[derive(Default)]
+struct Sessions {
+    /// tooltip 会话（悬停 → 计时 → 浮出；见 [`WindowCtx::sync_tooltip`]）
+    tooltip: Option<TooltipSession>,
+    /// 打开着的右键菜单（见 [`DescRef::context_menu`]）
+    ctx_menu: Option<CtxMenuSession>,
+    /// 光标闪烁的**时钟**（相位本身在 [`crate::track::Track::blink_on`]）
+    ///
+    /// 分工：这里只存"下一次翻转时刻"（一种唤醒源），可见与否的状态由 `Track`
+    /// 跟着焦点节点保留 —— 输入框跨帧存活、时钟随"有没有焦点"而有无。
+    /// 没焦点的窗口这里恒为 `None` ⇒ 不产生唤醒 ⇒ 空闲零功耗。
+    next_blink: Option<Instant>,
+    /// loading 遮罩的 spinner 实例（跨帧保留；`Color` = 主题 accent，变了才重建）
+    ///
+    /// 为什么要缓存：spinner 的真身是树里的 `Kind::Custom` 节点，对齐按 **Rc 指针**
+    /// 判等（同一 cell = 实例跨帧保留）。而遮罩每帧重新注入 ⇒ 每次新建 cell 会被
+    /// 当成"换数据"而重建动画（一直在原地重新开始转）。所以按 accent 缓存同一个实例。
+    spinner: Option<(crate::geom::Color, crate::custom::CustomCell)>,
 }
 
 /// 光标闪烁周期
@@ -434,10 +484,7 @@ impl WindowCtx {
             last_align: AlignStats::default(),
             renderer,
             explicit_background,
-            next_blink: None,
-            tooltip: None,
-            spinner: None,
-            has_busy: false,
+            sess: Sessions::default(),
             last_tick: Instant::now(),
             next_clock: None,
             scale_epoch: 0,
@@ -553,7 +600,12 @@ impl WindowCtx {
 
     /// 跑一帧：消费脏标志 → `view()`/`align` → **重排** → 取走脏区（M3 在这里光栅化 + 上屏）。
     pub fn frame(&mut self, rt: &Runtime) -> FrameStats {
-        let dirty = rt.take_dirty(self.id);
+        let mut dirty = rt.take_dirty(self.id);
+        // ⓪-bis 右键菜单会话的存活检查（**每帧**，理由见 `drop_dead_context_menu`）。
+        //   它可能要关掉菜单 ⇒ 那就得**本帧**重跑 view()，否则描述树里还留着注入的弹层。
+        if self.drop_dead_context_menu() {
+            dirty |= Dirty::VIEW;
+        }
         let mut st = FrameStats {
             dirty,
             ..Default::default()
@@ -562,7 +614,6 @@ impl WindowCtx {
         // ⓪ 忙碌收尾：收掉"最短可见时间"已过的遮罩项（见 `task::set_busy_min_visible`）。
         // 放在帧首：快任务挂上遮罩后立刻结束的情况，也能保证遮罩被画出来过。
         rt.reap_busy(Instant::now());
-        self.has_busy = rt.is_busy(self.id);
         // 窗口尺寸登记（给 `view()` 里的"适应窗口"一类计算用；晚一帧无妨）
         rt.set_window_size(self.id, self.size);
 
@@ -593,6 +644,9 @@ impl WindowCtx {
             // 后台任务忙碌 ⇒ 追加框架 loading 遮罩层（声明式：忙碌项清空就不声明，
             // 下一帧 align 的 stale 清理会把旧层删掉）
             self.push_busy_overlay(rt);
+            // 打开着的右键菜单：同样**追加**一个弹层（声明式：会话结束就不追加，
+            // 下一帧 align 的 stale 清理会把旧层删掉）
+            self.push_context_menu_layer();
             rt.end_view();
 
             st.view_ran = true;
@@ -666,22 +720,22 @@ impl WindowCtx {
         if !focused_input {
             if self.track.blink_on {
                 self.track.blink_on = false;
-                self.next_blink = None;
+                self.sess.next_blink = None;
                 // 擦掉残留的光标
                 if let Some(f) = self.track.focused {
                     self.track.mark_paint_dirty(f);
                 }
                 return true;
             }
-            self.next_blink = None;
+            self.sess.next_blink = None;
             return false;
         }
 
-        match self.next_blink {
+        match self.sess.next_blink {
             None => {
                 // 刚拿到焦点：光标先亮
                 self.track.blink_on = true;
-                self.next_blink = Some(now + BLINK_PERIOD);
+                self.sess.next_blink = Some(now + BLINK_PERIOD);
                 if let Some(f) = self.track.focused {
                     self.track.mark_paint_dirty(f);
                 }
@@ -689,7 +743,7 @@ impl WindowCtx {
             }
             Some(t) if now >= t => {
                 self.track.blink_on = !self.track.blink_on;
-                self.next_blink = Some(now + BLINK_PERIOD);
+                self.sess.next_blink = Some(now + BLINK_PERIOD);
                 if let Some(f) = self.track.focused {
                     self.track.mark_paint_dirty(f);
                 }
@@ -706,12 +760,15 @@ impl WindowCtx {
     /// - 时钟（[`crate::timer`]）：定时器到期、动画帧（`next_clock`，`frame()` 里刷新）。
     ///
     /// 没有任何来源 ⇒ `None`（平台用 `ControlFlow::Wait`：空闲零功耗）。
-    pub fn next_wakeup(&self) -> Option<Instant> {
+    ///
+    /// `rt` 用来问"本窗口还有没有忙碌项"（忙碌项的真相在 [`Runtime`] 里，这里不再
+    /// 缓存一份每帧刷新的快照 —— 缓存意味着多一处可能过期的真相，而调用方手里就有 `rt`）。
+    pub fn next_wakeup(&self, rt: &Runtime) -> Option<Instant> {
         // 有遮罩（含"挂着等最短可见时间到点"的）⇒ 定时唤醒：驱动 spinner + 到点收尾
-        let spin = self
-            .has_busy
+        let spin = rt
+            .is_busy(self.id)
             .then(|| Instant::now() + crate::overlay::SPIN_PERIOD);
-        let blink = match (self.next_blink, self.tooltip.as_ref()) {
+        let blink = match (self.sess.next_blink, self.sess.tooltip.as_ref()) {
             (Some(b), Some(t)) if t.layer.is_none() => Some(b.min(t.since + TOOLTIP_DELAY)),
             (_, Some(t)) if t.layer.is_none() => Some(t.since + TOOLTIP_DELAY),
             (b, _) => b,
@@ -732,13 +789,13 @@ impl WindowCtx {
         }
         // spinner 实例跨帧保留（主题 accent 变了才重建）
         let accent = rt.theme().accent;
-        if self.spinner.as_ref().map(|(c, _)| *c) != Some(accent) {
-            self.spinner = Some((
+        if self.sess.spinner.as_ref().map(|(c, _)| *c) != Some(accent) {
+            self.sess.spinner = Some((
                 accent,
                 crate::custom::cell(crate::overlay::Spinner::new(accent)),
             ));
         }
-        let spinner = self.spinner.as_ref().unwrap().1.clone();
+        let spinner = self.sess.spinner.as_ref().unwrap().1.clone();
         crate::overlay::push_busy_overlay(&mut self.view_buf, &items, spinner);
     }
 
@@ -786,7 +843,7 @@ impl WindowCtx {
             .is_some()
         {
             self.track.blink_on = true;
-            self.next_blink = Some(Instant::now() + BLINK_PERIOD);
+            self.sess.next_blink = Some(Instant::now() + BLINK_PERIOD);
         }
         out
     }
@@ -836,8 +893,157 @@ impl WindowCtx {
         if step.hover_changed || matches!(ev, InputEvent::Down { .. }) {
             self.sync_tooltip();
         }
+        // 右键菜单会话：右键打开 / 点外面或点菜单项后收起
+        self.sync_context_menu(rt, &ev, outcome.tapped);
 
         outcome
+    }
+
+    // ── 上下文菜单（框架自管会话；注入成普通 Popup 层）──
+
+    /// 命中链里**最深**那个声明了右键菜单的节点（`DescRef::context_menu`）
+    fn context_menu_target(&self, pos: Point) -> Option<(NodeId, crate::menu::ContextMenu)> {
+        self.hit(pos)
+            .into_iter()
+            .rev()
+            .find_map(|id| {
+                let n = self.track.get(id)?;
+                n.context_menu.clone().map(|menu| (id, menu))
+            })
+    }
+
+    /// 打开着的菜单弹层的层根节点（按 [`crate::menu::CTX_MENU_TAG`] 认领）
+    fn context_menu_root(&self) -> Option<NodeId> {
+        self.track
+            .roots_of(crate::track::Layer::Popup)
+            .find(|r| r.tag == Some(crate::menu::CTX_MENU_TAG))
+            .map(|r| r.node)
+    }
+
+    /// 视图中是否有**落在菜单弹层内**的节点（判断"这次点击算不算点菜单")
+    fn hit_inside_context_menu(&self, pos: Point) -> bool {
+        let Some(root) = self.context_menu_root() else {
+            return false;
+        };
+        let path = self.hit(pos);
+        path.contains(&root) || path.iter().any(|id| hit::path_to(&self.track, *id).contains(&root))
+    }
+
+    /// 指针输入后同步右键菜单会话（打开 / 收起）。
+    ///
+    /// 规则（对齐 WinUI `ContextFlyout`）：
+    ///
+    /// | 输入 | 结果 |
+    /// |---|---|
+    /// | 右键按在带菜单的元素上 | 打开（或换目标重新定位到新光标处） |
+    /// | 右键按在没有菜单的地方 | 收起 |
+    /// | 左键按在菜单**外** | 收起（轻关闭） |
+    /// | 菜单项被点击 | 收起（先派发 `Tapped` 再收，与 WinUI 一致） |
+    ///
+    /// 会话一变就置 `Dirty::VIEW`：弹层是"注入进描述树"的，不重跑 `view()` 它不会出现。
+    fn sync_context_menu(&mut self, rt: &Runtime, ev: &InputEvent, tapped: Option<NodeId>) {
+        let pos = ev.pos();
+        let mut open: Option<CtxMenuSession> = None;
+        let mut close = false;
+
+        match ev {
+            InputEvent::Down {
+                button: PointerButton::Right,
+                ..
+            } => match pos.and_then(|p| self.context_menu_target(p)) {
+                Some((target, builder)) => {
+                    // 换个目标就换会话（同一个目标重复右键：仍按新位置重开，跟手）
+                    let at = pos.expect("有命中就有位置");
+                    let same = self
+                        .sess
+                        .ctx_menu
+                        .as_ref()
+                        .is_some_and(|s| s.target == target && s.at == at);
+                    if !same {
+                        open = Some(CtxMenuSession { target, at, builder });
+                    }
+                }
+                None => close = true,
+            },
+            InputEvent::Down { .. } => close = pos.is_some_and(|p| !self.hit_inside_context_menu(p)),
+            _ => {}
+        }
+
+        // 菜单项被点击 ⇒ 收起（`Tapped` 派发已经在 `pointer()` 里完成了）。
+        // 禁用项**除外**：它什么都没做，菜单也不该消失（WinUI 语义）。
+        //
+        // 判据是"命中路径上有没有禁用节点"，而不是"最深节点自己是不是禁用"：
+        // 一个禁用行里的**最深命中通常是 spacer / 标签**（`flex_grow` 的空 Box 也会
+        // 吃掉命中），只看最深节点会把"点禁用项"误判成"点到了可用项"。
+        if let Some(tapped) = tapped
+            && self.sess.ctx_menu.is_some()
+            && let Some(root) = self.context_menu_root()
+        {
+            let path = hit::path_to(&self.track, tapped);
+            if path.contains(&root)
+                && !path.iter().any(|id| {
+                    self.track
+                        .get(*id)
+                        .is_some_and(|n| !n.interaction.enabled)
+                })
+            {
+                close = true;
+            }
+        }
+
+        let had = self.sess.ctx_menu.is_some();
+        if close {
+            self.sess.ctx_menu = None;
+        }
+        let opened = open.is_some();
+        if let Some(sess) = open {
+            self.sess.ctx_menu = Some(sess);
+        }
+        if close || had || opened {
+            // 收起 / 打开 / 换目标都要重跑 view()（弹层是注入的）
+            rt.mark(self.id, Dirty::VIEW);
+        }
+    }
+
+    /// 把打开着的右键菜单**注入**进本帧的描述树（`frame()` 在 `align` 之前调）。
+    ///
+    /// 先做"目标还在吗"的检查（照 tooltip 会话的 `alive`）：元素被回收
+    /// （虚拟列表滚走、切页面、那一项不再声明菜单）⇒ 会话结束、菜单不再注入。
+    fn drop_dead_context_menu(&mut self) -> bool {
+        if self.sess.ctx_menu.is_none() {
+            return false;
+        }
+        // 存活判据：目标节点还在、且**仍声明着**菜单（元素被回收 / 那一项不再有菜单）。
+        //
+        // 为什么必须**每帧**查、不能只查 VIEW 帧：这件事是上一帧 `align` 才写进保留树的，
+        // 而注入发生在 align **之前**。若只在 VIEW 分支里查，"变化那一帧"查到的还是旧树
+        // ⇒ 菜单不会被清。
+        let alive = self
+            .sess
+            .ctx_menu
+            .as_ref()
+            .is_some_and(|s| self.track.get(s.target).is_some_and(|n| n.context_menu.is_some()));
+        if alive {
+            return false;
+        }
+        self.sess.ctx_menu = None;
+        // 调用方**必须**把 `Dirty::VIEW` 并进本帧（`rt.mark` 会落到下一帧的
+        // `take_dirty` 之后，白等一帧）：弹层是"注入进描述树"的，不重跑 `view()`
+        // 描述里就没有它，align 的 stale 清理也删不掉那一层 ⇒ 菜单留在屏幕上。
+        true
+    }
+
+    /// 把打开着的右键菜单**注入**进本帧的描述树（`frame()` 在 `align` 之前调）
+    fn push_context_menu_layer(&mut self) {
+        let Some((at, builder)) = self
+            .sess
+            .ctx_menu
+            .as_ref()
+            .map(|s| (s.at, s.builder.clone()))
+        else {
+            return;
+        };
+        self.view_buf.push_context_menu(at, &builder);
     }
 
     // ── tooltip（框架自管层）──
@@ -853,7 +1059,7 @@ impl WindowCtx {
             .copied()
             .find(|id| self.track.get(*id).is_some_and(|n| n.tooltip.is_some()));
 
-        match (target, &mut self.tooltip) {
+        match (target, &mut self.sess.tooltip) {
             (Some(t), Some(s)) if s.target == t => {} // 悬停目标没变：继续计时/保持
             (t, s) => {
                 // 目标变了（或离开）：关掉旧层
@@ -877,7 +1083,7 @@ impl WindowCtx {
     /// 必须在这里补一次上色，否则它一直挂着旧主题的底色/文字色。
     fn sync_tooltip_theme(&mut self) {
         let theme = self.renderer.options().theme;
-        let Some(rid) = self.tooltip.as_ref().and_then(|s| s.layer) else {
+        let Some(rid) = self.sess.tooltip.as_ref().and_then(|s| s.layer) else {
             return;
         };
         let Some(node) = self.track.root(rid).map(|r| r.node) else {
@@ -904,7 +1110,7 @@ impl WindowCtx {
         let mut open: Option<(NodeId, String)> = None;
         let mut close: Option<crate::track::RootId> = None;
 
-        if let Some(sess) = &mut self.tooltip {
+        if let Some(sess) = &mut self.sess.tooltip {
             let alive = self
                 .track
                 .get(sess.target)
@@ -913,7 +1119,7 @@ impl WindowCtx {
                 if let Some(rid) = sess.layer.take() {
                     close = Some(rid);
                 }
-                self.tooltip = None;
+                self.sess.tooltip = None;
             } else if sess.layer.is_none() && now >= sess.since + TOOLTIP_DELAY {
                 open = self
                     .track
@@ -928,7 +1134,7 @@ impl WindowCtx {
         }
         if let Some((target, text)) = open {
             let rid = self.open_tooltip_layer(&theme, target, text);
-            if let Some(sess) = &mut self.tooltip {
+            if let Some(sess) = &mut self.sess.tooltip {
                 sess.layer = Some(rid);
             }
         }
@@ -3938,7 +4144,7 @@ mod tests {
             ctx.animate(Instant::now());
             let (damage, all) = ctx.track_mut().take_damage();
             assert!(all || !damage.is_empty(), "有遮罩 ⇒ 动画帧有重绘义务");
-            assert!(ctx.next_wakeup().is_some(), "遮罩 ⇒ 定时唤醒（spinner）");
+            assert!(ctx.next_wakeup(&rt).is_some(), "遮罩 ⇒ 定时唤醒（spinner）");
         }
         // 遮罩确实画到了屏幕上：卡片内的 padding 区应是卡片底色（不是窗口底色）
         {
@@ -3983,7 +4189,7 @@ mod tests {
                 "完成 ⇒ 遮罩层消失"
             );
             assert!(
-                ctx.next_wakeup().is_none(),
+                ctx.next_wakeup(&rt).is_none(),
                 "遮罩消失且没有聚焦输入框/tooltip ⇒ 回到零唤醒（空闲零功耗）"
             );
         }
@@ -4115,7 +4321,10 @@ mod tests {
         app.frame_all();
         assert_eq!(vm.frames.get(), last, "不请求就不再跑");
         assert!(rt.next_deadline(id).is_none());
-        assert!(app.window_ctx(id).unwrap().next_wakeup().is_none(), "回到零唤醒");
+        assert!(
+            app.window_ctx(id).unwrap().next_wakeup(&rt).is_none(),
+            "回到零唤醒"
+        );
     }
 
     #[test]
@@ -4240,7 +4449,7 @@ mod tests {
                     .is_some(),
                 "最短可见期内遮罩要在"
             );
-            assert!(ctx.next_wakeup().is_some(), "还要定时唤醒去收它");
+            assert!(ctx.next_wakeup(&rt).is_some(), "还要定时唤醒去收它");
         }
 
         // 到点 ⇒ 收掉；下一帧没有遮罩，回到零唤醒
@@ -4254,7 +4463,7 @@ mod tests {
                     .is_none(),
                 "到点 ⇒ 遮罩收起"
             );
-            assert!(ctx.next_wakeup().is_none(), "遮罩收掉 ⇒ 回到零唤醒");
+            assert!(ctx.next_wakeup(&rt).is_none(), "遮罩收掉 ⇒ 回到零唤醒");
         }
     }
 
@@ -4753,6 +4962,268 @@ mod tests {
         assert_eq!(caret2, 0);
         assert!((scroll2 - 0.0).abs() < 0.01, "Home ⇒ 滚动回 0：{scroll2}");
         assert_eq!(vm.name.get().len(), 40);
+    }
+
+    // ─────────────── 上下文菜单（`DescRef::context_menu`）───────────────
+
+    /// 一个带右键菜单的列表（每行都声明菜单）
+    struct CtxMenuVm {
+        /// 事件记录（测试观测用）
+        hits: Signal<Vec<String>>,
+        /// "当前页"：闭包在**渲染时**才跑，所以菜单项文字用的是它的**当下**值
+        page: Signal<u32>,
+        /// 行是否还声明菜单（false ⇒ 模拟"那一项不再有菜单"）
+        with_menu: Signal<bool>,
+    }
+
+    impl ViewModel for CtxMenuVm {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            let (page, with_menu) = (self.page.get(), self.with_menu.get());
+            v.column(|list| {
+                for i in 1..=3u32 {
+                    let label = format!("行 {i}");
+                    let me = Rc::clone(self);
+                    list.container(|c| {
+                        // 同一份标签出现两次：一次可左键点，一次带右键菜单
+                        c.text(&label).padding(6.0).on_tap(move || {
+                            me.hits.update(|v| v.push(format!("tap 行 {i}")))
+                        });
+                        if with_menu {
+                            let me_menu = Rc::clone(self);
+                            let page = page;
+                            c.text(&label).padding(6.0).context_menu(move |m| {
+                                let (a, b) = (Rc::clone(&me_menu), Rc::clone(&me_menu));
+                                m.item(format!("复制行 {i}")).on_tap(move || {
+                                    a.hits.update(|v| v.push(format!("menu 行 {i} @{page}")));
+                                });
+                                m.separator();
+                                m.item("删除").enabled(i > 1).on_tap(move || {
+                                    b.hits.update(|v| v.push(format!("del 行 {i}")));
+                                });
+                            });
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    fn menu_setup() -> (Runtime, App, Rc<CtxMenuVm>, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(CtxMenuVm {
+            hits: Signal::new(&rt, Vec::new()),
+            page: Signal::new(&rt, 7),
+            with_menu: Signal::new(&rt, true),
+        });
+        let id = app.window_erased(
+            WindowConfig::new().size(400.0, 300.0),
+            erased(Rc::clone(&vm)),
+        );
+        app.frame_all();
+        (rt, app, vm, id)
+    }
+
+    /// 找到那个**带菜单**的 `label` 文本节点的中心
+    fn menu_row_center(app: &App, id: WindowId, label: &str) -> Point {
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let node = t
+            .descendants(w.content_root().unwrap())
+            .into_iter()
+            .find(|n| {
+                t.get(*n).is_some_and(|x| {
+                    x.context_menu.is_some() && matches!(&x.kind, Kind::Text(s) if s == label)
+                })
+            })
+            .unwrap_or_else(|| panic!("找不到带菜单的 {label:?}"));
+        center(t, node)
+    }
+
+    /// 框架注入的菜单弹层层根（`None` = 当前没有菜单打开）
+    fn ctx_menu_root(app: &App, id: WindowId) -> Option<NodeId> {
+        app.window_ctx(id).unwrap().context_menu_root()
+    }
+
+    /// 菜单里第 `i` 项（0 基，跳过分隔线）的中心 —— 从**布局树**取，不手算几何
+    ///
+    /// 菜单项的位置由字号/内边距/分隔线高度决定，测试里手算的行高只会 fragile。
+    fn ctx_menu_item_center(app: &App, id: WindowId, i: usize) -> Point {
+        let root = ctx_menu_root(app, id).expect("菜单应打开");
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let menu = t.children(root)[0];
+        let rows: Vec<NodeId> = t
+            .children(menu)
+            .iter()
+            .copied()
+            .filter(|r| !t.children(*r).is_empty())
+            .collect();
+        center(t, rows[i])
+    }
+
+    /// 右键（按下即可，框架在 Down 就开菜单）
+    fn right_click(app: &mut App, rt: &Runtime, id: WindowId, pos: Point) {
+        app.window_ctx_mut(id).unwrap().pointer(
+            rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos,
+                button: PointerButton::Right,
+            },
+        );
+        app.frame_all();
+    }
+
+    #[test]
+    fn right_click_opens_the_menu_at_the_cursor() {
+        let (rt, mut app, _, id) = menu_setup();
+        assert!(ctx_menu_root(&app, id).is_none(), "还没右键，不该有菜单层");
+
+        let pos = menu_row_center(&app, id, "行 2");
+        right_click(&mut app, &rt, id, pos);
+
+        let root = ctx_menu_root(&app, id).expect("右键 ⇒ 菜单层出现");
+        let r = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), root);
+        assert!(
+            (r.x - pos.x).abs() < 1.0 && (r.y - (pos.y + 4.0)).abs() < 1.0,
+            "菜单贴在光标下方 4px：{r:?} vs 光标 {pos:?}"
+        );
+    }
+
+    #[test]
+    fn right_click_on_an_element_without_a_menu_opens_nothing() {
+        let (rt, mut app, _, id) = menu_setup();
+        let pos = menu_row_center(&app, id, "行 2"); // 先确认菜单能开
+        right_click(&mut app, &rt, id, pos);
+        assert!(ctx_menu_root(&app, id).is_some());
+
+        // 右键按在没有菜单的地方 ⇒ 收起（WinUI：flyout 也这样）
+        let away = Point::new(390.0, 295.0);
+        right_click(&mut app, &rt, id, away);
+        assert!(ctx_menu_root(&app, id).is_none(), "空白处右键 ⇒ 收起");
+    }
+
+    #[test]
+    fn the_menu_content_comes_from_the_declared_builder() {
+        let (rt, mut app, _, id) = menu_setup();
+        let at = menu_row_center(&app, id, "行 2");
+        right_click(&mut app, &rt, id, at);
+
+        let root = ctx_menu_root(&app, id).unwrap();
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let menu = t.children(root)[0];
+        // 分隔线没有子节点 ⇒ 过滤掉，只留"有标签的行"
+        let labels: Vec<String> = t
+            .children(menu)
+            .iter()
+            .filter(|row| !t.children(**row).is_empty())
+            .map(|row| n_text(t, t.children(*row)[0]).to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["复制行 2".to_string(), "删除".to_string()],
+            "闭包在渲染时才跑 ⇒ 捕到的是当下的 page"
+        );
+    }
+
+    /// 节点的文本内容（不是"按内容找节点"，而是"取这个节点的文本"）
+    fn n_text(t: &Track, n: NodeId) -> &str {
+        match &t.get(n).unwrap().kind {
+            Kind::Text(s) => s.as_str(),
+            other => panic!("应是文本节点：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn clicking_an_item_runs_it_and_closes_the_menu() {
+        let (rt, mut app, vm, id) = menu_setup();
+        let pos = menu_row_center(&app, id, "行 2");
+        right_click(&mut app, &rt, id, pos);
+
+        // 点第一项
+        let item_pos = ctx_menu_item_center(&app, id, 0);
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
+            let up = w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
+            assert!(up.tapped.is_some(), "点到了菜单项");
+        }
+        app.frame_all();
+
+        assert_eq!(vm.hits.get(), vec!["menu 行 2 @7".to_string()]);
+        assert!(ctx_menu_root(&app, id).is_none(), "点菜单项后收起");
+    }
+
+    #[test]
+    fn a_disabled_item_neither_runs_nor_closes() {
+        let (rt, mut app, vm, id) = menu_setup();
+        // "行 1" 的「删除」是禁用的（i > 1）
+        let pos = menu_row_center(&app, id, "行 1");
+        right_click(&mut app, &rt, id, pos);
+
+        let item_pos = ctx_menu_item_center(&app, id, 1);
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
+            w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
+        }
+        app.frame_all();
+
+        assert!(vm.hits.get().is_empty(), "禁用项不执行");
+        assert!(ctx_menu_root(&app, id).is_some(), "禁用项被点 ⇒ 菜单不收");
+    }
+
+    #[test]
+    fn left_click_outside_closes_the_menu() {
+        let (rt, mut app, _, id) = menu_setup();
+        let at = menu_row_center(&app, id, "行 2");
+        right_click(&mut app, &rt, id, at);
+        assert!(ctx_menu_root(&app, id).is_some());
+
+        let away = Point::new(390.0, 5.0);
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: away, button: PointerButton::Left });
+        }
+        app.frame_all();
+        assert!(ctx_menu_root(&app, id).is_none(), "点外面 ⇒ 轻关闭");
+    }
+
+    #[test]
+    fn right_click_elsewhere_moves_the_menu_to_the_new_target() {
+        let (rt, mut app, _, id) = menu_setup();
+        let at1 = menu_row_center(&app, id, "行 1");
+        right_click(&mut app, &rt, id, at1);
+        assert!(ctx_menu_root(&app, id).is_some());
+
+        let pos2 = menu_row_center(&app, id, "行 3");
+        right_click(&mut app, &rt, id, pos2);
+        let root = ctx_menu_root(&app, id).expect("仍在");
+        let r = crate::layout::rect_of(app.window_ctx(id).unwrap().track(), root);
+        assert!(
+            (r.x - pos2.x).abs() < 1.0 && (r.y - (pos2.y + 4.0)).abs() < 1.0,
+            "菜单跟到新的光标位置：{r:?} vs {pos2:?}"
+        );
+    }
+
+    /// 目标节点不再声明菜单（列表滚走 / 那一项变了）⇒ 自动收起，
+    /// **不需要**应用写任何"我关了"的代码（照 tooltip 会话的 `alive` 检查）
+    #[test]
+    fn menu_closes_itself_when_the_target_stops_declaring_it() {
+        let (rt, mut app, vm, id) = menu_setup();
+        let at = menu_row_center(&app, id, "行 2");
+        right_click(&mut app, &rt, id, at);
+        assert!(ctx_menu_root(&app, id).is_some());
+
+        vm.with_menu.set(false);
+        // 两帧：第一帧 view() 重跑后 `align` 才把"该节点不再声明菜单"写进保留树，
+        // 而注入发生在 align **之前**（同一帧里读的是上一帧的树）⇒ 第二帧才收。
+        // 这个 1 帧延迟肉眼不可见，代价是逻辑上更简单（不维护 desc↔track 的下标映射）。
+        app.frame_all();
+        app.frame_all();
+        assert!(ctx_menu_root(&app, id).is_none(), "目标没了 ⇒ 菜单自动收起");
     }
 
     // ─────────────── M6 修复回归：滚动平移 + 滚动容器内拖滑块 ───────────────

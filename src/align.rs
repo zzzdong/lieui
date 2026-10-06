@@ -150,6 +150,7 @@ fn write_all(track: &mut Track, d: &DescNode, id: NodeId) {
         n.tab_stop = d.tab_stop;
         n.tab_index = d.tab_index;
         n.tooltip = d.tooltip.clone();
+        n.context_menu = d.context_menu.clone();
         n.key = d.key.clone();
         n.handlers = d.handlers.clone();
         n.bindings = d.bindings.clone();
@@ -245,8 +246,9 @@ fn align_node(track: &mut Track, view: &ViewBuf, d_idx: u32, id: NodeId, out: &m
         }
 
         // ④ handlers / bindings：整体替换（闭包每次 view() 都是新的），**不置脏**
-        n.handlers = d.handlers.clone();
-        n.bindings = d.bindings.clone();
+            n.handlers = d.handlers.clone();
+            n.context_menu = d.context_menu.clone();
+            n.bindings = d.bindings.clone();
     }
 
     if size_changed || layout_changed {

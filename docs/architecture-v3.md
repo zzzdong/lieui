@@ -336,11 +336,15 @@ impl View<'_> {
     pub fn modal(&mut self, f: impl FnOnce(&mut Self));                     // backdrop + 阻断下层
     pub fn overlay(&mut self, f: impl FnOnce(&mut Self));                   // 装饰 / 水印（命中穿透）
     pub fn popup_at(&mut self, key: &str, p: Placement, f: impl FnOnce(&mut Self));
+    pub fn popup_at_point(&mut self, pos: Point, p: Placement, f: impl FnOnce(&mut Self));
     pub fn tooltip_at(&mut self, key: &str, p: Placement, f: impl FnOnce(&mut Self));
     // > M5 实现注记：锚定层的落位是布局**之后**的独立一步 `layout::place_anchored_layers`——
     // > 锚点 rect 与层自身尺寸都要等布局才知道。锚定层根用未定义可用空间布局（收缩到内容，
     // > 否则会被拉伸成整窗）；默认侧放不下翻转到另一侧、再不行钳到视口内；挪层平移整棵
     // > 子树并把旧 ∪ 新矩形登记脏区。新建层根时 `align` 会带上描述的 `LayerOpts`。
+    // > 锚点有两种（`track::AnchorTarget`）：**节点 key**（`popup_at`）与**逻辑坐标点**
+    // > （`popup_at_point`，右键菜单贴鼠标）。点被当作零尺寸矩形参与同一套翻转/钳制 ——
+    // > 所以点锚点会自动贴边回视口，而 `Placement::Fixed` 是字面量、不翻不钳。
     pub fn drag_preview(&mut self, f: impl FnOnce(&mut Self));              // 最高层
     pub fn keyed_list<I, K>(&mut self, items: I, key: impl Fn(&I::Item) -> K,
                             item: impl FnMut(&mut Self, &I::Item));   // 唯一的 key 匹配点

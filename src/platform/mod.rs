@@ -415,9 +415,12 @@ impl Runner {
 
         // 光标闪烁调度：有聚焦输入框 ⇒ 定时唤醒；否则纯 Wait（空闲帧零功耗）
         let mut wakeup: Option<Instant> = None;
+        // `next_wakeup` 要问"还有没有忙碌项"（spinner），真相在 Runtime 里 ——
+        // 好处是窗口不必每帧缓存一份 busy 快照，也就没有"过期真相"这回事。
+        let rt = self.app.runtime();
         for id in self.app.windows().iter().map(|w| w.id()) {
             if let Some(ctx) = self.app.window_ctx(id)
-                && let Some(t) = ctx.next_wakeup()
+                && let Some(t) = ctx.next_wakeup(&rt)
             {
                 wakeup = Some(match wakeup {
                     Some(prev) if prev <= t => prev,
