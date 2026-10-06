@@ -2108,8 +2108,19 @@ UI：工具栏最左 `undo`/`redo`（按 `can_undo()`/`can_redo()` 灰显）+ `C
 `primitives_after_an_image_are_painted_above_it` 直接失败（图片像素变成全透明）——
 已在该测试的文档注释里写明"这条同时是 0.3 的陷阱护栏"。
 
-**其余升级**：`skrifa 0.44 → 0.48`（墨迹盒只用 `GlyphMetrics::bounds` 一个窄面）、
-`parley 0.11.1`、`softbuffer 0.4.8`、`arboard 3.6.1`（后三个 `cargo update` 自动到位）。
+**其余升级**：`parley 0.11.1`、`softbuffer 0.4.8`、`arboard 3.6.1`（后三个
+`cargo update` 自动到位）。
+
+**`skrifa` 刻意不动（0.44）**：它必须与 parley 用的是同一份，链路是
+`parley 0.11 → fontique 0.11 → read-fonts 0.41 → skrifa 0.44`。先前顺手把它升到 0.48，
+`cargo tree -d` 里就出现了**两份 skrifa**（0.44 是 parley 带的，0.48 是我们的直依赖）：
+字体引擎编两遍，更麻烦的是**度量可能对不上** —— parley 的排版用 0.44 算、而墨迹盒是
+0.48 读的（`GlyphMetrics::bounds`），两者不一致会让"按墨迹盒居中"（tooltip / loading
+遮罩 / 图标对齐）偏掉几个百分点。这类偏差测试很难察觉，却正是光学对齐的命门。
+fontique **不**转发 skrifa（只有 `Blob`/`Collection`/`FontInfo` 等）、parley 也不暴露
+glyph bbox ⇒ 直依赖省不掉，只能把版本钉在 parley 那条链上（`Cargo.toml` 注释里写了
+耦合与检查方法）。校验：`cargo tree -i skrifa@0.44.0` 显示 `lieui-text` 与
+`parley v0.11.1` 共用一份，`read-fonts` 也只有 0.41.0 一份。
 
 **故意不升 `winit`**（仍是 0.30.13）：0.31 只有 `0.31.0-beta.3`（预发布），而本轮的
 DPI 契约（`ScaleFactorChanged` + `InnerSizeWriter::request_inner_size` + `dpi_aware` 默认值）

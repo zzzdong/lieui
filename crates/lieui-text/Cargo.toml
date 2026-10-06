@@ -9,5 +9,14 @@ description = "lieui 的文本测度与排版（parley 封装 + 缓存）"
 [dependencies]
 lieui-geom = { workspace = true }
 parley = { workspace = true }
-# 字形墨迹盒（ink bounds）：parley 内部即用同一份字体引擎，版本对齐避免重复编译
-skrifa = "0.48"
+# 字形墨迹盒（ink bounds）：直接读字体的 glyph bbox（`GlyphMetrics::bounds`），
+# parley 不暴露这个能力，只能直连 skrifa（fontique 也不转发它）。
+#
+# **版本必须与 parley 用的是同一份**：链路是
+# `parley 0.11 → fontique 0.11 → read-fonts 0.41 → skrifa 0.44`。
+# 若这里写成别的版本（例如 0.48），cargo 会同时编两份字体引擎，而且 0.48 读出的
+# 墨迹盒可能与 parley 用 0.44 算出的排版度量对不上 —— 那会直接让"按墨迹盒居中"
+# （tooltip / loading 遮罩 / 图标对齐）偏掉几个百分点。
+# 升 parley 时**必须**顺着上面这条链把这里一起改，并用 `cargo tree -d` 确认
+# 树里只有一份 skrifa。
+skrifa = "0.44"
