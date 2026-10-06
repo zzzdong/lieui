@@ -2139,3 +2139,25 @@ alpha.3 仍然指向 vello_cpu 0.2。
 
 验证：lieui `cargo test --lib` 341 全绿 + clippy 0 警告 + 示例编译通过；
 pdfkit `cargo test` 46 全绿。
+
+## 2026-10-06 · 发布 0.1.0-alpha.4
+
+- **内容**（相对 alpha.3）：
+  - **修复**：滚动条在窗口最小化（0×0 客户区 ⇒ 负轨道长度）时 panic；
+  - **破坏性依赖升级**：`vello_cpu 0.2 → 0.3`（三处 API 适配 + `TargetInit` 默认清空
+    目标的陷阱）、`skrifa` 与 parley 对齐（见上）；`parley 0.11.1` / `softbuffer 0.4.8` /
+    `arboard 3.6.1` 随 `cargo update` 到位；`winit` 保持 0.30.13（0.31 只有 beta）；
+  - 版本号 `alpha.3 → alpha.4`。
+- **提交**（发布前 4 笔）：
+  - `fix(scrollbar)`: 轨道长度为负时不再 panic（窗口最小化 / 矮容器）
+  - `chore(deps)!`: 升级 vello_cpu 0.3 + skrifa，版本升 alpha.4
+  - `docs(operation-log)`: 记三条（panic 修复 / 依赖升级 / liepdf 改名与新功能）
+  - `fix(deps)`: skrifa 对齐 parley 的 0.44（别让树里出现两份字体引擎）
+- **发布顺序**：`lieui-geom` → `lieui-text` → `lieui-layout` → `lieui`（用 cargo 1.97 的
+  `cargo publish --workspace`，由 cargo 按依赖顺序排队并等索引）；发布前
+  `cargo publish --dry-run --workspace` 四个 crate 全部打包 + 验证通过。
+- **pdfkit**：path 依赖的 version 规格同步到 `0.1.0-alpha.4`（path 依赖也校验 version），
+  对新版本重新编译并测试（46 全绿）。
+
+**结果**：四个 crate 均已上传到 crates.io，`cargo search` 复核 latest 全部是
+`0.1.0-alpha.4`。
