@@ -608,7 +608,7 @@ impl Ctx {
         self.rt.request_animation(self.window);
     }
 
-    // ── 跨线程投递 / loading 遮罩（见 `crate::task`）──
+    // ── 跨线程投递（见 `crate::post`）──
 
     /// 拿一份**可 `Send` 的投递句柄** —— 交给工作线程用。
     ///
@@ -621,7 +621,7 @@ impl Ctx {
     ///     poster.post(win, heavy_work());    // 投递 + 唤醒
     /// });
     /// ```
-    pub fn poster(&self) -> crate::task::Poster {
+    pub fn poster(&self) -> crate::post::Poster {
         self.rt.poster()
     }
 
@@ -629,7 +629,7 @@ impl Ctx {
     ///
     /// 一般用 [`Self::poster`]（两种模式都能投递）；只有需要**显式区分**
     /// "有没有事件循环"时才直接用这个。
-    pub fn waker(&self) -> Option<std::sync::Arc<dyn crate::task::Waker>> {
+    pub fn waker(&self) -> Option<std::sync::Arc<dyn crate::post::Waker>> {
         self.rt.waker()
     }
 
@@ -647,7 +647,7 @@ impl Ctx {
     ///
     /// 这是 `Signal` 之外的"消息"通道：适合枚举型业务事件（`MyEvent::SaveFinished`）、
     /// 或者"不想为它建 Signal"的一次性通知。同一个 `T` 也可以跨线程投递
-    /// （[`crate::task::Poster::post`] 与 [`Emitter`] 是同一条管道）。
+    /// （[`crate::post::Poster::post`] 与 [`Emitter`] 是同一条管道）。
     pub fn emit<T: Send + 'static>(&self, msg: T) -> bool {
         self.rt.emit(self.window, msg)
     }
@@ -717,7 +717,7 @@ impl Runtime {
     /// 投递一条自定义事件到某个窗口：UI 线程在下一个 tick 的
     /// `ViewModel::on_external` 里收到（`data.downcast::<T>()`）。
     ///
-    /// 与 [`crate::task::Poster::post`] 是同一条管道：有平台时走
+    /// 与 [`crate::post::Poster::post`] 是同一条管道：有平台时走
     /// `EventLoopProxy`，无头时进本地队列（`App::frame_all` 消费）。返回 `false`
     /// 表示事件循环已退出。
     pub fn emit<T: Send + 'static>(&self, window: WindowId, msg: T) -> bool {
@@ -746,7 +746,7 @@ impl Runtime {
 
 /// 类型化的**事件发射器**：`Clone + Send`，可以挂在业务层里、也可以 move 进工作线程。
 ///
-/// 就是 [`crate::task::Poster`] 的**类型化糖**（固定窗口 + 固定载荷类型）：
+/// 就是 [`crate::post::Poster`] 的**类型化糖**（固定窗口 + 固定载荷类型）：
 /// poster 只关心"发事件"，不带任何任务语义。适合把 UI 无关的业务模块
 /// （网络层、文件监听、设备）接进来。
 ///
@@ -758,13 +758,13 @@ impl Runtime {
 /// // UI 侧：ViewModel::on_external 里 downcast::<NetEvent>()
 /// ```
 ///
-/// 内部只存 [`Poster`](crate::task::Poster)（`Arc`，`Send + Sync`）而**不是**
+/// 内部只存 [`Poster`](crate::post::Poster)（`Arc`，`Send + Sync`）而**不是**
 /// `Runtime`（`Rc`，`!Send`）—— 这正是它天然能跨线程、无需 unsafe 的原因；
 /// 也正因为存的是**共享的投递中心**，平台 waker 后装入它也立刻可见
 /// （见 `Poster` 文档里的 A6）。
 pub struct Emitter<T> {
     window: WindowId,
-    poster: crate::task::Poster,
+    poster: crate::post::Poster,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 

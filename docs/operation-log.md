@@ -6150,3 +6150,99 @@ step 0/1 已完成，且证明了"**删掉 busy 不会丢能力**"。剩下：
    ⇒ 看到"参数只为一件事存在"时，那件事多半不该在这里。
 3. **删功能时必须区分"测功能的"与"测不变量的"** —— 4 条护栏测功能（该删），
    2 条测不变量（该留，只换 vehicle）。若一起删，就会丢掉一个真实的**光栅层序**回归护栏。
+
+---
+
+## 2026-10-08 · `task` 模块改名 `post`（并答复"是否该合并进 runtime"）—— ✅ 完成
+
+起因是两个问题：① 模块名 `task` 名不副实；② 它的内容是否该合并进 `runtime`。
+
+### 一、模块现在只剩什么（先量）
+
+| 顶层 item | 行 | 性质 |
+|---|---|---|
+| `pub trait Waker` | 57 | 「唤醒 UI 线程」的平台无关句柄（winit 的 `RepaintHandle` / 无头时的本地队列） |
+| `struct LocalQueue` / `impl` | 67 | 私有：无头模式的消息落地处 |
+| `struct PostHub` | 90 | 私有：`Arc<PostHub>` = **稳定身份**（A6 的结构性修复） |
+| `pub struct Poster` + `Default` + `impl` | 125 | 可 `Send` 的投递句柄（含 A6 的长文档） |
+| `impl Runtime` | 199 | 门面：`set_waker` / `waker` / `is_online` / `poster` / `wake` / `take_pending_external`（约 60 行） |
+
+**共 258 行**。`spawn_task` / `TaskCtx` / `TaskHandle` / `CancelToken` / `TaskEvent` /
+任务表 —— 一个都不在了。**名字成了历史遗留的谎**。
+
+### 二、答复②：**不合并**进 `reactive.rs` —— 三条依据
+
+| 依据 | 事实 |
+|---|---|
+| **域不同** | `reactive.rs:1` 自述是"**R1 响应式**：`Runtime`（脏标志表）+ `Signal<T>` + `act()`"。投递与事件循环唤醒是**另一个域** |
+| **合并不自洽** | `impl Runtime` 现在是**按域分文件**的扩展：`reactive.rs`（核心状态 ×2）/ `timer.rs`（时间）/ `event.rs`（输入与 emit）/ `post.rs`（跨线程投递）。只并 `post.rs` 是任意的 —— 按同样逻辑就该把 `timer.rs`、`event.rs` 一起并，得到 2000+ 行 |
+| **会加重已知债** | `reactive.rs` 已是 D51 认定的"杂物抽屉"（`RuntimeInner` 15 字段跨 5 域）。把行为也塞回去是**反向**修 |
+
+★ 用户感觉到的"**状态与行为分居**"是真的，但解法是**拆 `RuntimeInner`**，不是把行为收拢回去。
+
+### 三、① 改名：`task` → **`post`**
+
+依据：模块里**两个公开类型的核心方法都叫 `post`**（`Poster::post` / `Waker::post`），
+而"投递 + 唤醒"就是它的全部职责 —— **名字就是职责**。
+
+```
+lieui::task::{Poster, Waker}  →  lieui::post::{Poster, Waker}
+pub mod task;                 →  pub mod post;
+#[path = "task_tests.rs"]     →  #[path = "post_tests.rs"]
+```
+
+用 `git mv` 保历史。影响面：**9 个文件 / 24 行**（`app.rs` 3 · `event.rs` 8 · `lib.rs` 3 ·
+`post.rs` 1 · `post_tests.rs` 1 · `reactive.rs` 2 · `timer.rs` 1 · `window.rs` 2 ·
+`platform/mod.rs` 3）。
+
+**pdfkit 零改动** —— 它只用 `lieui::prelude::{Poster, ...}`，不写模块路径（上一批把
+prelude 收敛到位，这次直接受益）。
+
+### 四、顺带修掉的 4 处过时文案（改名过程中发现）
+
+| 位置 | 问题 |
+|---|---|
+| `window.rs` `external()` | 历史叙述里写的是 `crate::task::on_task_message` —— 全局替换会把它改成 `crate::post::on_task_message`，**把已删除 API 指向新路径**（错）。改写成不带模块链接的 `task::on_task_message`；顺带删掉同一段里已移除的 `BusyToken` 字样 |
+| `lib.rs` 模块表 | 还写着"`task` … + loading 遮罩状态（`BusyToken`）"—— 遮罩已移除 ⇒ 改成 `post` 行 |
+| `event.rs` 分区头 | "跨线程投递 / loading 遮罩" ⇒ 去掉遮罩 |
+| `reactive.rs:12` | 陈旧引用"跨线程走 `RepaintHandle`，M4" ⇒ 指向 `crate::post::Poster` |
+
+★ **教训**：机械全局替换会污染**历史叙述**（"早先这里有…"）。这类文本要单独核。
+
+### 五、改名后必查：intra-doc link
+
+跑了 `cargo doc --no-deps --workspace`（改名会把链接改死）：
+
+- **零新增**告警 —— 没有任何 `crate::task` / `unresolved link to post` 之类
+- 列出的告警全是**既存且与本次无关**的：`InputEvent` / `Event` / `crate::CustomNode` /
+  `DescRef::context_menu` / `MERGE_GAP`（private）/ `crate::app::TOOLTIP_DELAY` /
+  `align` 函数与模块同名歧义 —— 另有 10+ 条，属独立清理项（D40 族）
+
+### 六、`refactor-plan` 两条随概念移除而失效
+
+| ID | 原描述 | 现状 |
+|---|---|---|
+| **D7** | `run()` 之前 spawn 的任务永久静默挂起 | ✅ **已完成** —— `Poster` 指向共享 `Arc<PostHub>`（槽位本身共享）⇒"句柄持有旧快照"结构上不可能；且任务概念已整体移除 |
+| **D34** | 任务线程与背压 | ✅ **已消失** —— 描述的全是框架内置任务的问题（每任务一条 OS 线程 / 每次 progress 一个 OS 事件 / `TaskHandle` 无 `Drop` / `CancelToken` SeqCst）。线程模型归调用方后框架不再有"任务线程"可管 |
+
+两条按文件既有惯例（同 D5/D6）用 ~~删除线~~ + ✅ 标注，**保留条目**（便于追溯）。
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **21 个测试二进制全 ok / 551 条** |
+| `clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `fmt --check` / `build --examples` | 0 处差异 / exit 0 |
+| `cargo doc --no-deps` | exit 0，改名**零新增**链接告警 |
+| **pdfkit** `cargo build` | exit 0（**无需改动**） |
+
+规模：`src/post.rs` **266 行**（含 8 行新增的"为什么叫 post"说明）/ `src/post_tests.rs` 214 行。
+
+### 八、另有两个备选名（若 `post` 不合意，改回是机械的）
+
+| 名 | 读出效果 | 权衡 |
+|---|---|---|
+| **`post`**（已用） | `post::Poster` / `post::Waker` | 与 `Poster::post` 略有重复，但**最直白** |
+| `mailbox` | `mailbox::Poster`（寄件人）/ `mailbox::Waker`（箱上的铃） | 无重复；`Waker` 在"信箱"里略绕 |
+| `channel` | `channel::Poster` / `channel::Waker` | 准确，但暗示有 `Receiver`，而实际是"UI 线程 drain" |

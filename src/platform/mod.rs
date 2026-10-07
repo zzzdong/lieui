@@ -118,12 +118,12 @@ impl RepaintHandle {
     }
 }
 
-/// 平台唤醒器：`RepaintHandle` 是 [`Waker`](crate::task::Waker) 的唯一 winit 实现。
+/// 平台唤醒器：`RepaintHandle` 是 [`Waker`](crate::post::Waker) 的唯一 winit 实现。
 ///
 /// 实现 trait 之后，`Runtime::set_waker` 就能把它交给框架 —— 于是
-/// [`crate::task::Poster`]（以及 `Runtime::emit`）自带通道，
+/// [`crate::post::Poster`]（以及 `Runtime::emit`）自带通道，
 /// 调用方**不再必须**用 `run_with_handle` 手动传递句柄。
-impl crate::task::Waker for RepaintHandle {
+impl crate::post::Waker for RepaintHandle {
     fn wake(&self) -> bool {
         // 显式写固有方法，避免与 trait 方法混淆
         RepaintHandle::wake(self)

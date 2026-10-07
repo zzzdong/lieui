@@ -1180,14 +1180,14 @@ impl WindowCtx {
         did_work
     }
 
-    /// 外部数据（后台线程 → UI 线程，见 [`crate::task`]）。
+    /// 外部数据（后台线程 → UI 线程，见 [`crate::post`]）。
     ///
     /// ★ **通道是不透明的**：一切都原样交给 `ViewModel::on_external`。
     ///
-    /// 早先这里有一句 `if crate::task::on_task_message(..) { return; }` ——
+    /// 早先这里有一句 `if task::on_task_message(..) { return; }` ——
     /// 框架得先认一遍"这条是不是我自己发的任务消息"，是就吞掉。
-    /// 那种"框架拥有消息协议"的设计已经移除：`Sender`/`Poster` 侧只负责投递，
-    /// 语义全在调用方手里（遮罩由 `BusyToken` 自己收，不需要框架代劳）。
+    /// 那种"框架拥有消息协议"的设计已移除：投递侧只负责把字节送到，
+    /// **语义全在调用方手里**（连"遮罩何时收起"也是调用方的事）。
     pub fn external(&mut self, rt: &Runtime, data: ExternalData) {
         let mut cx = Ctx::new(rt, self.id, EventView::external());
         self.view.on_external(&mut cx, data);

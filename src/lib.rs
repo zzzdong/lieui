@@ -23,7 +23,7 @@
 //! | [`transform`] | 2D 仿射矩阵（绘制 / 命中 / 裁剪共用） |
 //! | [`app`] | `ViewModel` / `WindowView`（对象安全擦除）/ `WindowCtx` 帧驱动 / 多窗口 `App` |
 //! | [`theme`] | `Theme`（design token）+ `ThemeMode`（浅/深/跟随系统/自定义）|
-//! | [`task`] | 跨线程投递原语（`Poster` / `Waker`）+ loading 遮罩状态（`BusyToken`）—— **不含"任务"概念** |
+//! | [`post`] | 跨线程投递原语：`Poster`（可 `Send` 的投递句柄）/ `Waker`（平台唤醒器）—— **不含"任务"，也不含"遮罩"** |
 //! | [`timer`] | 统一时钟：`set_timeout` / `set_interval` / `request_animation`（帧唤醒汇总）|
 //!
 //! ## 事件与时钟（速览）
@@ -108,10 +108,10 @@ pub mod layout;
 pub mod menu;
 #[cfg(feature = "winit")]
 pub mod platform;
+pub mod post;
 pub mod reactive;
 pub mod render;
 pub mod style;
-pub mod task;
 pub mod theme;
 pub mod timer;
 pub mod track;
@@ -134,13 +134,13 @@ pub use focus::FocusChange;
 pub use input::{InputEvent, InputStep};
 pub use layout::LayoutStats;
 pub use menu::{ITEM_HEIGHT, MENU_MIN_WIDTH, MenuItemRef, MenuRef};
+pub use post::{Poster, Waker};
 pub use reactive::{Dirty, Runtime, Signal, act, act1};
 pub use render::{
     Op, RasterStats, Rasterizer, RenderStats, Renderer, Scene, SceneBuilder, SceneOptions, SceneStats, TextCache,
     damage_batches,
 };
 pub use style::{ImageFit, ImageStyle, PaintStyle, ShadowSpec, TextStyle};
-pub use task::{Poster, Waker};
 pub use timer::{FRAME_PERIOD, TimerHandle};
 pub use track::{
     Anchor, Axis, Flags, FocusPolicy, FocusState, ImageData, InteractionState, Key, Kind, KindDesc, KindTag, Layer,
@@ -165,10 +165,10 @@ pub mod prelude {
     pub use crate::icon::{icon_char, icon_font_family};
     pub use crate::input::InputEvent;
     pub use crate::menu::{MenuItemRef, MenuRef};
+    pub use crate::post::{Poster, Waker};
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::render::scene::Scene;
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
-    pub use crate::task::{Poster, Waker};
     pub use crate::theme::{Theme, ThemeMode};
     pub use crate::timer::{FRAME_PERIOD, TimerHandle};
     pub use crate::track::{AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility};

@@ -18,7 +18,7 @@
 //!
 //! 定时器在 **UI 线程**执行（回调拿 `&mut Ctx`，可以改 `Signal`、开窗、起任务），
 //! 所以闭包是 `!Send` 的普通 `FnMut`。跨线程的周期活儿请让工作线程自己循环，
-//! 用 [`crate::task::Poster::post`] 把每轮结果投递回来。
+//! 用 [`crate::post::Poster::post`] 把每轮结果投递回来。
 
 use std::time::{Duration, Instant};
 

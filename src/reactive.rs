@@ -9,7 +9,8 @@
 //! - **保守传播**：R1 不知道哪个窗口读了哪个 signal，因此 `set` 会给**所有已注册窗口**置 `VIEW`；
 //!   其他窗口随后会重跑自己的 `view()` + `align`（逐字段比 ⇒ 几乎全是 no-op）。
 //! - **约束**：`view()` 执行期间禁止 `set`（会自我触发循环），debug 下 panic 拦下。
-//! - **代价**：`Signal` 是 `Clone`（`Rc`）不是 `Copy`；`!Send`（跨线程走 `RepaintHandle`，M4）。
+//! - **代价**：`Signal` 是 `Clone`（`Rc`）不是 `Copy`；`!Send` —— 跨线程通信只能把
+//!   `Send` 数据经 [`crate::post::Poster`] 投递回 UI 线程（见 [`crate::post`]）。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -98,12 +99,12 @@ pub(crate) struct RuntimeInner {
     pub(crate) theme_mode: Cell<crate::theme::ThemeMode>,
     /// 操作系统的深色状态（平台层上报；`System` 模式下据此选预设）
     pub(crate) system_dark: Cell<bool>,
-    /// **跨线程投递中心**（见 [`crate::task::Poster`]）。
+    /// **跨线程投递中心**（见 [`crate::post::Poster`]）。
     ///
     /// 平台层进入事件循环时把 `waker` 装进去（见 `Runtime::set_waker`）；
     /// 未装 = 本地队列模式。★ 它是**共享的 `Arc`**，所以先 clone 出去的
     /// 投递句柄也会立刻看见后装入的平台 waker —— 这是 A6 的结构性修复。
-    pub(crate) poster: crate::task::Poster,
+    pub(crate) poster: crate::post::Poster,
     /// 定时器的自增 id（原先与忙碌项共用一个计数器 `next_task_id`；
     /// 忙碌项随"遮罩是组件"一起移除后，它对定时器来说该叫自己的名字）
     pub(crate) next_timer_id: Cell<u64>,

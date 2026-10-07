@@ -99,7 +99,7 @@
 | **D4** | `close_requested` 丢弃全部 Cmd | `app.rs:1273-1276` 建了 `cx`、调了回调，从不 `take_cmds()` | [1][2] | ✔✔多源 |
 | ~~**D5**~~ | ~~`hit` 与 `render` 的裁剪坐标系不一致~~ **⇒ 误判已推翻（2026-10-07）** | **实测两侧同语义**：`scene.rs:462` 的 `Op::PushClip { rect: c, transform }` 里 `c` 与 `rect()` 同为**节点本地空间**，且 `transform` 被显式携带；`hit.rs:104-108` 也先把点逆变换到本地再 `clip.contains(q)`。已加契约测试 `hit::d5_clip_space`（2 条，含变异验证）钉住该语义 | ~~[1][2][4]~~ | ❌**已推翻**（原定P0 不成立） |
 | **D6** | ~~**Modal 内嵌 Popup / Tooltip 不可见且不可命中**~~ **⇒ 2026-10-07 修正定性** | 核实：`Root.owner` **确实无消费点**（设计 §3.7 的 `z = (Layer, 嵌套深度, 序号)` 未实现）—— 属实；但**现象不可达**（生产代码 `owner` 恒为 `None`，唯一传 `Some(modal)` 的是测试），且**"Modal 盖住 Popup"本身是正确设计**（枚举序 `Popup(2) < Modal(4)`，模态框本就该阻断下层）。**真正成立的是"两份手写层序数组漂移风险"，已修**（`Layer::ALL` 单一权威源） | ~~[2][3][4]~~ | ✅**已完成**（2026-10-07，A 方案：z 序已实现嵌套深度） |
-| **D7** | `run()` 之前 spawn 的任务永久静默挂起 | `task.rs:506` 克隆 waker 快照 + `platform/mod.rs:955` 的 `set_waker` 在 `run()` 内 + 本地队列 GUI 模式不 drain（`task.rs:443-448`） | [1][2][3] | ✔✔多源 |
+| ~~**D7**~~ | ~~`run()` 之前 spawn 的任务永久静默挂起~~ **⇒ 已完成（2026-10-08）** | **结构性修复**：`Poster` 指向共享的 `Arc<PostHub>`（**槽位本身共享**）⇒"句柄持有旧快照"在结构上不可能，不再需要"把平台 waker 事后塞进旧队列"这类 retrofit；同时"任务"概念整体移除（`spawn_task` / 快照 / 本地队列转发都没了）。回归：`post::a_poster_taken_before_set_waker_still_reaches_the_platform` + `set_waker_forwards_already_queued_messages` | ~~[1][2][3]~~ | ✅**已完成** |
 | **D8** | release 下 `view()` 内 `set` 静默自激；`view()` panic 后 `in_view` 永久污染 | `reactive.rs:403-411` 断言被 `cfg!(debug_assertions)` 包裹；`app.rs:639/650` 的 `begin/end_view` 非 RAII | [1][2][3][4] | ✔✔多源 |
 
 > **D6 的严重性高于 v1.0 的判断**：它不只是命中问题 —— **绘制侧同样不消费 `owner`**，所以现象是"模态框里开的下拉/右键菜单**既画不出来也点不到**"。这是 §3.7 与 §3.15 两条设计承诺同时未落地。
@@ -139,7 +139,7 @@
 | **D31** | 每节点 `TextSpec.font_family: String` | `track.rs:747` + `lieui-text/src/spec.rs:37`；`lieui-text/src/lib.rs:207-224` 缓存命中路径也要 `to_owned()` 构造键 | | [1][2][4] | ✔已核验 |
 | **D32** | 脏区算三遍、批次算两遍 | `render/mod.rs:121-125`、`raster.rs:363`、`platform/mod.rs:182-193` | 每帧 ≥4 个临时 Vec | [1][2][4] | ✔已核验（v1.1 转已核验） |
 | **D33** | 阴影模糊超出脏区 | `widgets/mod.rs:633-636` vs `track.rs:1717-1730` | 光晕外圈不在脏区 ⇒ 残影 | [1][2] | ✔已核验（v1.1 转已核验） |
-| **D34** | 任务线程与背压 | `task.rs:546` 每任务一条 OS 线程无池；`progress` 每次一个 OS 事件（`:180-190`）；`TaskHandle` 无 `Drop`（`:237-242`）；`CancelToken` SeqCst | | [3] | ✔已核验 |
+| ~~**D34**~~ | ~~任务线程与背压~~ **⇒ 已消失（2026-10-08）** | 该条描述的全是**框架内置任务**的问题（每任务一条 OS 线程无池 / 每次 `progress` 一个 OS 事件 / `TaskHandle` 无 `Drop` / `CancelToken` SeqCst）。`spawn_task` 已整体移除 ⇒ **线程模型与背压归调用方**，框架不再有"任务线程"可管。留下的 `Poster::post` 只做一次"投递 + 唤醒"，背压是调用方自己要关心的事 | ~~[3]~~ | ✅**已消失**（概念移除） |
 | **D35** | `align_keyed_children` O(n²) | `align.rs:330-334` `pool.iter().position(...)` | | [2] | ✔已核验 |
 | **D36** | 层 opts 任何变化 ⇒ 整窗脏 | `align.rs:63-69` 含纯交互的 `dismiss_on_outside_click` | | [2] | ✔已核验 |
 | **D37** | 无像素 snapping + 浮点容差分散 | `float_is_equal` 1e-4（`types.rs:227`）、`rect_eq` 1e-3（`layout.rs:424`）、滚动钳制 1e-4、锚点 1e-2 | 1px 分隔线与文本持续半像素模糊 | [3] | ⚠️**部分修正**（2026-10-07）：四套容差其实是**三种不同语义**——1e-6 精确比较（DPI scale，两处重复实现）、1e-3 视觉等价（`rect_eq`/`transform.rs`，**合理**）、1e-4 滚动偏移精确钳制。**真正的问题只有"无 snapping"与"1e-6 重复两处"，统一容差常量属可读性而非正确性** |

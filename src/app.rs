@@ -210,10 +210,10 @@ impl App {
     /// 时（无头测试、自己驱动帧）这就是"事件循环"，后台任务/自定义事件的投递会自动落地。
     ///
     /// ⚠️ 这里**不能**假设"有平台时队列恒空"（A6 修复前的注释正是这么写的，而它是错的）：
-    /// 调用方可能在 `run()` **之前**就把 [`crate::task::Poster`] 交给工作线程，
+    /// 调用方可能在 `run()` **之前**就把 [`crate::post::Poster`] 交给工作线程，
     /// 那时的投递会落进本地队列。现在 `platform::Runner` 与这里都 drain 同一个
     /// 队列（"取走"语义 ⇒ 不会重复投递），且 `set_waker` 会把已积压的转交平台
-    /// （见 [`crate::task`]），两边都 drain 之后该假设才成立。
+    /// （见 [`crate::post`]），两边都 drain 之后该假设才成立。
     pub fn frame_all(&mut self) -> Vec<(WindowId, FrameStats)> {
         let rt = self.rt.clone();
         for (w, data) in rt.take_pending_external() {
@@ -275,7 +275,7 @@ impl App {
     ///
     /// ★ 框架**不再管后台线程**：`cancel_tasks_of` 随"移除 task 概念"一起删除。
     /// 调用方自己起的线程仍会跑完，往一个已经没了的窗口 `post` 时
-    /// [`crate::task::Poster::post`] 会返回 `false`（或没人消费）——
+    /// [`crate::post::Poster::post`] 会返回 `false`（或没人消费）——
     /// **要不要取消、怎么取消，是调用方的决定**（这是刻意的边界）。
     pub fn close_window(&mut self, id: WindowId) -> bool {
         let before = self.windows.len();
