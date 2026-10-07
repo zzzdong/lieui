@@ -9,6 +9,7 @@
 //!
 //! 文本排版（parley）按 `(内容, 规格, 颜色)` 缓存，由 [`TextCache`] 持有。
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -366,31 +367,79 @@ fn spec_hash(s: &TextSpec) -> u64 {
 
 // ───────────────────────── 脏区剔除 ─────────────────────────
 
-/// 脏区（剔除用）。`all = true` 时不做剔除。
-#[derive(Clone, Debug)]
+/// 脏区 + **裁剪栈**（剔除用）。`all = true` 时不做脏区剔除。
+///
+/// ## 为什么裁剪状态放这里，而不是留在 `WalkCtx`
+///
+/// 裁剪栈需要在整个 `walk` 递归过程中**可变**（进入子节点时压入、
+/// 返回时恢复），而它同时要被**逐原语**的剔除用到——那些站点在
+/// `widgets::draw` 里，只拿到 `&Cull`。
+///
+/// 早期版本把 clip 放在 `walk` 的参数 `WalkCtx` 里，于是逐原语站点
+/// 看不到它 ⇒ 只能判"与脏区相交"。**两份状态**（`WalkCtx.clip` 与
+/// `Cull.clip`）会立刻产生"更新了一处忘了另一处"的不一致风险。
+///
+/// 所以**统一收敛到 `Cull`**：它本来就以 `&Cull` 传遍全程，
+/// 加一个 `Cell<Option<Rect>>` 即可获得内部可变性（`Rect: Copy`），
+/// **零签名变更**，且只有一个裁剪状态来源。
+#[derive(Debug)]
 pub(crate) struct Cull {
     rects: Vec<Rect>,
     all: bool,
+    /// 当前路径上的祖先裁剪（**窗口坐标**）。`None` = 无裁剪。
+    ///
+    /// 用 `Cell` 而非 `&mut`：`Cull` 以 `&Cull` 传递（`draw` 内部还要用），
+    /// 而 `walk` 需要在递归中改它。
+    clip: Cell<Option<Rect>>,
 }
 
 impl Cull {
     pub(crate) fn new(damage: &[Rect], damage_all: bool, window: Size) -> Self {
-        if damage_all || damage.is_empty() {
-            Self {
-                rects: vec![Rect::new(0.0, 0.0, window.width, window.height)],
-                all: true,
-            }
+        let (rects, all) = if damage_all || damage.is_empty() {
+            (vec![Rect::new(0.0, 0.0, window.width, window.height)], true)
         } else {
-            Self {
-                rects: damage.to_vec(),
-                all: false,
-            }
+            (damage.to_vec(), false)
+        };
+        Self {
+            rects,
+            all,
+            clip: Cell::new(None),
         }
     }
 
-    /// 包围盒是否与脏区相交（`all` 时恒为真）
+    /// 包围盒是否与脏区相交（`all` 时恒为真）。
+    ///
+    /// ⚠️ **只判脏区，不判裁剪** —— 逐原语站点应该用 [`Self::hit_visible`]。
+    /// 保留这个方法是因为**节点级**剔除已经先把 `screen` 交过一次叉
+    /// （见 `walk` 里的 `visible`），再判一次会重复劳动。
     pub(crate) fn hit(&self, r: &Rect) -> bool {
         self.all || self.rects.iter().any(|d| d.intersects(r))
+    }
+
+    /// 包围盒是否**既与脏区相交、又未被祖先裁剪完全裁掉**。
+    ///
+    /// ★ 与 [`Self::hit`] 的区别就是"祖先裁剪"这一项。
+    ///
+    /// ## 为什么这一步是安全的（而"按容器 bbox 裁子树"不安全）
+    ///
+    /// `clip` 来自 `clip_content` / `overflow_scroll` / 显式 `n.clip`
+    /// —— 它们都是**硬约束**：被裁掉的内容**确定不会显示**。
+    /// 所以"原语完全落在 clip 外 ⇒ 不提交"不会丢任何东西。
+    ///
+    /// 相反，若按**容器自身 bbox** 去裁子树就是错的：不裁剪的容器
+    /// **允许子节点溢出**（overflow visible，tooltip 定位、弹窗等），
+    /// 按 bbox 裁掉会**丢失溢出内容**。实测（`render_cost_bench` 的
+    /// `unclipped_container`）这类容器确实存在且 visited 线性增长，
+    /// 但**没有正确的方法**在不加裁剪语义的前提下跳过它。
+    pub(crate) fn hit_visible(&self, r: &Rect) -> bool {
+        if !self.hit(r) {
+            return false;
+        }
+        match self.clip.get() {
+            // 无裁剪 ⇒ 脏区相交即可见
+            None => true,
+            Some(c) => c.intersects(r),
+        }
     }
 
     pub(crate) fn is_all(&self) -> bool {
@@ -430,15 +479,13 @@ impl Default for SceneOptions {
 /// 加了"祖先裁剪"之后 `walk` 变成 8 个参数，`clippy::too_many_arguments` 直接报错
 /// —— 这类门禁**是设计信号而非噪音**：参数列表失控通常意味着状态没归位。
 ///
-/// 这里把状态分成两类：
-/// - **全程不变**的 `cull`（脏区）与 `opts`（主题/开关）⇒ 借用一次即可；
-/// - **随递归变化**的 `clip`（当前路径上的祖先裁剪，窗口坐标）⇒ 作为可字段，
-///   进入子节点时写入、返回时**恢复**（与 `Op::PushClip`/`PopClip` 同构）。
+/// 这里只保留**全程不变**的两项。
+/// 随递归变化的裁剪栈**已收敛进 [`Cull`]**（`clip: Cell<Option<Rect>>`）——
+/// 因为逐原语剔除也要用它，而那些站点只拿到 `&Cull`。
+/// 两份状态（这里一份、`Cull` 一份）必然产生"更新一处忘另一处"的风险。
 struct WalkCtx<'a> {
     cull: &'a Cull,
     opts: &'a SceneOptions,
-    /// 当前路径上的祖先裁剪（**窗口坐标**）。`None` = 无裁剪。
-    clip: Option<Rect>,
 }
 
 /// 展开器：持有跨帧的文本排版缓存
@@ -478,14 +525,7 @@ impl SceneBuilder {
 
         // ★ z 序遍历（从下到上）：`z = (Layer, 嵌套深度, 声明序号)`。
         //   命中侧 `hit.rs` 遍历**同一序列的逆序** ⇒ 绘制顺序与命中顺序必然一致。
-        //
-        //   层根的祖先裁剪 = **窗口本身**（不是无限大），否则"溢出窗口的层根"
-        //   会带着一个看似无限的裁剪区往下传，永远命中脏区。
-        let mut ctx = WalkCtx {
-            cull: &cull,
-            opts,
-            clip: Some(window_rect),
-        };
+        let mut ctx = WalkCtx { cull: &cull, opts };
         for root in track.z_ordered_roots() {
             // 层遮罩（Modal 的 backdrop / 自定义）
             if let Some(color) = root.opts.backdrop {
@@ -496,7 +536,10 @@ impl SceneBuilder {
                     transform: Affine::IDENTITY,
                 });
             }
-            ctx.clip = Some(window_rect);
+            // ★ 层根的祖先裁剪 = **窗口本身**（不是无限大）。
+            //   否则"溢出窗口的层根"会带着一个看似无限的裁剪区往下传，
+            //   永远命中脏区 —— 逐原语剔除会因此完全失效。
+            cull.clip.set(Some(window_rect));
             self.walk(track, root.node, Affine::IDENTITY, &mut ctx, &mut scene);
         }
 
@@ -528,7 +571,7 @@ impl SceneBuilder {
         //
         // 在长列表上这是主要浪费来源：容器 bbox 很高、必然与脏区相交，
         // 于是**全部**子节点都会被遍历和提交，而实际可见的只有十几行。
-        let visible = match ctx.clip {
+        let visible = match cull.clip.get() {
             Some(pc) => screen.intersect(&pc),
             None => Some(screen),
         };
@@ -564,11 +607,11 @@ impl SceneBuilder {
         //   写成 `clip.and_then(...)` 会在"无 clip 的节点"处把 `child_clip` 变成 `None`，
         //   裁剪链就断了 —— 外层裁剪对更深层完全失效。
         //   实测症状：外层 100×100 裁剪区内放一个 400×400 的**无 clip** 容器，
-        //   其子节点 culled = 0（一个都没挡���）。
+        //   其子节点 culled = 0（一个都没挡住）。
         let child_clip: Option<Rect> = match clip {
             Some(c) => {
                 let s = transform.bounding_box(c);
-                match ctx.clip {
+                match cull.clip.get() {
                     Some(pc) => match s.intersect(&pc) {
                         Some(x) => Some(x),
                         None => {
@@ -584,7 +627,7 @@ impl SceneBuilder {
                 }
             }
             // 无自身 clip ⇒ 沿用祖先裁剪（**不要**置 None）
-            None => ctx.clip,
+            None => cull.clip.get(),
         };
         if let Some(c) = clip {
             if cull.hit(&visible) || cull.is_all() {
@@ -598,6 +641,18 @@ impl SceneBuilder {
                 return;
             }
         }
+
+        // ★ 压入裁剪栈，供**本节点自身**的逐原语剔除使用。
+        //   必须在 `draw` 之前设置 —— `draw` 内部（`push_culled` 之类站点）
+        //   只拿到 `&Cull`，裁剪状态就在这里。子节点会再压入更深的一层。
+        //
+        // ★★ `entry_clip` 必须在**压入之前**捕获，且**返回前恢复成它**。
+        //   否则下一个兄弟节点会读到"上一个兄弟子树残留的裁剪"。
+        //   实测症状：`scrolled_window` 里滚动容器 `sc` 与红箱 `red` 是兄弟，
+        //   `sc` 返回后 `cull.clip` 仍停在 `sc` 的裁剪区（x < 100），
+        //   于是 `red`（x ∈ [100,200]）被**整个裁掉** ⇒ 渲染成底色。
+        let entry_clip = cull.clip.get();
+        cull.clip.set(child_clip);
 
         // 节点自身内容（按 `Kind` 枚举分派，见 `widgets::draw`）
         crate::widgets::draw(&mut self.text, track, id, transform, cull, out, &opts.theme);
@@ -617,17 +672,21 @@ impl SceneBuilder {
         }
 
         // 子节点（按树序 = 绘制序，后者在上）
-        // ★ 写入 `child_clip` 后递归，返回时**恢复**——与 `Op::PushClip`/`PopClip` 同构。
-        //   （不恢复的话，同层后续兄弟会继承上一个兄弟的裁剪。）
-        let saved_clip = ctx.clip;
-        ctx.clip = child_clip;
+        // 子节点递归。
         for child in n.children.iter().copied() {
             self.walk(track, child, transform, ctx, out);
         }
-        ctx.clip = saved_clip;
+        // 子节点各自会压入更深一层并可能留下残留 ⇒ 先归位到**本节点**的裁剪，
+        // 让滚动条覆盖层看到正确的范围。
+        cull.clip.set(child_clip);
 
         // 滚动条覆盖层：画在**子项之后**（否则被列表项盖住），仍在容器裁剪内
         crate::widgets::draw_scrollbar_overlay(out, cull, track, id, transform, &opts.theme);
+
+        // ★ 离开本节点前把裁剪栈**恢复成进入时的样子**（与 `Op::PushClip`/`PopClip` 同构）。
+        //   不恢复的话，调用方的**下一个兄弟**会拿本节点的裁剪区去算自己的 `child_clip`
+        //   ⇒ 兄弟之间互相裁剪。实测症状见上方 `entry_clip` 处的注释。
+        cull.clip.set(entry_clip);
 
         if let Some(_c) = clip {
             out.push(Op::PopClip);
@@ -1201,5 +1260,182 @@ mod clip_culling {
             "被平移出裁剪区的节点应被 cull：实际 culled={}",
             s.nodes_culled
         );
+    }
+}
+
+/// 逐原语 clip 剔除（P1 · 候选 B）。
+///
+/// ## 与上一批"节点级裁剪"的分工
+///
+/// 上一批按**节点 rect** 裁：`screen ∩ clip` 为空 ⇒ 整棵子树跳过。
+/// 本批按**原语 bounds** 裁：节点与 clip 相交所以节点级放行，
+/// 但它的某些原语（典型：**阴影**，bounds 被 `paint_bounds` inflate 到远大于 rect）
+/// 完全落在 clip 外 ⇒ 不该提交。
+#[cfg(test)]
+mod primitive_clip_culling {
+    use crate::layout::layout;
+    use crate::style::ShadowSpec;
+    use crate::track::{Kind, Layer, Track};
+    use lieui_geom::{Rect, Size};
+    use lieui_layout::FlexDirection;
+
+    const WINDOW: Size = Size::new(300.0, 100.0);
+
+    /// 裁剪区 + 一排**与 clip 完全重合**的节点，每个带一个向下溢出 30px 的阴影。
+    ///
+    /// 节点级裁剪对它们**全部放行**（`nodes_culled` 应为 0），
+    /// 所以 ops 的差异只能来自逐原语剔除。
+    fn shadow_rows(n: usize) -> Track {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [WINDOW.width, WINDOW.height];
+        t.add_root(Layer::Content, None, root);
+
+        let clip = t.create(Kind::Box, None);
+        {
+            let node = t.get_mut(clip).unwrap();
+            node.layout.dim = [WINDOW.width, 10.0];
+            node.paint.clip_content = true;
+            node.layout.flex_direction = FlexDirection::Row;
+            node.layout.flex_shrink = 0.0;
+        }
+        t.append_child(root, clip);
+
+        for _ in 0..n {
+            let row = t.create(Kind::Box, None);
+            {
+                let node = t.get_mut(row).unwrap();
+                // 10px 高 ⇒ 与 clip 完全重合 ⇒ 节点级放行。
+                // ★ 宽 5px：40 个共 200px < 窗口 300px，**全部落在窗口内**。
+                //   （第一版用 10px ⇒ 40×10 = 400 > 300，后 7 个被**窗口**裁掉，
+                //    ops 只剩 33 —— 第三次栽在"构造没先验证"上。）
+                node.layout.dim = [5.0, 10.0];
+                node.layout.flex_shrink = 0.0;
+                // 阴影向下溢出 30px + 模糊 12 ⇒ 完全在 clip（高 10）之外
+                node.paint.shadow = Some(ShadowSpec::new(
+                    0.0,
+                    30.0,
+                    12.0,
+                    0.0,
+                    lieui_geom::Color::rgba(0, 0, 0, 128),
+                ));
+                node.paint.background_color = Some(lieui_geom::Color::rgba(30, 144, 255, 255));
+            }
+            t.append_child(clip, row);
+        }
+        layout(&mut t, WINDOW);
+        t
+    }
+
+    /// ★ 核心：节点与 clip 重合（节点级放行），但**阴影原语不得提交**。
+    ///
+    /// ★ 断言**只数 `Op::Shadow`**，而不是总 ops 数 ——
+    ///   `ops()` 里还有 `PushClip` / `PopClip` / 容器背景等非阴影项，
+    ///   按总数断言会把它们算进去（第一版写了 `ops <= 42` 就被这个绊倒：
+    ///   实际 43 = 40 背景 + 1 容器背景 + PushClip + PopClip，**阴影其实是 0**）。
+    #[test]
+    fn shadow_primitive_fully_outside_clip_is_not_submitted() {
+        let t = shadow_rows(40);
+        let mut b = crate::render::scene::SceneBuilder::new();
+        let sc = b.build(
+            &t,
+            &crate::render::SceneOptions {
+                window: WINDOW,
+                ..Default::default()
+            },
+            &[Rect::new(0.0, 0.0, WINDOW.width, WINDOW.height)],
+            false,
+        );
+        let shadows = sc
+            .ops()
+            .iter()
+            .filter(|op| matches!(op, crate::render::Op::Shadow { .. }))
+            .count();
+        assert_eq!(
+            shadows, 0,
+            "★ 40 个阴影完全在 clip 外（clip 高 10，阴影在 y∈[30,40]），不该提交"
+        );
+    }
+
+    /// ★★ **反向**：与 clip 相交的原语**必须**提交。
+    ///
+    /// 只测上一条不够 —— 若`hit_visible` 永远返回 false，
+    /// 第一个断言会过而这个会挂。两侧一起钉，方向才完整。
+    #[test]
+    fn primitives_inside_clip_are_still_submitted() {
+        let t = shadow_rows(40);
+        let mut b = crate::render::scene::SceneBuilder::new();
+        let sc = b.build(
+            &t,
+            &crate::render::SceneOptions {
+                window: WINDOW,
+                ..Default::default()
+            },
+            &[Rect::new(0.0, 0.0, WINDOW.width, WINDOW.height)],
+            false,
+        );
+        // 40 个节点各有背景矩形，全部与 clip 重合 ⇒ 必须全部提交
+        assert!(
+            sc.ops().len() >= 40,
+            "★ 与 clip 相交的背景必须提交（ops={}）",
+            sc.ops().len()
+        );
+    }
+
+    /// ★★ 回归：**兄弟节点不得互相裁剪**。
+    ///
+    /// 这是本批实现中真实踩到的 bug：`walk` 返回前若没把裁剪栈恢复成
+    /// "进入本节点时"的值，`sc` 返回后 `cull.clip` 仍停在 `sc` 的裁剪区，
+    /// 于是**下一个兄弟** `red`（在 sc 之外）被整个裁掉 ⇒ 渲染成底色。
+    ///
+    /// 由既有的 `render::full_window_fallback_does_not_erase_elements_outside_damage`
+    /// 抓到；本条把它钉在被测模块里，让因果关系一眼可见。
+    #[test]
+    fn siblings_do_not_inherit_each_others_clip() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [WINDOW.width, 100.0];
+        t.get_mut(root).unwrap().layout.flex_direction = FlexDirection::Row;
+        t.add_root(Layer::Content, None, root);
+
+        // 兄弟 1：窄的裁剪容器（x ∈ [0, 40)）
+        let sc = t.create(Kind::Box, None);
+        {
+            let node = t.get_mut(sc).unwrap();
+            node.layout.dim = [40.0, 100.0];
+            node.paint.clip_content = true;
+            node.paint.background_color = Some(lieui_geom::Color::rgba(0, 0, 255, 255));
+        }
+        t.append_child(root, sc);
+
+        // 兄弟 2：在 sc **之外**（x ∈ [40, 140)）—— 若继承了 sc 的裁剪就会被整块丢掉
+        let red = t.create(Kind::Box, None);
+        {
+            let node = t.get_mut(red).unwrap();
+            node.layout.dim = [100.0, 100.0];
+            node.paint.background_color = Some(lieui_geom::Color::rgba(255, 0, 0, 255));
+        }
+        t.append_child(root, red);
+
+        layout(&mut t, WINDOW);
+
+        let mut b = crate::render::scene::SceneBuilder::new();
+        let sc = b.build(
+            &t,
+            &crate::render::SceneOptions {
+                window: WINDOW,
+                ..Default::default()
+            },
+            &[Rect::new(0.0, 0.0, WINDOW.width, WINDOW.height)],
+            false,
+        );
+
+        // 兄弟 2 的红色必须真的进了绘制列表
+        let has_red = sc.ops().iter().any(|op| {
+            matches!(op,
+                crate::render::Op::Rect { color, .. }
+                    if color.r > 200 && color.g < 60 && color.b < 60)
+        });
+        assert!(has_red, "★ 兄弟节点不得继承上一个兄弟的裁剪（红色方块应仍被提交）");
     }
 }

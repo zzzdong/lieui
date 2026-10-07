@@ -589,7 +589,7 @@ fn push_input_text(
         transform,
     };
     let bounds = op.screen_bounds().unwrap_or(Rect::new(origin.x, origin.y, 1.0, 1.0));
-    if cull.hit(&bounds) {
+    if cull.hit_visible(&bounds) {
         out.push(op);
     } else {
         out.stats.prims_culled += 1;
@@ -678,7 +678,7 @@ pub(crate) fn draw(
         // 图片：等比缩放（contain）放进节点 rect；手动 blit（见 raster）
         Kind::Image(img) => {
             let bounds = transform.bounding_box(rect);
-            if cull.hit(&bounds) {
+            if cull.hit_visible(&bounds) {
                 out.push(Op::Image {
                     image: img.clone(),
                     rect,
@@ -1068,7 +1068,7 @@ fn dim_if_disabled(c: Color, n: &Node) -> Color {
 
 fn push(out: &mut Scene, cull: &Cull, _transform: Affine, bounds: Rect, op: Op) {
     let screen = op.screen_bounds().unwrap_or(bounds);
-    if cull.hit(&screen) {
+    if cull.hit_visible(&screen) {
         out.push(op);
     } else {
         out.stats.prims_culled += 1;
@@ -1121,7 +1121,7 @@ fn push_text(
         transform,
     };
     let bounds = op.screen_bounds().unwrap_or(rect);
-    if cull.hit(&bounds) {
+    if cull.hit_visible(&bounds) {
         out.push(op);
     } else {
         out.stats.prims_culled += 1;

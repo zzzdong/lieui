@@ -4881,3 +4881,127 @@ G4 测试外置（上一批）**已提交且保留**。
 **不属于 D52、不要动**：`capture_pointer` / `release_pointer` / `captured_by` /
 `set_dragging` —— 已确认是**树级状态**（`Track::captures`）而非组件行为，
 留在 `Track` 是正确的。
+---
+
+## 2026-10-07 · P1 逐原语 clip 剔除 —— ✅ 完成（防御性改进，收益温和）
+
+### 一、先量后改：两个候选的收益差了一个量级
+
+| 候选 | 场景 | visited | culled | ops | ms/帧 |
+|---|---|---|---|---|---|
+| **A** 按容器 bbox 裁子树 | 不裁剪容器 + 5000 子节点 | 5002 | **0** | 401 | 0.880 |
+| **B** 逐原语用 clip | 节点与 clip 重合、阴影溢出 | 802 | 0 | **10** | 0.047 |
+
+**候选 A 放弃，理由是正确性而非收益**：不裁剪的容器**允许子节点溢出**
+（overflow visible、tooltip 定位、弹窗），按容器 bbox 裁掉子树会**丢失溢出内容**。
+实测这类容器确实存在（`visited` 线性增长、`culled=0`），
+但**没有正确的方法**在不加裁剪语义的前提下跳过它。
+
+### 二、收益诚实版：远小于上一批
+
+| | ops | ms/帧 (n=800) |
+|---|---|---|
+| 修复后 `hit_visible` | **10** | **0.047** |
+| 修复前 `hit` | 17 | 0.053 |
+
+**ops −41%、时间 −11%**，而上一批节点级裁剪是 **9x**。
+
+⇒ 这是**防御性**改进，不是性能主力：它防的是"原语 bounds 远大于节点 rect"
+（典型是**阴影**，`paint_bounds` 会 inflate）时 wasting 一笔。
+保留的理由是**单调有益 + 语义安全**，而**不是**性能。
+
+### 三、★ 顺带的结构改进：裁剪状态收敛到 `Cull`
+
+原先裁剪栈在 `walk` 的参数 `WalkCtx` 里，逐原语站点只拿到 `&Cull` ⇒ 看不到。
+若新增 `Cull.clip` 就会出现**两份状态**（`WalkCtx.clip` + `Cull.clip`），
+必然产生"更新一处忘另一处"的风险。
+
+所以**把 `WalkCtx.clip` 删掉、统一放进 `Cull`**：
+
+```rust
+pub(crate) struct Cull {
+    rects: Vec<Rect>,
+    all: bool,
+    clip: Cell<Option<Rect>>,   // Rect: Copy，Cell 给内部可变性
+}
+```
+
+`WalkCtx` 只剩 `cull` + `opts` 两项，全程 `&Cull` 传递 ⇒ **零签名变更**。
+
+### 四、★★ 我在本批犯了一个真实 bug，**由既有测试抓到**
+
+`full_window_fallback_does_not_erase_elements_outside_damage` 失败
+（应为红色的像素渲染成底色）。
+
+**根因**：我在 `draw` 之前设了 `cull.clip`，然后在子节点循环里"保存"时
+保存的是**自己刚设的值**，于是恢复后仍停在 `sc` 的裁剪区。
+下一个兄弟节点（红箱，在 `sc` 之外）读到的就是**滚动容器的裁剪区** ⇒ 被整个裁掉。
+
+**修法**：`entry_clip` 必须在**压入之前**捕获，且**返回前恢复成它**：
+
+```rust
+let entry_clip = cull.clip.get();   // 进入本节点时（= 父层的）
+cull.clip.set(child_clip);          // 压入本节点的
+draw(...);
+for child in children { walk(child) }
+cull.clip.set(child_clip);          // 归位（滚动条覆盖层要看）
+draw_scrollbar_overlay(...);
+cull.clip.set(entry_clip);          // ★ 离开前恢复成进入时的样子
+```
+
+> **教训**：状态恢复的基准必须是"**进入时**的值"，不是"自己刚写的值"。
+> 这与本项目此前的"对照组必须确认它走了对照组分支"同源——
+> **基准点选错，后面全错，而且症状出现在别处**（这里表现为"兄弟节点消失"，
+> 离真正的原因有两层距离）。
+
+已加回归测试 `siblings_do_not_inherit_each_others_clip` 把因果钉在��测模块里。
+
+### 五、测量构造第三次栽在"没先验证"上
+
+**① flex 收缩**：`partially_clipped_primitives` 里 800 个 200px 的 row 放在 4px 容器中，
+flex 把它们**压成 0.8px 并全部堆进 y ∈ [0,4]** ⇒ 全部可见，`ops` 恒等于 n，**测不到任何东西**。
+诊断输出：`child[i] rect = (0,0, 1280x0.800)`。修法：`flex_shrink = 0`。
+（这是本项目记录的**第二次**同源问题。）
+
+**② 节点仍被节点级挡住**：改成 `flex_shrink=0` 后 `ops` 从 803 → 4，
+但 `culled=799` ⇒ 799 个是被**节点级**裁剪挡掉的，**逐原语根本没被调用**。
+必须另构造一个"节点级放行、只有原语在 clip 外"的场景（用阴影）。
+
+**③ 列排布导致超出窗口**：`shadow_rows` 里 40 个 10px 节点 = 400px > 窗口 300px
+⇒ 后 7 个被**窗口**裁掉，`ops` 只有 33。
+
+**④ 断言没算 `PushClip`/`PopClip`**：写 `ops <= 42` 但实际 43
+（= 40 背景 + 1 容器背景 + PushClip + PopClip，**阴影其实是 0**）。
+改成**只数 `Op::Shadow`**。
+
+> 四次同源错误的共同教训：**写断言前先确认"被测系统的实际行为是什么"**。
+> 前几次是对照组没走对照组分支 / flex 收缩让构造失效 / 既有规则被忽略 /
+> 公开 API 语义边界比想的窄，这次是"ops 里还有非图元项"。
+
+### 六、测试（3 条 `render::scene::primitive_clip_culling`）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `shadow_primitive_fully_outside_clip_is_not_submitted` | ★ 40 个阴影在 clip 外 ⇒ `Op::Shadow` 计数为 **0** |
+| `primitives_inside_clip_are_still_submitted` | ★ **反向**：与 clip 相交的背景必须全部提交（防"永远返回 false"） |
+| `siblings_do_not_inherit_each_others_clip` | ★★ 回归：兄弟节点不得互相裁剪（本批真实 bug） |
+
+**变异验证**（`hit_visible` → `hit`）：`left: 40` ⇒ 精确抓到 40 个阴影被提交。
+
+### 七、变更清单
+
+| 文件 | 动作 |
+|---|---|
+| `src/render/scene.rs` | `Cull` 加 `clip: Cell<Option<Rect>>` + `hit_visible()`；`WalkCtx` 删 `clip`；`walk` 的压入/恢复；新增 3 条测试 |
+| `src/widgets/mod.rs` | 4 处逐原语站点 `cull.hit` → `cull.hit_visible` |
+| `tests/render_cost_bench.rs` | 新增两个候选场景的测量 |
+
+### 八、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **17 个测试二进制全 ok**（lib 426） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+| 变异（`hit_visible` → `hit`） | **FAILED** ✓（`left: 40`） |
