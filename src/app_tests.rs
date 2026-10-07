@@ -4025,3 +4025,68 @@ fn timer_callback_that_writes_state_marks_the_window_dirty() {
     );
     let _ = id;
 }
+
+/// ★★ 回归（用户报障：pdfkit 侧栏滚轮无反应）
+///
+/// ## 为什么之前测不出来
+///
+/// 旧测试只断言 `Track::scroll_offset`（**树里的状态**）。但滚轮改完偏移后，
+/// 若没把脏标写回 **Runtime**，`frame()` 的 `take_dirty` 就是空的 ⇒ 平台层的
+/// `peek_dirty` 也空 ⇒ **不会 `request_redraw()`** ⇒ 像素永远不动。
+///
+/// 所以本测试断言的是 `rt.peek_dirty(id)` —— 也就是平台层真正读的那个值。
+#[test]
+fn wheel_marks_the_runtime_dirty_so_a_frame_is_scheduled() {
+    struct List {
+        n: Signal<i32>,
+    }
+    impl ViewModel for List {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                for i in 0..20 {
+                    c.text(format!("row {i}")).font_size(20.0);
+                }
+            });
+            let _ = self.n.get();
+        }
+    }
+
+    let rt = Runtime::new();
+    let mut app = App::new(rt.clone());
+    let id = app.window(WindowConfig::new().size(200.0, 100.0), List { n: Signal::new(&rt, 0) });
+    app.frame_all();
+
+    {
+        let w = app.window_ctx_mut(id).unwrap();
+        let root = w.content_root().unwrap();
+        w.track_mut().get_mut(root).unwrap().layout.overflow_scroll = true;
+        w.track_mut().mark_all_layout_dirty();
+    }
+    app.frame_all();
+
+    // 帧跑完 ⇒ Runtime 的脏标应已被 take 掉
+    assert!(
+        rt.peek_dirty(id).is_empty(),
+        "帧之后脏标应被消费，实为 {:?}",
+        rt.peek_dirty(id)
+    );
+
+    let out = app.window_ctx_mut(id).unwrap().pointer(
+        &rt,
+        InputEvent::Wheel {
+            pointer: PointerId(0),
+            pos: Point::new(10.0, 50.0),
+            delta: (0.0, -60.0),
+        },
+    );
+    assert!(out.scrolled, "滚轮应滚动");
+
+    // ★ 关键断言：Runtime 必须有脏标，否则平台层不会 request_redraw
+    let d = rt.peek_dirty(id);
+    assert!(!d.is_empty(), "★ 滚轮后 Runtime 必须有脏标（否则不会重绘），实为空");
+    assert!(d.contains(Dirty::PRESENT), "★ 必须含 PRESENT（要上屏），实为 {d:?}");
+    assert!(
+        d.contains(Dirty::LAYOUT),
+        "★ 必须含 LAYOUT（子树按新偏移平移），实为 {d:?}"
+    );
+}

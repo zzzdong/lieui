@@ -796,6 +796,25 @@ impl WindowCtx {
             && let Some(path) = wheel_path
         {
             outcome.scrolled = input::default_wheel_scroll(&mut self.track, &path, delta);
+            // ★★ 滚完必须把脏标写回 **Runtime**，否则屏幕上什么都不会动。
+            //
+            // `default_wheel_scroll` 只调 `Track::set_scroll_offset`，那只会置
+            // **Node 的 Flags**（`mark_layout_dirty`）；而 `frame()` 开头是
+            // `rt.take_dirty(id)` —— 它读的是 **Runtime 的脏标**，两者不是一回事。
+            //
+            // 于是形成这样一个「静默失效」链：
+            //   滚轮 ⇒ Track 里的偏移变了 ⇒ 但 Runtime 仍是干净的
+            //        ⇒ 平台层 `window_event` 末尾的 `rt.peek_dirty(id)` 为空
+            //        ⇒ **不会 `request_redraw()`** ⇒ 永远不跑 `frame()`
+            //        ⇒ 偏移改了、像素没动 ⇒ 用户看到"滚轮完全没反应"。
+            //
+            // 对照：走 `Cmd` 的交互（含**拖动滚动条**）没问题 ——
+            // `dispatch` 的第 ③ 步里有 `rt.mark(self.id, apply_cmds(..))`。
+            // 这也解释了为什么"拖滚动条有效果"：它的重绘是被 Cmd 触发的，
+            // 而不是被滚动本身触发 ⇒ 重绘时机跟着 hover 走 ⇒ 手感"不跟随"。
+            if outcome.scrolled {
+                rt.mark(self.id, Dirty::LAYOUT | Dirty::PAINT | Dirty::PRESENT);
+            }
         }
 
         // tooltip 会话跟随 hover：命中链变了 ⇒ 重新定位目标（移开/按下 ⇒ 关闭）
