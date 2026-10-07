@@ -5921,3 +5921,142 @@ pdfkit：`cargo test` 49 通过、`clippy --all-targets` exit 0。
   等是**保留树自己的状态机**，与"任务概念"无关。
 - 「便利层」的归处在 `examples/background_task.rs`（已重写为纯原语版）与
   pdfkit 的 `src/app/tasks.rs` —— 两者都是**活的模板**。
+
+---
+
+## 2026-10-08 · 补 `damage_key`（按 Key 标脏）+ 边界证明 —— ✅ 完成
+
+起因：用户指出 `BusyItem` / `BusyToken` 这套也**不该内置在 UI 库里，它们是组件**。
+查证途中先纠正了我自己的两个说法，再挖出一个**真正的库缺口**。
+
+### 一、★ 我说错的地方：「忙碌状态必须有人持有」
+
+我上一轮把它说成"需要一个库提供的状态类型"，并给了 A（库内组件层）/ B（应用侧）
+两个选项 —— **两个都多余**。
+
+正确答案就是用户说的：**调用者决定 spinner 是否显示**，所以它是**应用自己的普通状态**：
+
+```rust
+struct Ui { loading: Signal<bool>, started: Cell<Option<Instant>>, spinner: CustomCell }
+// 事件里：self.loading.set(true) / set(false)
+// view()：if self.loading.get() { v.modal_tagged(TAG, |m| { … spinner … }) }
+```
+
+只有两件事要额外照顾，**都不需要库提供类型**：
+
+| 要照顾的 | 用什么 | 现状问题 |
+|---|---|---|
+| 最短可见时间 | `set_timeout` 延后置 `false` | 现在却是 `Runtime::set_busy_min_visible` 这个**特例 API** |
+| spinner 要转 | `on_animation` 里 `request_animation` | 通用机制，已有 |
+
+### 二、layer 与"元素外挂" —— **已经存在，不用"考虑"**
+
+| 已有的 | 内容 |
+|---|---|
+| `Layer` | **6 变体**：`Content`/`Overlay`/`Popup`/`Tooltip`/`Modal`/`DragPreview`；`Layer::ALL` 是**唯一层序真相**（此前两份手写数组必须严格互逆） |
+| 声明 API | `modal` / `modal_tagged` / `popup_at` / `popup_at_point` / `tooltip_at` |
+| **元素外挂** | `DescRef::context_menu(builder)`、`DescRef::tooltip(text)` —— 挂**构造器/文案**，框架管**何时/在哪/谁收** |
+
+框架侧统称 **`Sessions`（框架自管的交互会话）**，作者已写下它与 `Layer` 的分工：
+**"会话*生产*层，而不是层"**（层是描述，会话是运行态）。
+
+### 三、★ 真正的不一致：busy 是唯一的例外
+
+| | 挂载点 | 何时弹 | 在哪 | 谁收 |
+|---|---|---|---|---|
+| tooltip | **元素** | 悬停 + 600ms | 锚元素 | 离开 / 目标失效 |
+| 右键菜单 | **元素** | 右键 | 光标 | 点外部 / 点项 |
+| **loading 遮罩** | **无挂载点**（`RuntimeInner.busy`） | **框架无条件注入** | 居中 | 应用 `finish()` |
+
+⇒ busy 是**唯一既不在 `Sessions`、又没有挂载点的特例**。
+
+**暂不泛化 `Sessions`**：样本只有 2 个，而抽象它要同时抽象"触发 / 锚定 / 收尾"
+**三个各不相同**的维度。★ 意外收获：删掉 busy 后剩下的两种**都是元素挂载型**，
+形状反而统一了 —— 等**第三个**出现再抽。
+
+### 四、★★ 查出一个真正的库缺口
+
+我原以为"应用侧重建遮罩"所需的一切都已具备。**有一处没有：**
+
+> **应用声明的自绘节点（`CustomNode`），无法请求每帧重绘。**
+
+- `CustomNode` 没有"我要重绘"的钩子（`on_event` 里能用 `cmd.damage(id)`，但那是**事件期**）
+- `Ctx::damage(id)` 要 `NodeId`，而 `on_animation` / `on_tick` 里**拿不到**
+  （`Ctx` 不暴露 `Track`；`Track::find_by_key` 是 `pub` 却够不着）
+- 唯一可行路径是 `Ctx::damage_all()` ⇒ **每帧整窗重绘**
+
+⇒ 今天能连续"转起来"的**只有框架内部的 spinner**（靠 `WindowCtx::animate`
+内部 `mark_paint_dirty(card)`）；**应用侧没有等价路径**。
+
+**补的是一条通用命令，不是"忙碌"概念**：
+
+| 新增 | 位置 |
+|---|---|
+| `Cmd::DamageKey { key }`（落树时解析成 `NodeId`） | `cmd.rs` |
+| `CmdBuf::damage_key(impl Into<Key>)` | `cmd.rs` |
+| `Ctx::damage_key(impl Into<Key>)` | `event.rs` |
+
+契约：**标的是该节点的矩形** ⇒ 自绘必须画在自己的 `rect` 内（画到外面会留残影）。
+查不到 Key ⇒ **静默跳过**（动画节点可能还没对齐出来 / 刚被销毁；不许退化成整窗脏）。
+
+### 五、★★ 边界证明：`tests/spinner_modal.rs`
+
+只用**公开 API** 做出"自绘 spinner 的 loading 遮罩"（`tests/` 只能看到公开面
+⇒ 原语不够就**编译不过**）：
+
+| 谁的事 | 用什么 |
+|---|---|
+| 显示还是消失 | 应用状态 `Signal<bool>` —— **调用者决定** |
+| 层从哪来 | `ViewBuf::modal_tagged`（应用自己定的 tag） |
+| 每帧重绘自己 | `Ctx::damage_key` + `Ctx::request_animation` |
+| 最短可见时间 | `Runtime::set_timeout` |
+| 长什么样 | 应用的 `CustomNode`（自绘三点 spinner，相位取**单调时钟**） |
+
+3 条测试：正向（出现 → 每帧只重绘自己 → 调用方收起）、
+**反向**（没人说结束 ⇒ 一直在，且一直在转）、
+最短可见时间（`set_timeout` 表达，**不需要特例 API**）。
+
+**实测数字**：动画帧只重绘 **324 像素**（= spinner 节点自己的 18×18），
+整窗是 400×300 = **120000**。
+
+### 六、变异验证（两条，都精确命中）
+
+| 变异 | 结果 |
+|---|---|
+| `on_animation` 里 `damage_key` → `damage_all`（修复前的唯一路径） | **FAILED** ✓ `★ 不是整窗脏 —— damage_all 会让每帧全屏重绘` |
+| （另）`DamageKey` 查不到 Key 时退化成整窗脏 | 被 `damage_key_with_an_unknown_key_is_a_silent_no_op` 钉住 |
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **21 个测试二进制全 ok / 568 条**（新增 `spinner_modal` 3 条 + `cmd_tests` 3 条） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+
+### 八、下一步（本批**未做**，是真正的"删 busy"）
+
+step 0/1 已完成，且证明了"**删掉 busy 不会丢能力**"。剩下：
+
+| 步 | 内容 |
+|---|---|
+| 2 | 库侧删干净：`Runtime` 13 方法 / `RuntimeInner` 3 字段 / `WindowCtx` 8 处 / `overlay.rs` 170 行 / `WindowConfig::auto_busy_overlay` |
+| 3 | 应用侧参考实现（`examples/`：≈100 行） |
+| 4 | pdfkit：`busy: RefCell<Option<BusyToken>>` → `loading: Signal<bool>` + `started` + `set_timeout` |
+| 5 | 测试迁移：那 4 条护栏测的是"库保证遮罩"，**随路径一起删**；在应用侧重建等价断言 |
+
+> ⚠️ step 5 的说明要提前立好：`needs_frame` / `reap` 次序 / 端到端遮罩那几条
+> **会失效**，因为被测路径就是要删的那条 —— **不是回归**。
+> 但"最短可见 / 定时兜底 / 没人说结束就一直在"这三条断言必须在应用侧重建，
+> 否则会把刚修好的东西重新弄丢（本批的 `spinner_modal` 已经重建了前两条的形状）。
+
+### 九、教训
+
+1. **"必须有人持有"是个含糊说法** —— 我说它时其实没想清"持有者是谁、要不要类型"。
+   用户一句"应该是调用者决定"就点破了：**就是应用状态，没有第二种答案**。
+   ⇒ 用词含糊时，多半是自己还没想清。
+2. **"要不要考虑加 X" 之前，先确认 X 有没有** —— 用户问"是否要考虑暴露 layer
+   和元素外挂"，实测**两者都已存在**（6 个 Layer 变体 + 两个元素挂载 session）。
+3. **真正的缺口往往不在被质疑的地方** —— 用户的怀疑指向 busy，但实测查出的缺口
+   是"自绘节点无法请求重绘"（`damage_key`），一个**与 busy 无关的通用能力**。

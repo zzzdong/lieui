@@ -16,7 +16,7 @@ use lieui_geom::Point;
 
 use crate::cmd::{Cmd, CmdBuf};
 use crate::reactive::{Dirty, Runtime};
-use crate::track::{FocusState, NodeId, Track};
+use crate::track::{FocusState, Key, NodeId, Track};
 use crate::window::WindowId;
 
 /// 指针身份（鼠标写死 0，触控留口）
@@ -674,6 +674,32 @@ impl Ctx {
 
     pub fn damage(&mut self, id: NodeId) {
         self.cmds.damage(id);
+    }
+
+    /// **按 `Key` 标脏**：让一个自绘节点（[`crate::CustomNode`]）重绘自己。
+    ///
+    /// ## 什么时候需要它
+    ///
+    /// 在 [`crate::ViewModel::on_animation`] 里驱动"自己在动"的节点（spinner、
+    /// 波形、指示器……）：
+    ///
+    /// ```ignore
+    /// fn on_animation(self: &Rc<Self>, cx: &mut Ctx, _now: Instant, _dt: Duration) {
+    ///     if !self.visible() { return; }
+    ///     cx.damage_key("spinner");     // ← 只有它脏，不是整窗
+    ///     cx.request_animation();       // ← 再要下一帧（RAF）
+    /// }
+    /// ```
+    ///
+    /// ## 为什么不能直接用 [`Self::damage`]
+    ///
+    /// `damage` 要 `NodeId`，而 `on_animation` / `on_tick` 里**拿不到**它
+    /// （`Ctx` 不暴露 `Track`，`Track::find_by_key` 够不着）。此前只剩
+    /// `damage_all` 一条路 ⇒ **每帧整窗重绘**。
+    ///
+    /// 查不到该 `Key`（还没对齐出来 / 已销毁）⇒ 静默跳过。
+    pub fn damage_key(&mut self, key: impl Into<Key>) {
+        self.cmds.damage_key(key);
     }
 
     pub fn focus(&mut self, id: NodeId) {

@@ -13,7 +13,7 @@
 
 use crate::event::PointerId;
 use crate::reactive::Dirty;
-use crate::track::{FocusState, KindDesc, Layer, NodeId, RootId, Track, Visibility};
+use crate::track::{FocusState, Key, KindDesc, Layer, NodeId, RootId, Track, Visibility};
 
 /// 一条延迟写入命令
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +83,21 @@ pub enum Cmd {
     DamageNode {
         id: NodeId,
     },
+    /// 按 [`Key`] 标脏（落树时解析成 `NodeId`）。
+    ///
+    /// ## 为什么需要它（`DamageNode` 不够）
+    ///
+    /// `NodeId` 只在"手里真有一个节点"时才有 —— 事件处理器里能从 handler 拿到，
+    /// 但 [`crate::ViewModel::on_animation`] / [`crate::ViewModel::on_tick`] 里
+    /// **拿不到**：那时只有一个 `&mut Ctx`，而 `Ctx` 不暴露 `Track`
+    /// （`Track::find_by_key` 是公开的，却够不着）。
+    ///
+    /// 于是应用声明的**自绘节点**（[`crate::CustomNode`]）想每帧重绘自己时，
+    /// 只剩 `DamageAll` 一条路 ⇒ **每帧整窗重绘**。本命令把"按 Key 标脏"
+    /// 补成一条通用路径，与应用侧动画解耦。
+    DamageKey {
+        key: Key,
+    },
     /// 整窗脏
     DamageAll,
     /// 需要重排（外部改了布局相关的东西）
@@ -142,6 +157,11 @@ impl CmdBuf {
 
     pub fn damage(&mut self, id: NodeId) {
         self.push(Cmd::DamageNode { id });
+    }
+
+    /// 按 `Key` 标脏（`on_animation` / `on_tick` 里驱动自绘节点用；见 [`Cmd::DamageKey`]）
+    pub fn damage_key(&mut self, key: impl Into<Key>) {
+        self.push(Cmd::DamageKey { key: key.into() });
     }
 
     pub fn damage_all(&mut self) {
@@ -278,6 +298,15 @@ pub fn apply_cmds(track: &mut Track, cmds: &[Cmd]) -> Dirty {
             Cmd::DamageNode { id } => {
                 track.mark_paint_dirty(*id);
                 dirty |= Dirty::PAINT | Dirty::PRESENT;
+            }
+            Cmd::DamageKey { key } => {
+                // 落树时才解析：`Key` → `NodeId` 需要 `Track`（`Ctx` 里没有）。
+                // 查不到（节点还没对齐出来 / 已被销毁）⇒ 静默跳过：动画节点
+                // 通常下一帧就能查到，不值得为它整窗脏。
+                if let Some(id) = track.find_by_key(key) {
+                    track.mark_paint_dirty(id);
+                    dirty |= Dirty::PAINT | Dirty::PRESENT;
+                }
             }
             Cmd::DamageAll => {
                 track.damage_whole_window();

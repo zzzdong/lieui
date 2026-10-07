@@ -233,3 +233,75 @@ fn key_is_not_needed_for_cmds() {
     assert!(s.contains("Checkbox"));
     let _ = Key::U64(1);
 }
+
+// ───────────────────────── DamageKey（按 Key 标脏）─────────────────────────
+
+/// ★ 按 `Key` 标脏：落树时解析成 `NodeId` 并入脏区。
+///
+/// 存在的理由：`on_animation` / `on_tick` 里**拿不到 `NodeId`**
+/// （`Ctx` 不暴露 `Track`），而应用声明的自绘节点要每帧重绘自己。
+/// 此前只剩 `DamageAll`（每帧整窗重绘）。
+#[test]
+fn damage_key_resolves_the_node_and_marks_only_it() {
+    let mut t = Track::new();
+    let root = t.create(Kind::Box, None);
+    t.add_root(Layer::Content, None, root);
+
+    // 两个节点，只给其中一个挂 Key
+    let a = t.create(Kind::Box, None);
+    let b = t.create(Kind::Box, None);
+    t.append_child(root, a);
+    t.append_child(root, b);
+    t.get_mut(a).unwrap().key = Some(Key::from("spin"));
+    // 让它们的矩形有意义（否则脏区为空看不出差别）
+    for n in [a, b] {
+        let c = &mut t.get_mut(n).unwrap().computed;
+        c.width = 10.0;
+        c.height = 10.0;
+    }
+    let _ = t.take_damage();
+
+    let d = apply_cmds(&mut t, &[Cmd::DamageKey { key: Key::from("spin") }]);
+    assert!(d.contains(Dirty::PAINT), "要重绘");
+    assert!(d.contains(Dirty::PRESENT), "要上屏");
+    assert!(!d.contains(Dirty::VIEW), "**不该**重跑 view");
+    assert!(!d.contains(Dirty::LAYOUT), "**不该**重排");
+
+    let (damage, all) = t.take_damage();
+    assert!(!all, "★ 不是整窗脏");
+    assert_eq!(damage.len(), 1, "只有被标脏的那个节点");
+    assert_eq!(damage[0].width, 10.0, "脏区就是该节点的矩形");
+}
+
+/// ★ **反向**：查不到 `Key` ⇒ 静默跳过（不报错、不整窗脏）。
+///
+/// 为什么这条重要：动画节点可能"还没对齐出来"或"刚被销毁"。
+/// 若这里退化成 `damage_whole_window()`，一个拼错的 Key 就会让应用
+/// **每帧全屏重绘**却毫无提示。
+#[test]
+fn damage_key_with_an_unknown_key_is_a_silent_no_op() {
+    let mut t = Track::new();
+    let root = t.create(Kind::Box, None);
+    t.add_root(Layer::Content, None, root);
+    let a = t.create(Kind::Box, None);
+    t.append_child(root, a);
+    {
+        let c = &mut t.get_mut(a).unwrap().computed;
+        c.width = 10.0;
+        c.height = 10.0;
+    }
+    let _ = t.take_damage();
+
+    let d = apply_cmds(&mut t, &[Cmd::DamageKey { key: Key::from("nope") }]);
+    assert!(d.is_empty(), "查不到 ⇒ 零脏标志");
+    let (damage, all) = t.take_damage();
+    assert!(!all && damage.is_empty(), "★ 也不许退化成整窗脏");
+}
+
+/// `CmdBuf::damage_key` 是便捷构造（`Ctx::damage_key` 走它）。
+#[test]
+fn cmdbuf_damage_key_pushes_the_command() {
+    let mut buf = CmdBuf::new();
+    buf.damage_key("spin");
+    assert_eq!(buf.as_slice(), &[Cmd::DamageKey { key: Key::from("spin") }]);
+}
