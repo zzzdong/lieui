@@ -4718,6 +4718,101 @@ D37 剩下的真问题是"1px 分隔线与文本持续半像素模糊"。按本�
 
 ---
 
+## 2026-10-07 · app/window 职责分离 + 测试分层 —— ✅ 完成
+
+### 一、`app.rs` / `window.rs` 职责分离：1603 → 573 行
+
+**划分依据是"变更节奏"，不是代码行数**：
+
+| 模块 | 职责 | 什么改动会动它 |
+|---|---|---|
+| `app.rs` **573** | `ViewModel` 契约、对象擦除、`App`（窗口表 / id 分配 / frame_all / 跨窗口请求） | 开窗关窗策略、多窗口编排 |
+| `window.rs` **1111** | `WindowId` / `WindowConfig` / `WindowCtx` / `FrameStats` / 会话状态 | 事件分发、命中、布局、绘制、弹层 |
+
+依赖方向**单向**（`App` 持有 `Vec<WindowCtx>`，`WindowCtx` 不引用 `App`）⇒ 可安全拆分。
+（`window.rs` 用到 `ViewModel` / `erased` 属于**类型**依赖，与 `App` 的**值**依赖不构成循环。）
+
+拆分前 `WindowCtx` 一个类型就占 850 行，加上 `WindowConfig` / `FrameStats` /
+`TooltipSession` / `CtxMenuSession` / `Sessions` 全在 `app.rs`——
+**全是单窗口级的东西，与 `App` 的多窗口编排无关**。
+
+**对外 API 不变**：`app.rs` 用 `pub use` 重导出全部迁走的类型，
+`lieui::app::WindowConfig` 等路径**继续可用**——
+**模块拆分不应该成为对外 API 的破坏性变更**。
+
+顺带发现 `WindowCtx` 早已有 `id()` 方法（我一度加了重复的）；
+字段保持私有是对的——字段一旦 `pub`，外部就能绕过窗口表直接改身份，
+破坏"id 由 `App` 分配"这条不变量。
+
+### 二、测试分层：补上一个真实的洞
+
+| 层 | 位置 | 数量 | 看到什么 |
+|---|---|---|---|
+| 单元 | `src/app_tests.rs` | 91 | 模块私有项（`Sessions`、脏标志…） |
+| 集成 | `tests/api_contract.rs` | 9 | 公开 API（**能不能构造**） |
+| 集成 | `tests/input_flow.rs` **（新）** | 5 | 公开 API（**点了会怎样**） |
+
+**`api_contract.rs` 测的是"能不能构造出来"，没有一条测"点了会怎样"。**
+事件输入链路（点击 / hover / Tab / Escape）此前**只被单元测试覆盖**。
+
+**为什么这个洞必须补**：单元测试能断言 `FrameStats.dirty == Dirty::PAINT`，
+而用户真正关心的是"我点了按钮，数字变了"。
+
+> **若一个行为只被单元测试覆盖，"它对用户是否可用"这件事从未被验证过。**
+> 本轮拆模块时那 91 个单元测试**全部原样通过**，但它们**一个都没走公开 API 路径**
+> ⇒ "模块拆分没有破坏用户可见行为"这句话当时**是没有证据的**，现在才补上。
+
+覆盖的五条链路：
+
+- `click_updates_state_and_next_frame_shows_it` —— 点按钮 → Signal 变 → **下一帧真的渲染出来**
+- `clicking_outside_does_nothing` —— ★ **反方向**：点空白不误触发
+- `tab_without_tab_stop_nodes_is_inert` —— 无 `tab_stop` 时 Tab 不动焦点
+- `escape_closes_a_popup_opened_from_the_ui` —— 弹层开 → Escape 关（含内容与层根）
+- `other_keys_leave_the_popup_open` —— ★ **反方向**：其它按键不关弹层
+
+两条 ★ 反向测试不是凑数：把命中测试改成"什么都返回按钮"、
+或把 Escape 判断写成只判 `kind == KeyDown`（让**任意键**都关弹层），
+**正向测试都会照样通过**。
+
+### 三、写这个文件时踩的三个坑（都是我自己的期望错了）
+
+**1. `content_root()` 只覆盖 `Content` 层** —— 弹层在 `Popup` 层，
+所以"弹层内容已渲染"这条断言恒假。必须遍历 `track.roots()` 全部层根。
+（**这正是"用公开 API 写测试"的代价**：得知道公开 API 的语义边界在哪。）
+
+**2. 按钮默认不参与 Tab 链** —— `tab_order` 只收 `n.tab_stop` 的节点。
+我以为"按钮天然可聚焦"，写了 `assert!(first.is_some())`。
+失败后查代码才发现是**既有设计**（`tab_stop` 默认关闭），于是把测试改成
+"无 tab_stop 时 Tab 是惰性的" —— 这本身也是一条有价值的契约。
+
+**3. 嵌套弹层不能写在 `column` 闭包内** ——
+`v.column(|c| { …; v.popup_at(…) })` 会二次独占借用 `v`（E0500/E0501）。
+必须写在闭包**外面**。
+
+> 三次的共同教训（与本项目日志里已有的第四次同源经验一致）：
+> **期望值写错时，测试会指向错误的结论。**
+> 前几次是对照组没走对照组分支 / flex 收缩让构造失效 / 既有规则被忽略，
+> 这次是"公开 API 的语义边界比我想的窄"。
+
+### 四、门禁（第十二次）
+
+- `ViewCtx::id` 重复定义（我加了已有方法）—— 删掉新增的那个
+- `context_menu_root` 私有性 —— 改 `pub(crate)`
+- `cargo fix --lib` 清理了 app.rs 的导入后，测试依赖的 10+ 个类型丢失
+  ⇒ 改用**显式 `#[cfg(test)] use`** 重新导入，并在注释里写明这个取舍的理由
+  （那些测试断言的**正是窗口级行为**；3600 行测试加前缀会显著降低可读性）
+
+### 五、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **17 个测试二进制全 ok**（新增 `input_flow`） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+
+---
+
 ## 2026-10-07 · D52 组件行为归位 —— 尝试后回退（如实记录失败）
 
 ### 结论
