@@ -4090,3 +4090,124 @@ fn wheel_marks_the_runtime_dirty_so_a_frame_is_scheduled() {
         "★ 必须含 LAYOUT（子树按新偏移平移），实为 {d:?}"
     );
 }
+
+/// ★★ 回归（用户报障）：**拖滚动条要跟随鼠标**，而不是"松手后才跳到最后位置"。
+///
+/// ## 症状与根因
+///
+/// `scroll_handle` 的 `PointerMoved` 分支原本只有 `set_scroll_offset`，
+/// 那**只置 Node 的 Flags**；而 `frame()` 读的是 **Runtime 的脏标**
+/// （`rt.take_dirty`）。缺少重绘请求 ⇒
+///
+/// ```text
+/// 拖动中偏移一直在变、但一帧都不画
+///   ⇒ 直到 PointerReleased 的 cmd.damage 才画一次
+///   ⇒ 用户看到"拖动无反应，松手后突然跳到最后位置"
+/// ```
+///
+/// ## 本测试断言什么
+///
+/// 断言 **拖动过程中 `rt.peek_dirty(id)` 非空** —— 即"这一帧会被重画"。
+/// 只断言偏移（树里的状态）会**漏判**，正如滚轮那个 bug 一样。
+///
+/// ## ★ 写这个测试时踩的坑（值得记）
+///
+/// 第一版用**命令式**在节点上设 `overflow_scroll = true`，再调 `frame_all()`。
+/// 结果 `align` 用 **desc 覆盖了 `n.layout`**（VM 的 `view()` 声明的是普通
+/// column）⇒ 节点不再是滚动容器 ⇒ `scroll_handle` 压根不被调用。
+/// 所以这里改用**声明式** `v.scroll(..)`：它每帧都会被 `view()` 重新声明，
+/// 与真实 app（pdfkit 的 `side.scroll(..)`）一致。
+#[test]
+fn scrollbar_drag_marks_the_runtime_dirty_while_dragging() {
+    struct List {
+        n: Signal<i32>,
+    }
+    impl ViewModel for List {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            // ★ 声明式滚动容器：跨帧稳定（命令式设标志会被 align 冲掉）
+            v.scroll(|s| {
+                s.expand(true);
+                s.column(|c| {
+                    for i in 0..40 {
+                        c.text(format!("row {i}")).font_size(20.0);
+                    }
+                });
+            });
+            let _ = self.n.get();
+        }
+    }
+
+    let rt = Runtime::new();
+    let mut app = App::new(rt.clone());
+    let id = app.window(WindowConfig::new().size(200.0, 100.0), List { n: Signal::new(&rt, 0) });
+    app.frame_all();
+
+    let (sc, rect, content) = {
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let sc = t
+            .node_ids()
+            .find(|n| t.get(*n).map(|x| x.layout.overflow_scroll).unwrap_or(false))
+            .expect("v.scroll 应产生滚动容器");
+        let n = t.get(sc).unwrap();
+        assert!(n.layout.show_scrollbar, "scroll() 应默认显示滚动条");
+        (sc, n.rect(), n.content_size)
+    };
+    let (track_r, thumb) = crate::widgets::vscroll_parts(rect, content, 0.0).expect("应能算出竖直滚动条");
+    let grab = Point::new(track_r.x + track_r.width / 2.0, thumb.y + thumb.height / 2.0);
+
+    // ① 按在 thumb 上 ⇒ 进入拖拽态
+    app.window_ctx_mut(id).unwrap().pointer(
+        &rt,
+        InputEvent::Down {
+            pointer: PointerId(0),
+            pos: grab,
+            button: PointerButton::Left,
+        },
+    );
+    assert!(
+        app.window_ctx(id)
+            .unwrap()
+            .track()
+            .get(sc)
+            .unwrap()
+            .scroll_drag
+            .is_some(),
+        "★ 按在 thumb 上应进入拖拽态"
+    );
+    assert_eq!(
+        app.window_ctx(id).unwrap().track().captured_by(PointerId(0)),
+        Some(sc),
+        "★ 拖拽期间滚动容器应持有指针捕获"
+    );
+
+    // 消费掉"按下"产生的脏，专测"拖动"这一步
+    app.frame_all();
+    assert!(
+        rt.peek_dirty(id).is_empty(),
+        "帧之后脏标应被消费，实为 {:?}",
+        rt.peek_dirty(id)
+    );
+
+    // ② 拖动 ⇒ 必须产生脏标，否则画面不动
+    let moved = Point::new(grab.x, grab.y + 20.0);
+    app.window_ctx_mut(id).unwrap().pointer(
+        &rt,
+        InputEvent::Move {
+            pointer: PointerId(0),
+            pos: moved,
+        },
+    );
+
+    let d = rt.peek_dirty(id);
+    assert!(
+        !d.is_empty(),
+        "★★ 拖动过程中必须有脏标 —— 否则滚动条不跟随鼠标，\
+         只在松手时跳一次（正是用户报障的现象）"
+    );
+    assert!(d.contains(Dirty::PRESENT), "★★ 必须含 PRESENT（要上屏），实为 {d:?}");
+    assert!(
+        app.window_ctx(id).unwrap().track().scroll_offset(sc).1 > 0.0,
+        "拖动后偏移应前进"
+    );
+}

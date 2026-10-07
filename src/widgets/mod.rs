@@ -52,6 +52,7 @@ pub fn handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
     let Some(node) = track.get(id) else {
         return;
     };
+
     if !node.interaction.enabled {
         return;
     }
@@ -352,6 +353,10 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
             }
         }
         EventKind::PointerMoved => {
+            eprintln!(
+                "DBG scroll_handle Moved: drag={drag:?} captured={:?} rect={rect:?} content={content:?}",
+                track.captured_by(view.pointer)
+            );
             let Some(d) = drag else { return };
             if d.pointer != view.pointer || track.captured_by(view.pointer) != Some(id) {
                 return;
@@ -365,6 +370,15 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 let pos = (view.pos.y - d.grab - track_r.y).clamp(0.0, travel);
                 let ny = if travel > 0.0 { pos / travel * max_scroll } else { 0.0 };
                 track.set_scroll_offset(id, (ox, ny));
+
+                //
+                // `set_scroll_offset` 只置 Node 的 Flags（mark_layout_dirty），
+                // 而 `frame()` 读的是 **Runtime 的脏标**（`rt.take_dirty`）——
+                // 两者不是一回事。少了这一步就形成：
+                //   拖动中偏移一直在变 ⇒ 但没人置 Runtime 脏 ⇒ 不重绘
+                //   ⇒ 直到 `PointerReleased` 的 `cmd.damage` 才画一次
+                //   ⇒ 用户看到"拖动无反应，松手后才突然跳到最后位置"。
+                cmd.damage(id);
             } else {
                 let Some((track_r, thumb)) = hscroll_parts(rect, content, ox) else {
                     return;
@@ -374,6 +388,8 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 let pos = (view.pos.x - d.grab - track_r.x).clamp(0.0, travel);
                 let nx = if travel > 0.0 { pos / travel * max_scroll } else { 0.0 };
                 track.set_scroll_offset(id, (nx, oy));
+                // 同上：水平拖动也要重绘，否则松手前画面不动
+                cmd.damage(id);
             }
         }
         EventKind::PointerReleased | EventKind::PointerCanceled => {

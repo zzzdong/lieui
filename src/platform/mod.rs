@@ -458,9 +458,7 @@ impl Runner {
         }
 
         // 还有窗口就继续等事件（不主动 request_redraw：脏了才画）
-        if self.windows.is_empty() && self.app.windows().is_empty() {
-            self.exit_requested = true;
-            el.exit();
+        if self.maybe_exit(el) {
             return;
         }
 
@@ -496,6 +494,21 @@ impl Runner {
             did_work |= ctx.tick(&rt, now);
         }
         did_work
+    }
+
+    /// 没有窗口了就退出事件循环。返回"是否已请求退出"。
+    ///
+    /// ★ 为什么抽成方法：退出检查原先**只写在 `tick()` 末尾**，而 `tick()`
+    ///   只在 `RedrawRequested` 时跑 —— 关掉最后一个窗口之后就不会再有
+    ///   `RedrawRequested`，于是检查永远不执行、进程挂住。
+    ///   现在 `tick()` 与 `CloseRequested` 两处都调它。
+    fn maybe_exit(&mut self, el: &ActiveEventLoop) -> bool {
+        if self.windows.is_empty() && self.app.windows().is_empty() {
+            self.exit_requested = true;
+            el.exit();
+            return true;
+        }
+        false
     }
 
     /// 全部窗口请求重绘（`pump` 发现状态变化后调用，否则停帧）。
@@ -734,7 +747,7 @@ impl Runner {
         }
     }
 
-    fn on_window_event(&mut self, _el: &ActiveEventLoop, os_id: OsWindowId, event: WindowEvent) {
+    fn on_window_event(&mut self, el: &ActiveEventLoop, os_id: OsWindowId, event: WindowEvent) {
         let Some(id) = self.app_window_id(os_id) else {
             return;
         };
@@ -750,6 +763,13 @@ impl Runner {
                 if action == CloseAction::Close {
                     self.app.close_window(id);
                     self.destroy_window(id);
+                    // ★★ 关掉**最后一个**窗口后必须立刻退出事件循环。
+                    //
+                    // 退出检查原本只在 `tick()` 末尾，而 `tick()` **只在
+                    // `RedrawRequested` 时**被调用。窗口都销毁之后不会再有
+                    // `RedrawRequested` ⇒ `tick()` 不再运行 ⇒ `el.exit()`
+                    // 永远不会被调用 ⇒ **点了关闭按钮进程却不退出**。
+                    self.maybe_exit(el);
                 }
             }
 
