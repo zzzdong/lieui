@@ -7,3 +7,6 @@ repository.workspace = true
 description = "lieui 的基础几何与颜色类型（零依赖）"
 
 [dependencies]
+
+[lints]
+workspace = true

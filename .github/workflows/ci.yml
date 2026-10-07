@@ -1,0 +1,82 @@
+# lieui 工程门禁
+#
+# 单一真源：docs/refactor-plan.md 主线 H（refactor-plan v1.1 §四·H）。
+# 门禁配置本身集中在 Cargo.toml 的 [workspace.lints] 与 rustfmt.toml / rust-toolchain.toml，
+# 本文件只负责"在哪跑、跑什么"。
+#
+# 触发条件：push + PR。Windows 上也要跑（渲染/平台层的问题在 Windows 上暴露得最多）。
+
+name: CI
+
+on:
+  push:
+    branches: [main, "refactor/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # -- 1. 格式 --
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # -- 2. Clippy（零容忍；配置在 Cargo.toml 的 [workspace.lints]）--
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # -- 3. 测试（Windows 必跑：渲染/平台层的问题在这里暴露得最多）--
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+      # examples 里带着像素级断言（如 damage_bench），编不过就是真回归
+      - run: cargo build --examples
+
+  # -- 4. MSRV（声明 1.88，见 Cargo.toml 的 rust-version）--
+  # !! 目前标 continue-on-error：本仓库声明 MSRV=1.88，但上游依赖
+  #    （vello_cpu 0.3 / parley 0.11 / softbuffer 0.4 / winit 0.30）各自的 MSRV
+  #    尚未逐一核对，可能高于 1.88。待依赖 MSRV 核实后把 continue-on-error 去掉，
+  #    否则"声明了 MSRV 但从没有 CI 真跑过 1.88"，等于没有承诺。
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: cargo check --workspace
+
+  # -- 5. 依赖审计 / 重复依赖 --
+  # 守的是一条真实历史教训：9b00f0a 曾因 skrifa 与 parley 版本不一致，
+  # 导致树里出现两份字体引擎、墨迹盒与排版度量对不上。
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-deny
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo deny check

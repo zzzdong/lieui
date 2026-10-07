@@ -9,3 +9,6 @@ description = "lieui 的 Taitank 风格 Flexbox 布局引擎"
 [dependencies]
 lieui-geom = { workspace = true }
 lieui-text = { workspace = true }
+
+[lints]
+workspace = true

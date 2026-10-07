@@ -20,3 +20,6 @@ parley = { workspace = true }
 # 升 parley 时**必须**顺着上面这条链把这里一起改，并用 `cargo tree -d` 确认
 # 树里只有一份 skrifa。
 skrifa = "0.44"
+
+[lints]
+workspace = true

@@ -30,6 +30,17 @@ lieui-text = { path = "crates/lieui-text", version = "0.1.0-alpha.4" }
 lieui-layout = { path = "crates/lieui-layout", version = "0.1.0-alpha.4" }
 parley = "0.11"
 
+# ── lint 门禁（S0 / refactor-plan 主线 H1）──
+# 单一真源，各成员 crate 用 `[lints] workspace = true` 继承（不随 workspace 自动继承，须显式声明）。
+[workspace.lints.rust]
+unexpected_cfgs = "deny"
+
+[workspace.lints.clippy]
+# 只开 `all`（不含 pedantic / nursery / cargo）：实测全库 12 处 clippy 建议全部落在
+# `all` 级别且已清零；pedantic 会一次性引入上百条风格噪声，不适合作为增量门禁。
+# 后续要收紧时，建议单独开一个批次逐条评估，而不是一次全开。
+all = "deny"
+
 [dependencies]
 lieui-geom = { workspace = true }
 lieui-text = { workspace = true }
@@ -46,6 +57,9 @@ arboard = { version = "3", optional = true }
 [features]
 default = ["winit"]
 winit = ["dep:winit", "dep:softbuffer", "dep:arboard"]
+
+[lints]
+workspace = true
 
 [profile.dev]
 opt-level = 1

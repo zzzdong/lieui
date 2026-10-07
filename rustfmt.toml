@@ -1,0 +1,10 @@
+# lieui 格式化风格
+#
+# 本项目偏好**紧凑单行**（作者手写风格，最长行 ~150 字符）。
+# rustfmt 默认的 100 宽会把紧凑表达式展开成多行（全库 315 处差异），
+# 因此这里只放宽 `max_width`，让 `cargo fmt` 向既有风格收敛，而非反过来改写它。
+# 注意：`use_small_heuristics` 保持默认 —— 设成 `Max` 会让 rustfmt 更激进地
+# 合并成单行，实测差异反而从 315 涨到 738。
+max_width = 120
+
+newline_style = "Unix"

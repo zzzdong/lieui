@@ -1,0 +1,12 @@
+# lieui 工具链固定
+#
+# 只锁「用哪个 stable」，不锁精确版本号 —— 精确版本锁会在每次 Rust 小版本更新时
+# 强制全员同步升级，与 MSRV 声明（`rust-version = "1.88"`，见 Cargo.toml）的意图冲突：
+# MSRV 才是对外承诺的兼容性下限，工具链只要 ≥ MSRV 即可。
+#
+# CI 里另有一条 MSRV job 会用 1.88 实际编译一次，防止"声明了但没真跑过"。
+[toolchain]
+channel = "stable"
+
+# 渲染与文本排版都走 CPU 路径，不依赖额外组件；保持最小安装面。
+components = ["clippy", "rustfmt"]
