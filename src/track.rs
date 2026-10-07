@@ -2409,3 +2409,362 @@ mod tests {
         assert!(!t.has_layout_dirty(), "下一轮应把它消费掉");
     }
 }
+
+/// 组件行为 API 的测试护栏（P3-a）。
+///
+/// ## 为什么补这一批
+///
+/// D52（组件行为归位）要搬走 `slider_drag_to` / `toggle_*` / `select_radio` /
+/// `input_*` 共 15 个方法。搬移是**纯机械**的，**测试是唯一的正确性保证** ——
+/// 而实测这 15 个方法此前**几乎零覆盖**（只有 `input_set_preedit` 有 1 处引用，
+/// 其余全是定义处本身）。"先补护栏再搬移"是 D52 重做指南的第 1 条。
+///
+/// ## 重点覆盖三类易错点
+///
+/// 1. **UTF-8 char 边界**：`caret` 是**字节偏移**，而 `input_move_caret(delta)`
+///    以**字符**为单位、`input_backspace` 删**整个字符**。中文/emoji 下按字节
+///    算就会切出半个字符（Rust 会 panic：字节索引不是 char 边界）。
+/// 2. **反向选区**：`caret` 与 `anchor` 谁大谁小都可能，`input_selection`
+///    必须归一化成 `a <= b`。
+/// 3. **写回绑定**：所有组件方法都要 `sig.set(..)`，否则模型与视图脱节。
+#[cfg(test)]
+mod component_behavior {
+    use super::{Kind, NodeId, Track};
+    use crate::reactive::{Runtime, Signal};
+
+    fn input_node(t: &mut Track, text: &str, caret: usize) -> NodeId {
+        t.create(
+            Kind::Input {
+                text: text.to_string(),
+                placeholder: String::new(),
+                caret,
+                anchor: caret,
+                preedit: String::new(),
+                scroll: 0.0,
+            },
+            None,
+        )
+    }
+
+    fn spanned_input(t: &mut Track, text: &str, caret: usize, anchor: usize) -> NodeId {
+        t.create(
+            Kind::Input {
+                text: text.to_string(),
+                placeholder: String::new(),
+                caret,
+                anchor,
+                preedit: String::new(),
+                scroll: 0.0,
+            },
+            None,
+        )
+    }
+
+    fn input_text(t: &Track, id: NodeId) -> String {
+        match t.get(id).map(|n| &n.kind) {
+            Some(Kind::Input { text, .. }) => text.clone(),
+            _ => panic!("不是 Input 节点"),
+        }
+    }
+
+    fn caret_of(t: &Track, id: NodeId) -> (usize, usize) {
+        match t.get(id).map(|n| &n.kind) {
+            Some(Kind::Input { caret, anchor, .. }) => (*caret, *anchor),
+            _ => panic!("不是 Input 节点"),
+        }
+    }
+
+    // ── 1. UTF-8 边界 ────────────────────────────────────────────────
+
+    /// ★ `input_move_caret` 以**字符**为单位移动，而 `caret` 是**字节偏移**。
+    ///
+    /// "中文字"共 3 个字符 = 9 字节。从字节 0 前移 1 次应到**字节 3**（"中"之后），
+    /// 而不是字节 1（那会切在"中"的三字节中间）。
+    #[test]
+    fn move_caret_steps_by_char_not_by_byte() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "中文字", 0);
+
+        assert!(t.input_move_caret(id, 1, false));
+        assert_eq!(caret_of(&t, id).0, 3, "前移一个字符应到字节 3（'中'之后），不是 1");
+
+        assert!(t.input_move_caret(id, 1, false));
+        assert_eq!(caret_of(&t, id).0, 6, "再前移一个字符应到字节 6");
+
+        assert!(t.input_move_caret(id, -1, false));
+        assert_eq!(caret_of(&t, id).0, 3);
+    }
+
+    /// ★ 退格删**整个字符**（3 字节），不是 1 字节。
+    #[test]
+    fn backspace_removes_whole_char_not_one_byte() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "中文字", 9);
+
+        assert!(t.input_backspace(id));
+        assert_eq!(input_text(&t, id), "中文", "应删掉整个 '字'");
+
+        assert!(t.input_backspace(id));
+        assert_eq!(input_text(&t, id), "中");
+    }
+
+    /// ★ emoji 是 **4 字节**。退格删整个 emoji；光标在开头时退格返回 false
+    /// 且**不得改动文本**。
+    #[test]
+    fn backspace_handles_four_byte_emoji() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "a😀b", 6); // a=1 + 😀=4 + b=1 => 6 字节
+
+        assert!(t.input_backspace(id));
+        assert_eq!(input_text(&t, id), "a😀");
+
+        assert!(t.input_move_caret(id, -2, false));
+        assert_eq!(caret_of(&t, id).0, 0, "应退到字节 0（'a' 之前）");
+        assert!(!t.input_backspace(id), "开头处退格应返回 false");
+        assert_eq!(input_text(&t, id), "a😀", "失败的退格不得改动文本");
+    }
+
+    /// `input_move_caret` 越过两端必须**夹住**而不是越界。
+    #[test]
+    fn move_caret_clamps_at_both_ends() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "abc", 0);
+
+        assert!(!t.input_move_caret(id, -5, false), "已在开头，报告未变化");
+        assert_eq!(caret_of(&t, id).0, 0, "不得为负");
+
+        assert!(t.input_set_caret(id, 3, false));
+        assert!(!t.input_move_caret(id, 99, false), "已在末尾，报告未变化");
+        assert_eq!(caret_of(&t, id).0, 3, "不得越过末尾");
+    }
+
+    // ── 2. 反向选区 ─────────────────────────────────────────────────
+
+    /// ★ `caret > anchor`（反向拖选）必须归一化成 `a <= b`。
+    #[test]
+    fn selection_is_normalized_when_caret_after_anchor() {
+        let mut t = Track::new();
+        let id = spanned_input(&mut t, "abcdef", 5, 1);
+        assert_eq!(t.input_selection(id), Some((1, 5)), "反向选区应归一化");
+        assert_eq!(
+            t.input_selected_text(id).as_deref(),
+            Some("bcde"),
+            "取出的应是规范化后的区间"
+        );
+    }
+
+    /// 无选区（`caret == anchor`）⇒ `None`，而不是 `(n, n)`。
+    #[test]
+    fn selection_is_none_when_caret_equals_anchor() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "abc", 2);
+        assert_eq!(t.input_selection(id), None);
+        assert_eq!(t.input_selected_text(id), None);
+    }
+
+    /// ★ `input_select_all` 应把整段文本圈成选区。
+    #[test]
+    fn select_all_covers_whole_text() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "中文abc", 0);
+        assert!(t.input_select_all(id));
+        assert_eq!(t.input_selection(id), Some((0, 9)), "应选中全部 9 字节");
+        assert_eq!(t.input_selected_text(id).as_deref(), Some("中文abc"));
+    }
+
+    /// ★ 插入**替换选区**，且插入后选区收拢（anchor 也 = caret）。
+    #[test]
+    fn insert_replaces_selection() {
+        let mut t = Track::new();
+        let id = spanned_input(&mut t, "hello world", 11, 6);
+        assert!(t.input_insert(id, "X"));
+        assert_eq!(input_text(&t, id), "hello X");
+        assert_eq!(caret_of(&t, id), (7, 7), "插入后选区应收拢（anchor 也 = caret）");
+    }
+
+    /// ★ 删除键删**光标后**一个字符（与退格相反方向）。
+    #[test]
+    fn delete_removes_char_after_caret() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "中文", 0);
+
+        assert!(t.input_delete(id));
+        // ★ "中文" 只有 2 个字符，删掉开头的 '中' 之后剩 "文"（不是 "文字"）。
+        //   第一版我把期望写成 "文字"，测试失败才发现自己数错了字符。
+        assert_eq!(input_text(&t, id), "文", "应删掉开头的 '中'");
+        assert_eq!(caret_of(&t, id).0, 0, "删除不移动光标");
+    }
+
+    /// 末尾处删除 ⇒ 返回 false 且不改文本。
+    #[test]
+    fn delete_at_end_reports_no_change() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "中文", 6);
+        assert!(!t.input_delete(id));
+        assert_eq!(input_text(&t, id), "中文");
+    }
+
+    // ── 3. 绑定写回 ─────────────────────────────────────────────────
+
+    /// ★ `toggle_checked` 必须写回 `checked` 绑定 —— 否则模型与视图脱节
+    /// （下次 `view()` 会用模型值覆盖，用户点了没反应）。
+    #[test]
+    fn toggle_checked_writes_back_binding() {
+        let mut t = Track::new();
+        let rt = Runtime::new();
+        let sig = Signal::new(&rt, false);
+        let id = t.create(Kind::Checkbox { checked: false }, None);
+        t.get_mut(id).unwrap().bindings.checked = Some(sig.clone());
+
+        assert_eq!(t.toggle_checked(id), Some(true));
+        sig.with(|v| assert!(*v, "signal 必须被写回为 true"));
+
+        assert_eq!(t.toggle_checked(id), Some(false));
+        sig.with(|v| assert!(!*v, "再次翻转应写回 false"));
+    }
+
+    /// `toggle_switch` 与 checkbox 同构，只是字段名不同（`on` vs `checked`）。
+    #[test]
+    fn toggle_switch_writes_back_binding() {
+        let mut t = Track::new();
+        let rt = Runtime::new();
+        let sig = Signal::new(&rt, false);
+        let id = t.create(Kind::Switch { on: false }, None);
+        t.get_mut(id).unwrap().bindings.checked = Some(sig.clone());
+
+        assert_eq!(t.toggle_switch(id), Some(true));
+        sig.with(|v| assert!(*v));
+    }
+
+    /// ★ 类型不匹配时必须返回 `None` 且**不改状态**。
+    #[test]
+    fn toggle_on_wrong_kind_is_noop() {
+        let mut t = Track::new();
+        let id = t.create(Kind::Box, None);
+        assert_eq!(t.toggle_checked(id), None, "Box 不是 Checkbox");
+        assert_eq!(t.toggle_switch(id), None);
+        assert_eq!(t.select_radio(id), None);
+    }
+
+    /// ★ `select_radio` 把本项 `value` 写回 `text` 绑定。
+    ///
+    /// 同组互斥**不由它做**（见其文档：信号变化 ⇒ `view()` 重跑 ⇒ 其它项
+    /// 自然更新），所以这里只验证"写回本项 value"。
+    #[test]
+    fn select_radio_writes_back_its_value() {
+        let mut t = Track::new();
+        let rt = Runtime::new();
+        let sig = Signal::new(&rt, String::from("none"));
+        let id = t.create(
+            Kind::Radio {
+                selected: false,
+                value: "wifi".into(),
+            },
+            None,
+        );
+        t.get_mut(id).unwrap().bindings.text = Some(sig.clone());
+
+        assert_eq!(t.select_radio(id).as_deref(), Some("wifi"));
+        sig.with(|v| assert_eq!(v.as_str(), "wifi"));
+    }
+
+    /// ★ `slider_drag_to`：x 映射到 `[min,max]`，**值没变时返回 false**。
+    #[test]
+    fn slider_drag_to_maps_x_and_reports_no_change() {
+        let mut t = Track::new();
+        let rt = Runtime::new();
+        let sig = Signal::new(&rt, 0.0f32);
+        let id = t.create(
+            Kind::Slider {
+                value: 0.0,
+                min: 0.0,
+                max: 100.0,
+                dragging: false,
+            },
+            None,
+        );
+        t.get_mut(id).unwrap().bindings.value = Some(sig.clone());
+        // ★ `Node::rect()` 读的是 `computed`，**不是** `layout.dim` ——
+        //   只设 `layout.dim` 时宽度仍是 0，`t` 恒为 0，永远报告"未变化"。
+        t.get_mut(id).unwrap().computed.width = 100.0;
+
+        assert!(t.slider_drag_to(id, 50.0), "值应发生变化");
+        sig.with(|v| assert_eq!(*v, 50.0));
+
+        assert!(!t.slider_drag_to(id, 50.0), "同样的 x 应报告未变化");
+    }
+
+    /// 滑块 x 超出 `[0,width]` 必须**夹住**而不是越界。
+    ///
+    /// ★ 注意第一版把 `assert!(slider_drag_to(id, -50.0))` 写在值还是初始
+    ///   `0.0` 的时候 —— x=-50 夹到 `t=0` ⇒ 值仍是 0 ⇒ **正确地**报告"未变化"，
+    ///   测试却断言它会变。**必须先移到中间**，再测夹回边界。
+    #[test]
+    fn slider_drag_to_clamps_out_of_range_x() {
+        let mut t = Track::new();
+        let id = t.create(
+            Kind::Slider {
+                value: 0.0,
+                min: 0.0,
+                max: 100.0,
+                dragging: false,
+            },
+            None,
+        );
+        t.get_mut(id).unwrap().computed.width = 100.0;
+
+        // 先移到中间
+        assert!(t.slider_drag_to(id, 50.0));
+
+        // 越界向左 ⇒ 夹到最小值 0（**确实变化**：50 → 0）
+        assert!(t.slider_drag_to(id, -50.0), "越界应夹到最小值");
+        // 再一次同样的越界 ⇒ 已在最小值，报告未变化
+        assert!(!t.slider_drag_to(id, -50.0), "已在最小值，应未变化");
+
+        // 越界向右 ⇒ 夹到最大值 100
+        assert!(t.slider_drag_to(id, 9999.0), "越界应夹到最大值");
+        assert!(!t.slider_drag_to(id, 9999.0), "已在最大值，应未变化");
+    }
+
+    // ── 4. IME preedit ──────────────────────────────────────────────
+
+    /// ★ `input_set_preedit` 存组合串；**提交首个字符时组合串被清空**
+    /// （见 `input_insert`：组合串还没进 text，不能重复计入）。
+    #[test]
+    fn preedit_is_cleared_when_first_char_commits() {
+        let mut t = Track::new();
+        let id = input_node(&mut t, "", 0);
+
+        assert!(t.input_set_preedit(id, "ni".into()));
+        assert_eq!(t.input_preedit(id), Some("ni"), "组合串应暂存");
+
+        assert!(t.input_insert(id, "你"));
+        // ★ 实际契约：`input_insert` 里执行的是 `preedit.clear()`，所以这里
+        //   得到 `Some("")` 而**不是** `None`。
+        //   语义上等效（渲染侧判空即可），但与"从未设置过 preedit ⇒ None"
+        //   **不一致** —— 调用方必须同时处理两者。这是实现与直觉的一处偏差，
+        //   测试必须按**实际行为**写，否则就会逼着人去改一个并不存在的 bug。
+        assert_eq!(
+            t.input_preedit(id),
+            Some(""),
+            "提交后组合串必须被清空（清空后是 Some(\"\") 而非 None）"
+        );
+        assert_eq!(input_text(&t, id), "你");
+    }
+
+    /// 非 Input 节点上这些方法都必须安全返回（而不是 panic）。
+    #[test]
+    fn input_api_on_non_input_node_is_safe() {
+        let mut t = Track::new();
+        let id = t.create(Kind::Box, None);
+        assert_eq!(t.input_selection(id), None);
+        assert_eq!(t.input_selected_text(id), None);
+        assert_eq!(t.input_preedit(id), None);
+        assert!(!t.input_is_active(id));
+        assert!(!t.input_insert(id, "x"));
+        assert!(!t.input_backspace(id));
+        assert!(!t.input_delete(id));
+        assert!(!t.input_select_all(id));
+        assert!(!t.input_move_caret(id, 1, false));
+    }
+}

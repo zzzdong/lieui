@@ -5117,3 +5117,126 @@ widgets 1988 = 1133 + 853    event 1315 = 883 + 438
 
 G4（测试外置）**全部完成**：`app.rs` + 9 个文件，共 10166 行 -> 5054 行实现 + 5127 行测试。
 接下来是 **D52（组件行为归位）**，`track.rs` 21 个方法，有已记录的重做指南。
+
+---
+
+## 2026-10-07 · P3-a · 组件行为 API 测试护栏 —— ✅ 完成（18 条）
+
+### 一、为什么先补测试而不是直接搬
+
+D52（组件行为归位）的重做指南第 1 条是"**先补测试护栏**"。实测确认了这条的必要性：
+
+| 方法 | 测试文件中的引用数 |
+|---|---|
+| `input_set_preedit` | 1 |
+| 其余 **14 个** | **0**（全是定义处本身） |
+
+即 `slider_drag_to` / `toggle_checked` / `toggle_switch` / `select_radio` /
+`input_selection` / `input_selected_text` / `input_insert` / `input_backspace` /
+`input_delete` / `input_move_caret` / `input_set_caret` / `input_select_all` /
+`input_preedit` / `input_is_active` —— **全部零覆盖**。
+
+**零覆盖意味着**：任何改动都没有保护，且**可能已经有 bug 而没人发现**。
+
+### 二、顺带核实了 D52 的可行性（推翻了我一个预设的反对理由）
+
+我原以为"搬走会削弱封装"（这些方法要读写 `Node.kind` / `Node.bindings`）。
+实测：`Node` 的字段**已经全是 `pub`**，且 `align.rs` / `view.rs`
+**早就在跨模块直接读写** `n.bindings` ⇒ **封装早已不存在**，搬走没有技术障碍。
+
+> 但**最终仍未决定做 D52 搬移** —— 理由不是封装，而是：
+> 收益只有 13%（2411 → ~2100 行）、零功能价值、且上次失败过。
+> **补测试本身已是实质产出**，搬移可以以后再做（有了护栏，届时才安全）。
+
+### 三、测试（18 条 `track::component_behavior`）
+
+重点覆盖三类易错点：
+
+**① UTF-8 char 边界**（`caret` 是**字节偏移**，而 `input_move_caret(delta)` 以**字符**为单位）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `move_caret_steps_by_char_not_by_byte` | "中文字"前移一字符 ⇒ 字节 **0→3**（不是 1） |
+| `backspace_removes_whole_char_not_one_byte` | 退格删**整个 3 字节字符** |
+| `backspace_handles_four_byte_emoji` | 4 字节 emoji；开头退格返回 false 且**不改文本** |
+| `move_caret_clamps_at_both_ends` | 越过两端**夹住**，且报告"未变化" |
+
+**② 反向选区与编辑语义**
+
+| 测试 | 钉住什么 |
+|---|---|
+| `selection_is_normalized_when_caret_after_anchor` | `caret > anchor` 必须归一化成 `a <= b` |
+| `selection_is_none_when_caret_equals_anchor` | 无选区返回 `None`（不是 `(n,n)`） |
+| `select_all_covers_whole_text` | 全选覆盖中英混合的 9 字节 |
+| `insert_replaces_selection` | 插入替换选区，且选区**收拢**（anchor 也 = caret） |
+| `delete_removes_char_after_caret` | 删除键删**光标后**（与退格反向） |
+| `delete_at_end_reports_no_change` | 末尾删除返回 false 且不改文本 |
+
+**③ 绑定写回**（不改 signal ⇒ 下次 `view()` 用模型值覆盖 ⇒ 用户点了没反应）
+
+`toggle_checked_writes_back_binding` / `toggle_switch_writes_back_binding` /
+`select_radio_writes_back_its_value` / `slider_drag_to_maps_x_and_reports_no_change` /
+`slider_drag_to_clamps_out_of_range_x` / `toggle_on_wrong_kind_is_noop` /
+`preedit_is_cleared_when_first_char_commits` / `input_api_on_non_input_node_is_safe`
+
+### 四、★★ 写测试时踩的四个坑（**三个是我期望值写错**）
+
+**1. `Node::rect()` 读 `computed`，不是 `layout.dim`。**
+只设 `layout.dim` 时 `rect().width` 仍是 0 ⇒ `slider_drag_to` 里
+`t = (x - rect.x) / rect.width`恒为 0 ⇒ 永远返回"未变化"。
+（第一版注释还写着"必须给节点明确宽度"，其实给了也不够 —— **设错了字段**。）
+
+**2. ★★ `"中文"` 删掉开头的 `'中'` 剩的是 `"文"`，不是 `"文字"`。**
+我写 `assert_eq!(text, "文字")` ⇒ 测试失败。查证后确认**实现是对的**，
+是我数错了字符。**如果当时为了让测试通过去改实现，就会把一个正确的
+UTF-8 删除逻辑改坏。**
+
+**3. ★ `slider_drag_to(id, -50.0)` 在值还是初始 `0.0` 时返回 `false` 是正确的。**
+x=-50 夹到 `t=0` ⇒ 值仍 0 ⇒ "未变化"。
+我第一版断言它会变。必须**先移到中间**再测夹回边界。
+
+**4. ★ `input_preedit` 在组合串被清空后返回 `Some("")` 而非 `None`。**
+`input_insert` 里执行的是 `preedit.clear()`，所以是空字符串而不是 `None`。
+语义上等效（渲染侧判空即可），但与"从未设置过 ⇒ `None`"**不一致**，
+调用方必须同时处理两者。
+
+> 这四处与本项目已有的"对照组必须确认它走了对照组分支"、
+> "先验证构造再写断言"同源。**第 2、3 条尤其危险**：
+> **测试失败时，先怀疑自己的期望值，而不是实现。**
+
+### 五、变异验证
+
+把 `prev_char_boundary` 从"退一个**字符**"改成"退一个**字节**"
+（真实 bug 的典型形态）：
+
+```
+panicked at src\track.rs:1644: start of range should be a character boundary
+assertion failed: 应退到字节 0   left: 1
+test result: FAILED. 16 passed; 2 failed
+```
+
+**两条 UTF-8 测试同时失败**，且症状正是真实 bug 的表现
+（`text.replace_range` 切在非 char 边界 ⇒ Rust 直接 panic）。
+
+### 六、门禁（第十八次）
+
+`clippy::assert_eq_bool` × 3 —— `assert_eq!(*v, true)` 应写成 `assert!(*v)`。
+连同前十七次：`type_complexity`、无用 `mut`、doc 引用块语法、`auto-deref`、
+括号错位、`field_reassign_with_default`、`useless_conversion`、`unused mut`、
+`unused import`、rustdoc quote、`expected item after doc comment` 等。
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **17 个测试二进制全 ok**（lib 429 → **447**） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+| 变异（`prev_char_boundary` 改按字节） | **FAILED** ✓（2 条 UTF-8 测试抓到） |
+
+### 八、下一步
+
+**D52 搬移本身仍未做**，理由：收益 13%、零功能价值、上次失败过。
+现在**护栏已齐**，若要做可按重做指南逐个方法搬（12~ 15 轮）。
+但更值得问的是：除了搬移，`track.rs` 2411 行还有哪些**真正的问题**？
