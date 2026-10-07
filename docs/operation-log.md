@@ -4639,3 +4639,79 @@ fn sentinels_are_distinguishable_only_by_is_nan() {
 | `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
 | `cargo fmt --all --check` | 0 处差异 |
 | `cargo build --examples` | exit 0 |
+---
+
+## 2026-10-07 · G4 测试外置 + snapping 前置测量（未完成，如实记录）
+
+### 一、G4：app.rs 测试外置（✅ 完成）
+
+| 文件 | 外置前 | 外置后 |
+|---|---|---|
+| `src/app.rs` | 5816 行（测试占 70%） | **1603 行（测试占 7%）** |
+| `src/app_tests.rs` | — | 3605 行 |
+
+**做法：用 `#[path]` 而不是搬到 `tests/`**：
+
+```rust
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;
+```
+
+**关键**：这样测试里的 `use super::*` **完全不用改**（父模块仍是 `app`）。
+若搬到 `tests/` 目录（变成集成测试），就拿不到 `app` 的**私有** helper
+（本文件大量依赖 `setup()` / `picker()` / `tap_node()`）——
+实测会爆 **629 个 "cannot find" 错误**。
+
+**为什么优先做这件事**：本轮在 app.rs 上反复出结构事故（括号错位 2 次、
+模块归属错误 2 次、一次 `git checkout` 险情）。5800 行文件里 4000 行是测试时，
+用脚本切割就是在**高风险区操作**。现在只剩 1500 行实现，后续改动风险实质下降。
+
+**踩到的两个坑**（都是我自己的操作失误，非代码问题）：
+1. 切割时**多取了一行**——原 `mod tests` 的闭合 `}`被带进了 `app_tests.rs`；
+2. 切割时**漏了一行**——`use super::*;` 丢失，直接导致 629 个编译错误。
+   ⇒ 教训：**行号切割后必须立刻 `cargo build`**，不能攒到最后。
+
+### 二、像素 snapping：前置测量**未完成**，因此不实施
+
+D37 剩下的真问题是"1px 分隔线与文本持续半像素模糊"。按本轮方法论
+（**先量再改**，此前已用它推翻 C4 / D-a / D37 三个判断），先做前置测量。
+
+**测量构造失败**：`x=2.0` 与 `x=2.5` 产出的 Rects **完全相同**：
+
+```
+整数 x=2.0 ⇒ Rects: (0,0,8x4) (0,0,8x1)
+半像素 x=2.5 ⇒ Rects: (0,0,8x4) (0,0,8x1)
+```
+
+原因：`layout.position` 被 `position_type`（默认 `Relative`）忽略，
+节点仍在 x=0。**这意味着我还没搞清"怎样让一个矩形落在半像素上"** ——
+而这恰恰是评估 snapping 的前提。
+
+⇒ **不实施**。理由与本轮其他"不做"决策一致：
+**没量清楚就不改**，否则又是一次"凭直觉改渲染路径"的高风险改动
+（snapping 改的是**所有绘制指令的坐标**，一旦错了整屏错位且极难定位）。
+
+**下一步该先搞清的问题**（留给后续）：
+1. `position_type` 各变体（Relative / Absolute）的实际语义与默认；
+2. 哪个阶段能把矩形放到"故意的小数坐标"上（`margin`? `transform`? 直接构造 `Op`?）；
+3. 现有 `raster` 是否已在做隐式吸附（若是，snapping 的收益接近 0）。
+
+### 三、本轮未做但已定位的问题
+
+**D52 仍在**：`src/track.rs` 2193 行里有 **21 个组件行为方法**
+（`slider_drag_to` / `toggle_checked` / `toggle_switch` / `select_radio` /
+9 个 `input_*`），本质是组件状态机却挂在保留树上，违反设计 §3.2
+（约定它们应在 `widgets/`，形如 `fn slider_handle(track, id, ev, cmd)`）。
+
+外部调用点共 22 处，分布在 `widgets/mod.rs` / `app.rs` / `platform/mod.rs`。
+是**纯机械搬移**（零行为变化），但工作量中等。
+
+### 四、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | 16 个二进制全 ok（测试数与外置前一致 ⇒ 纯搬移） |
+| `cargo clippy --workspace --all-targets` | exit 0 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
