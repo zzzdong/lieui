@@ -232,11 +232,7 @@ impl<'a> MenuRef<'a> {
                                 } else {
                                     String::new()
                                 };
-                                let _ = row
-                                    .text(mark)
-                                    .font_size(SLOT_FONT)
-                                    .width(SLOT_W)
-                                    .color(theme.accent);
+                                let _ = row.text(mark).font_size(SLOT_FONT).width(SLOT_W).color(theme.accent);
                             }
                             // 图标槽：同理
                             if any_icon {
@@ -254,11 +250,7 @@ impl<'a> MenuRef<'a> {
                             // 禁用项的**颜色**由主题的次要色表达，而不是给子节点打
                             // `enabled(false)`：那会让渲染层再乘一次半透明（`dim_if_disabled`）
                             // ⇒ 灰两次。行为上的"点不动"由事件路由阶段的 `enabled` 检查负责。
-                            let fg = if spec.enabled {
-                                theme.text
-                            } else {
-                                theme.text_secondary
-                            };
+                            let fg = if spec.enabled { theme.text } else { theme.text_secondary };
                             let _ = row.text(spec.label.clone()).font_size(ITEM_FONT).color(fg);
 
                             // 撑开：把快捷键推到行尾（弹层收缩到内容时这条 spacer
@@ -381,9 +373,13 @@ mod tests {
         v.column(|c| {
             c.text("body");
         });
-        v.popup_at_point(crate::geom::Point::new(20.0, 20.0), crate::track::Placement::Below, |p| {
-            p.menu(f);
-        });
+        v.popup_at_point(
+            crate::geom::Point::new(20.0, 20.0),
+            crate::track::Placement::Below,
+            |p| {
+                p.menu(f);
+            },
+        );
         let mut t = Track::new();
         crate::align::align(&mut t, &v);
         layout(&mut t, WIN);
@@ -431,10 +427,7 @@ mod tests {
             assert!(matches!(t.get(id).unwrap().kind, TKind::Box), "项是容器行");
             assert!(!t.get(id).unwrap().children.is_empty(), "行里有子节点");
         }
-        assert!(
-            t.get(r[2]).unwrap().children.is_empty(),
-            "分隔线是叶子（1px 线）"
-        );
+        assert!(t.get(r[2]).unwrap().children.is_empty(), "分隔线是叶子（1px 线）");
         assert_eq!(label_of(&t, kids(&t, r[0])[0]), "打开");
         assert_eq!(label_of(&t, kids(&t, r[1])[0]), "另存为");
         assert_eq!(label_of(&t, kids(&t, r[3])[0]), "退出");
@@ -453,11 +446,7 @@ mod tests {
         let l = &n.layout;
         assert_eq!(l.dim[1], SEPARATOR_H, "线高 1px");
         assert_eq!(l.margin[CSSDirection::Top as usize], SEPARATOR_PAD_Y, "上留白");
-        assert_eq!(
-            l.margin[CSSDirection::Bottom as usize],
-            SEPARATOR_PAD_Y,
-            "下留白"
-        );
+        assert_eq!(l.margin[CSSDirection::Bottom as usize], SEPARATOR_PAD_Y, "下留白");
     }
 
     /// 无勾选 / 无图标时**不留空白槽**（标签从行首开始）
@@ -560,10 +549,7 @@ mod tests {
         let n = t.get(row).unwrap();
         assert_eq!(n.handlers.len(), 1, "行上一个处理器");
         assert_eq!(n.handlers[0].kind, EventKind::Tapped);
-        assert!(
-            t.get(kids(&t, row)[0]).unwrap().handlers.is_empty(),
-            "标签不挂处理器"
-        );
+        assert!(t.get(kids(&t, row)[0]).unwrap().handlers.is_empty(), "标签不挂处理器");
     }
 
     /// hover / 按下底色取主题 token（菜单外观统一由主题决定）
@@ -653,12 +639,7 @@ mod tests {
         crate::align::align(&mut t, &v);
         layout(&mut t, WIN);
         place_anchored_layers(&mut t, WIN);
-        let popup = t
-            .roots()
-            .iter()
-            .find(|r| r.layer == Layer::Popup)
-            .unwrap()
-            .node;
+        let popup = t.roots().iter().find(|r| r.layer == Layer::Popup).unwrap().node;
         let r: Rect = crate::layout::rect_of(&t, popup);
         assert!((r.x - at.x).abs() < 0.5 && (r.y - (at.y + 4.0)).abs() < 0.5, "{r:?}");
     }

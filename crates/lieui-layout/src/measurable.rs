@@ -109,12 +109,8 @@ impl FixedMeasure {
 impl Measurable for FixedMeasure {
     fn measure(&self, constraint: &LayoutConstraint) -> IntrinsicSize {
         IntrinsicSize::new(
-            self.size
-                .width
-                .clamp(constraint.min_width, constraint.max_width),
-            self.size
-                .height
-                .clamp(constraint.min_height, constraint.max_height),
+            self.size.width.clamp(constraint.min_width, constraint.max_width),
+            self.size.height.clamp(constraint.min_height, constraint.max_height),
         )
     }
 

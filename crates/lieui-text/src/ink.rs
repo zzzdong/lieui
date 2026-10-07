@@ -76,16 +76,14 @@ fn glyph_ink_box(blob: &Blob<u8>, index: u32, glyph_id: u32, font_size: f32) -> 
         return *hit;
     }
 
-    let computed = FontRef::from_index(blob.data(), index)
-        .ok()
-        .and_then(|font| {
-            GlyphMetrics::new(&font, SkSize::new(font_size), LocationRef::default())
-                .bounds(skrifa::GlyphId::new(glyph_id))
-                .map(|b| {
-                    // skrifa 的 bbox 是 y-up（字体约定）⇒ 翻成 y-down（原点在基线）
-                    (b.x_min, -b.y_max, b.x_max, -b.y_min)
-                })
-        });
+    let computed = FontRef::from_index(blob.data(), index).ok().and_then(|font| {
+        GlyphMetrics::new(&font, SkSize::new(font_size), LocationRef::default())
+            .bounds(skrifa::GlyphId::new(glyph_id))
+            .map(|b| {
+                // skrifa 的 bbox 是 y-up（字体约定）⇒ 翻成 y-down（原点在基线）
+                (b.x_min, -b.y_max, b.x_max, -b.y_min)
+            })
+    });
     map.insert(glyph_id, computed);
     computed
 }
@@ -105,8 +103,7 @@ pub fn ink_bounds(layout: &TextLayout) -> Option<InkBounds> {
             let font = run.font();
             let size = run.font_size();
             for g in gr.positioned_glyphs() {
-                let Some((x0, y0, x1, y1)) = glyph_ink_box(&font.data, font.index, g.id, size)
-                else {
+                let Some((x0, y0, x1, y1)) = glyph_ink_box(&font.data, font.index, g.id, size) else {
                     continue;
                 };
                 // parley 的 positioned glyph x/y 已在"排版坐标"（y 向下）：y = 基线位置

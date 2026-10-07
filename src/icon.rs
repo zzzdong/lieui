@@ -33,9 +33,7 @@ pub fn codepoints() -> &'static HashMap<&'static str, u32> {
             .lines()
             .filter_map(|line| {
                 let (name, hex) = line.split_once(' ')?;
-                u32::from_str_radix(hex.trim(), 16)
-                    .ok()
-                    .map(|cp| (name, cp))
+                u32::from_str_radix(hex.trim(), 16).ok().map(|cp| (name, cp))
             })
             .collect()
     })
@@ -63,35 +61,22 @@ pub fn ensure_icon_font() {
             return;
         }
         let names = lieui_text::register_font_bytes(FONT_BYTES.to_vec());
-        *slot = Some(
-            names
-                .into_iter()
-                .find(|n| n == ICON_FONT_FAMILY)
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "[lieui] 图标字体注册结果不含 {ICON_FONT_FAMILY:?}，图标将显示为占位字形"
-                    );
-                    ICON_FONT_FAMILY.to_string()
-                }),
-        );
+        *slot = Some(names.into_iter().find(|n| n == ICON_FONT_FAMILY).unwrap_or_else(|| {
+            eprintln!("[lieui] 图标字体注册结果不含 {ICON_FONT_FAMILY:?}，图标将显示为占位字形");
+            ICON_FONT_FAMILY.to_string()
+        }));
     });
 }
 
 /// 图标字体 family 名（首次调用会自动注册字体）。
 pub fn icon_font_family() -> String {
     ensure_icon_font();
-    ICON_FAMILY.with(|f| {
-        f.borrow()
-            .clone()
-            .unwrap_or_else(|| ICON_FONT_FAMILY.to_string())
-    })
+    ICON_FAMILY.with(|f| f.borrow().clone().unwrap_or_else(|| ICON_FONT_FAMILY.to_string()))
 }
 
 /// 图标文本的排版规格：图标字体 + 不换行。
 pub fn icon_spec(font_size: f64) -> TextSpec {
-    TextSpec::new(font_size)
-        .font_family(icon_font_family())
-        .wrap(false)
+    TextSpec::new(font_size).font_family(icon_font_family()).wrap(false)
 }
 
 #[cfg(test)]
@@ -131,6 +116,9 @@ mod tests {
         // 对齐友好的关键性质：Material Icons 行高系数 = 1.0 ⇒ 行盒是**字号见方的正方形**，
         // 字形墨迹居中于 em。于是 align_items(Center) 按行盒居中 ≈ 按视觉中心居中，
         // 不同字号的图标混排天然对齐（gallery 图标段依赖这一点）。
-        assert!((w - 20.0).abs() < 0.5 && (h - 20.0).abs() < 0.5, "行盒应≈字号见方：{w}×{h}");
+        assert!(
+            (w - 20.0).abs() < 0.5 && (h - 20.0).abs() < 0.5,
+            "行盒应≈字号见方：{w}×{h}"
+        );
     }
 }

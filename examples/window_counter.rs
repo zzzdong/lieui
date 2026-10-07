@@ -37,14 +37,10 @@ impl ViewModel for Counter {
             c.center();
             c.gap(12.0);
             c.text("Counter（点按钮 / Tab 切焦点 / 每秒 +1）").font_size(16.0);
-            c.text(self.count.get().to_string())
-                .font_size(72.0)
-                .color(Color::RED);
+            c.text(self.count.get().to_string()).font_size(72.0).color(Color::RED);
             c.row(|r| {
                 r.gap(12.0);
-                r.button("+1")
-                    .tab_stop(true)
-                    .on_tap(act(self, Self::inc));
+                r.button("+1").tab_stop(true).on_tap(act(self, Self::inc));
             });
 
             // ── 双向绑定（M5）：拖动/点击会写回 Signal ──

@@ -234,14 +234,16 @@ mod tests {
         let r = rect_of(&t, node);
 
         let scene = scene_of(&t);
-        let mine = scene.ops().iter().filter_map(|op| match op {
-            crate::render::scene::Op::Rect { rect, color, .. }
-                if (color.r, color.g, color.b) == (10, 20, 30) =>
-            {
-                Some(*rect)
-            }
-            _ => None,
-        }).collect::<Vec<_>>();
+        let mine = scene
+            .ops()
+            .iter()
+            .filter_map(|op| match op {
+                crate::render::scene::Op::Rect { rect, color, .. } if (color.r, color.g, color.b) == (10, 20, 30) => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(mine.len(), 1, "用户画的那块出现在场景里");
         assert!((mine[0].width - r.width * 0.5).abs() < 0.5, "宽度按 value 截取");
         assert_eq!(mine[0].x, r.x);
@@ -291,9 +293,7 @@ mod tests {
             .ops()
             .iter()
             .filter_map(|op| match op {
-                crate::render::scene::Op::Rect { rect, color, .. }
-                    if (color.r, color.g, color.b) == (10, 20, 30) =>
-                {
+                crate::render::scene::Op::Rect { rect, color, .. } if (color.r, color.g, color.b) == (10, 20, 30) => {
                     Some(rect.width)
                 }
                 _ => None,
@@ -375,11 +375,9 @@ mod tests {
             .next()
             .unwrap()
             .node;
-        app.window_ctx_mut(id).unwrap().dispatch(
-            &rt,
-            &[node],
-            &crate::event::Event::simple(EventKind::Tapped),
-        );
+        app.window_ctx_mut(id)
+            .unwrap()
+            .dispatch(&rt, &[node], &crate::event::Event::simple(EventKind::Tapped));
         assert_eq!(concrete.borrow().taps, 1, "Tapped 到达自定义状态机");
 
         // view 重跑（无关状态变化）后实例还在：状态不丢

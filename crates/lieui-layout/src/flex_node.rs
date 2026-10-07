@@ -7,6 +7,16 @@ use crate::style::FlexStyle;
 use crate::types::*;
 use lieui_text::TextEngine;
 
+/// 冻结循环（[`FlexLine::resolve_flexible_lengths`]）的**迭代上限**。
+///
+/// 这是一条**安全阀**：正常收敛只需几轮（每轮至少冻结一批违反 min/max 的 item），
+/// 上限取 32 远高于正常需要，不会影响任何合法布局的结果。
+///
+/// 它挡住的是**死循环** —— 当 `total_violation != 0` 而两侧 violation 列表都为空
+/// （浮点抵消）时，该轮什么都不冻结、下一轮输入完全相同，于是永远循环。
+/// 主线程挂死是最严重的故障形态，所以这里宁可接受"结果略怪"也不让它转圈。
+pub const MAX_FLEX_ITERATIONS: usize = 32;
+
 /// Flex 布局节点
 #[derive(Debug, Clone)]
 pub struct FlexNode {
@@ -34,6 +44,25 @@ pub struct FlexNode {
     /// 存在的意义：**绘制必须用同一个约束重新排版**，否则"测度按约束换行、绘制不换行"
     /// 会出现盒子两行高、只画一行的顶对齐错位。宿主把它记到节点上供绘制复用。
     pub measured_wrap_width: Option<f32>,
+
+    /// 本轮测量得到的**内容尺寸** `[width, height]`。
+    ///
+    /// ## 为什么必须与 `layout_result.dim` 分开记
+    ///
+    /// `layout_result.dim` 是**布局后**尺寸（可能被 flex 拉伸 / 收缩）；
+    /// 而宿主的 `Node.desired` 要的是**内容测量尺寸** —— 它走 `paint_bounds`
+    /// 的文本收缩路径，若误用布局后尺寸，脏区会偏大，**"精确脏区"直接退化**。
+    ///
+    /// ## 用途（D-a）
+    ///
+    /// 有了它，宿主在 `write_back` 阶段**不必把文本再测一遍**。
+    /// 此前 `desired_size()` 会对每个文本叶子再调一次 `TextEngine::measure_text`，
+    /// 而flex 引擎在 `layout_single_node` 里**已经测过一次** ——
+    /// 每个文本叶子每次布局多一次测量（含缓存键构造：`text.to_owned()` 一次堆分配）。
+    ///
+    /// 约定：`[0.0, 0.0]` 表示"本轮没有测量"（非文本叶子），
+    /// 宿主需用 `> 0.0` 守卫后再采用。
+    pub measured_content: [f32; 2],
 }
 
 impl FlexNode {
@@ -50,6 +79,7 @@ impl FlexNode {
             intrinsic_size: None,
             measure_text: None,
             measured_wrap_width: None,
+            measured_content: [0.0, 0.0],
         }
     }
 
@@ -254,9 +284,18 @@ impl FlexNode {
 
     pub fn layout(&mut self, parent_width: f32, parent_height: f32, parent_direction: Direction) {
         let ma = self.style.flex_direction;
-        if is_undefined(self.style.flex_basis)
-            && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize])
-        {
+        // ★ D44：`flex_basis` 的写入必须**可还原**。
+        //
+        //   此前是"只写不还原"：一次 `layout` 就把 `flex_basis` 从 undefined(NaN)
+        //   永久变成 `dim[main]`。而 `dim` 有恢复（下面 `swr`/`shr`）、`flex_basis` 没有
+        //   ⇒ 布局对样式产生了**持久的单边副作用**。
+        //
+        //   今天不触发，只因为框架每次布局都重建临时 FlexNode 树（根节点总是新的）。
+        //   但 D-a 要做"FlexNode 持久缓存复用" —— 届时根节点会被复用，
+        //   这个残留就直接变成"同一棵树两次布局结果不同"的真 bug。
+        //   所以**先修它，再做持久化**。
+        let basis_backup = self.style.flex_basis;
+        if is_undefined(self.style.flex_basis) && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
             self.style.flex_basis = self.style.dim[K_AXIS_DIM[ma as usize] as usize];
         }
 
@@ -273,12 +312,7 @@ impl FlexNode {
             shr = true;
         }
 
-        self.layout_impl(
-            parent_width,
-            parent_height,
-            parent_direction,
-            LayoutAction::Layout,
-        );
+        self.layout_impl(parent_width, parent_height, parent_direction, LayoutAction::Layout);
 
         if swr {
             self.style.dim[0] = VALUE_UNDEFINED;
@@ -286,6 +320,9 @@ impl FlexNode {
         if shr {
             self.style.dim[1] = VALUE_UNDEFINED;
         }
+        // ★ D44：还原 `flex_basis`（与上面 `dim` 的还原成对）。
+        //   布局对输入样式必须**无副作用**，否则复用节点时协商输入已经变了。
+        self.style.flex_basis = basis_backup;
 
         let ma = self.resolve_main_axis();
         let ca = self.resolve_cross_axis();
@@ -406,10 +443,7 @@ impl FlexNode {
             return;
         }
 
-        let asz = TaitankSize {
-            width: aw,
-            height: ah,
-        };
+        let asz = TaitankSize { width: aw, height: ah };
 
         // Step 3
         self.calculate_items_flex_basis(asz);
@@ -418,10 +452,7 @@ impl FlexNode {
         let mut fl = self.collect_flex_lines(asz);
 
         // Step 4: container main size
-        let max_sum = fl
-            .iter()
-            .map(|l| l.sum_hypothetical_main_size)
-            .fold(0.0f32, f32::max);
+        let max_sum = fl.iter().map(|l| l.sum_hypothetical_main_size).fold(0.0f32, f32::max);
         let cims = if is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
             self.style.dim[K_AXIS_DIM[ma as usize] as usize] - self.get_padding_and_border(ma)
         } else {
@@ -475,13 +506,10 @@ impl FlexNode {
             }
 
             let item = &mut self.children[i];
-            if is_defined(item.style.get_flex_basis())
-                && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize])
-            {
+            if is_defined(item.style.get_flex_basis()) && is_defined(self.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
                 item.layout_result.flex_base_size = item.style.get_flex_basis();
             } else if is_defined(item.style.dim[K_AXIS_DIM[ma as usize] as usize]) {
-                item.layout_result.flex_base_size =
-                    item.style.dim[K_AXIS_DIM[ma as usize] as usize];
+                item.layout_result.flex_base_size = item.style.dim[K_AXIS_DIM[ma as usize] as usize];
             } else {
                 let old = item.style.get_dimension_axis(ma);
                 item.style.set_dimension_axis(ma, item.style.flex_basis);
@@ -503,8 +531,7 @@ impl FlexNode {
                         0.0
                     };
             }
-            item.layout_result.hypothetical_main_axis_size =
-                item.bound_axis(ma, item.layout_result.flex_base_size);
+            item.layout_result.hypothetical_main_axis_size = item.bound_axis(ma, item.layout_result.flex_base_size);
             item.layout_result.hypothetical_main_axis_margin_boxsize =
                 item.layout_result.hypothetical_main_axis_size + item.get_margin(ma);
         }
@@ -547,9 +574,7 @@ impl FlexNode {
                 lr.sum_hypothetical_main_size += gap;
             }
 
-            let hms = self.children[i]
-                .layout_result
-                .hypothetical_main_axis_margin_boxsize;
+            let hms = self.children[i].layout_result.hypothetical_main_axis_margin_boxsize;
             let ls = aw - (lr.sum_hypothetical_main_size + hms);
 
             if self.style.flex_wrap == FlexWrap::NoWrap {
@@ -590,8 +615,7 @@ impl FlexNode {
 
     fn determine_items_main_axis_size(&mut self, fl: &mut [FlexLine], la: LayoutAction) {
         let ma = self.style.flex_direction;
-        let mc = self.layout_result.dim[K_AXIS_DIM[ma as usize] as usize]
-            - self.get_padding_and_border(ma);
+        let mc = self.layout_result.dim[K_AXIS_DIM[ma as usize] as usize] - self.get_padding_and_border(ma);
         if la == LayoutAction::Layout {
             for c in &mut self.children {
                 c.is_frozen = false;
@@ -600,7 +624,33 @@ impl FlexNode {
         for line in fl.iter_mut() {
             line.container_main_inner_size = mc;
             let _ = line.freeze_inflexible_items(ma, &mut self.children);
-            while !line.resolve_flexible_lengths(ma, &mut self.children) {}
+            // ★ 冻结循环的**安全阀**（D48 / `refactor-plan` D-c）。
+            //
+            // 正常情况下几轮就收敛（每轮至少冻结一批违反 min/max 的 item）。
+            // 但存在**不收敛**的输入：若 `total_violation != 0`，而 `min_violations`
+            // 与 `max_violations` **都为空**（violation 一正一负、浮点求和没抵消成精确 0），
+            // 该轮**什么都没冻结** ⇒ 下一轮输入完全相同 ⇒ **死循环**。
+            // 这是 GUI 框架的**主线程** ⇒ 整个应用挂死（且 `forbid(unsafe_code)` 下
+            // 连"崩了"都比"挂着"好）。
+            //
+            // 取 32：正常收敛远少于 10 轮（行内 item 数有界），足够宽松。
+            // 超限时**接受当前结果**（尺寸可能违反 min/max，但绝不挂死）——
+            // 渲染出来略怪远好过整个应用没反应。
+            let mut iter = 0usize;
+            while !line.resolve_flexible_lengths(ma, &mut self.children) {
+                iter += 1;
+                if iter >= MAX_FLEX_ITERATIONS {
+                    // 不是无声无息地接受：留下可查的痕迹（`refactor-plan` D-c）
+                    // 让"布局不收敛"成为可诊断的问题，而不是"偶尔画得怪"。
+                    if cfg!(debug_assertions) {
+                        eprintln!(
+                            "[lieui-layout] 冻结循环达到上限（{MAX_FLEX_ITERATIONS} 轮）仍未收敛：\
+                             该行 flex 协商可能因浮点抵消而震荡，接受当前结果"
+                        );
+                    }
+                    break;
+                }
+            }
             if la == LayoutAction::Layout && line.remaining_free_space < 0.0 {
                 self.layout_result.had_overflow = true;
             }
@@ -609,12 +659,7 @@ impl FlexNode {
 
     // ============ Step 7-11 ============
 
-    fn determine_cross_axis_size(
-        &mut self,
-        fl: &mut [FlexLine],
-        asz: TaitankSize,
-        la: LayoutAction,
-    ) -> f32 {
+    fn determine_cross_axis_size(&mut self, fl: &mut [FlexLine], asz: TaitankSize, la: LayoutAction) -> f32 {
         let ma = self.style.flex_direction;
         let ca = self.resolve_cross_axis();
         let parent_dir = self.layout_result.direction;
@@ -644,9 +689,7 @@ impl FlexNode {
 
                 let old_m = self.children[idx].style.get_dimension_axis(ma);
                 let cur_layout_dim = self.children[idx].get_layout_dimension(ma);
-                self.children[idx]
-                    .style
-                    .set_dimension_axis(ma, cur_layout_dim);
+                self.children[idx].style.set_dimension_axis(ma, cur_layout_dim);
                 self.children[idx].layout_impl(asz.width, asz.height, parent_dir, act);
                 self.children[idx].style.set_dimension_axis(ma, old_m);
                 let child_had_overflow = self.children[idx].layout_result.had_overflow;
@@ -737,9 +780,7 @@ impl FlexNode {
         for line in fl.iter_mut() {
             slcs += line.line_cross_size;
             for &idx in &line.items {
-                let cd = if is_defined(
-                    self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize],
-                ) {
+                let cd = if is_defined(self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]) {
                     self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]
                 } else {
                     0.0
@@ -793,8 +834,7 @@ impl FlexNode {
         self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize] = self.bound_axis(ca, cds);
 
         // Step 16: align flex lines
-        let ic = self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize]
-            - self.get_padding_and_border(ca);
+        let ic = self.layout_result.dim[K_AXIS_DIM[ca as usize] as usize] - self.get_padding_and_border(ca);
         let rem = ic - slcs;
         let mut off = self.get_start_padding_and_border(ca);
         let space = match self.style.align_content {
@@ -812,23 +852,27 @@ impl FlexNode {
                 off += s / 2.0;
                 s
             }
+            // D48：此前**缺失**该分支 ⇒ 落到 `_ => 0.0` ⇒ 静默退化为贴顶。
+            // CSS `space-evenly`：项之间与两端**等距**⇒ 每个间隙 = free / (行数 + 1)。
+            // （与主轴的 `flex_line.rs` 里的同名分支一致，那边本来就有。）
+            FlexAlign::SpaceEvenly => {
+                let s = rem / (lc + 1) as f32;
+                off += s;
+                s
+            }
             _ => 0.0,
         };
 
         let mut cpos = off;
         for line in fl.iter_mut() {
             for &idx in &line.items {
-                let st = cpos
-                    + self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
+                let st = cpos + self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
                 self.children[idx].set_layout_start_position(ca, st);
 
                 // compute end position
                 let ld = parent_layout_dim_ca;
-                let sp =
-                    self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
-                let cd = if is_defined(
-                    self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize],
-                ) {
+                let sp = self.children[idx].layout_result.position[K_AXIS_START[ca as usize] as usize];
+                let cd = if is_defined(self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]) {
                     self.children[idx].layout_result.dim[K_AXIS_DIM[ca as usize] as usize]
                 } else {
                     0.0
@@ -844,10 +888,8 @@ impl FlexNode {
     fn layout_fixed_items(&mut self) {
         let ma = self.resolve_main_axis();
         let ca = self.resolve_cross_axis();
-        let pw = self.get_layout_dimension(FlexDirection::Row)
-            - self.get_padding_and_border(FlexDirection::Row);
-        let ph = self.get_layout_dimension(FlexDirection::Column)
-            - self.get_padding_and_border(FlexDirection::Column);
+        let pw = self.get_layout_dimension(FlexDirection::Row) - self.get_padding_and_border(FlexDirection::Row);
+        let ph = self.get_layout_dimension(FlexDirection::Column) - self.get_padding_and_border(FlexDirection::Column);
         let parent_dir = self.layout_result.direction;
 
         for i in 0..self.children.len() {
@@ -913,15 +955,11 @@ impl FlexNode {
         let margin_start = self.children[idx].get_layout_start_margin(axis);
 
         if is_defined(start_pos) {
-            let sp = self.get_start_border(axis)
-                + self.children[idx].get_layout_start_margin(axis)
-                + start_pos;
+            let sp = self.get_start_border(axis) + self.children[idx].get_layout_start_margin(axis) + start_pos;
             self.children[idx].set_layout_start_position(axis, sp);
             self.children[idx].set_layout_end_position(axis, layout_dim - sp - child_dim);
         } else if is_defined(end_pos) {
-            let ep = self.get_end_border(axis)
-                + self.children[idx].get_layout_end_margin(axis)
-                + end_pos;
+            let ep = self.get_end_border(axis) + self.children[idx].get_layout_end_margin(axis) + end_pos;
             self.children[idx].set_layout_end_position(axis, ep);
             self.children[idx].set_layout_start_position(axis, layout_dim - ep - child_dim);
         } else {
@@ -989,6 +1027,9 @@ impl FlexNode {
         } else {
             (intrinsic_w, intrinsic_h)
         };
+        // ★ D-a：把**内容测量尺寸**记下来，供宿主 `write_back` 复用。
+        //   必须在 flex 拉伸/收缩**之前**记录 —— `layout_result.dim` 会被那些步骤改写。
+        self.measured_content = [content_w, content_h];
 
         match width_measure_mode {
             MeasureMode::Exactly => {

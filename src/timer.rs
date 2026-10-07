@@ -70,21 +70,24 @@ impl TimerHandle {
 
     /// 该定时器是否还在表里（一次性定时器触发后即消失）
     pub fn is_active(&self) -> bool {
-        self.rt
-            .inner
-            .timers
-            .borrow()
-            .iter()
-            .any(|t| t.id == self.id)
+        self.rt.inner.timers.borrow().iter().any(|t| t.id == self.id)
     }
 
     /// 取消（幂等）
+    ///
+    /// **在定时器自己的回调里调用也有效**（D9）：回调执行期间该定时器已被
+    /// `take_due_timers` 移出表，所以这里额外打一份"已取消"标记，
+    /// 由 `reschedule_timer` 放回前消费。
     pub fn cancel(&self) {
-        self.rt
-            .inner
-            .timers
-            .borrow_mut()
-            .retain(|t| t.id != self.id);
+        let mut timers = self.rt.inner.timers.borrow_mut();
+        let before = timers.len();
+        timers.retain(|t| t.id != self.id);
+        if timers.len() == before {
+            // 不在表里 ⇒ 正在回调执行中（或已消失）。必须打标记，
+            // 否则执行完后 `reschedule_timer` 会把它放回表 ⇒ 周期定时器停不下来。
+            drop(timers);
+            self.rt.inner.cancelled_timers.borrow_mut().insert(self.id);
+        }
     }
 }
 
@@ -99,22 +102,12 @@ impl std::fmt::Debug for TimerHandle {
 
 impl Runtime {
     /// 延迟 `dur` 后回调一次（`f` 在 **UI 线程**执行，可拿 `&mut Ctx`）
-    pub fn set_timeout<F: FnMut(&mut Ctx) + 'static>(
-        &self,
-        window: WindowId,
-        dur: Duration,
-        f: F,
-    ) -> TimerHandle {
+    pub fn set_timeout<F: FnMut(&mut Ctx) + 'static>(&self, window: WindowId, dur: Duration, f: F) -> TimerHandle {
         self.push_timer(window, dur, None, Box::new(f))
     }
 
     /// 每 `dur` 回调一次（直到 [`TimerHandle::cancel`]，或窗口关闭）
-    pub fn set_interval<F: FnMut(&mut Ctx) + 'static>(
-        &self,
-        window: WindowId,
-        dur: Duration,
-        f: F,
-    ) -> TimerHandle {
+    pub fn set_interval<F: FnMut(&mut Ctx) + 'static>(&self, window: WindowId, dur: Duration, f: F) -> TimerHandle {
         self.push_timer(window, dur, Some(dur), Box::new(f))
     }
 
@@ -189,7 +182,20 @@ impl Runtime {
     }
 
     /// 周期定时器回到表里（一次性定时器到此结束）
+    ///
+    /// 放回**之前**做两道检查（D9）：
+    /// 1. **回调执行期间被 `cancel()`** ⇒ 丢弃（否则周期定时器永远停不下来）；
+    /// 2. **所属窗口已注销** ⇒ 丢弃（否则关窗后它被放回表里，既永不触发
+    ///    又一直持有闭包捕获 ⇒ 泄漏）。
     pub(crate) fn reschedule_timer(&self, mut timer: Timer, now: Instant) {
+        // ① 取消名单（消费即移除，保持集合小）
+        if self.inner.cancelled_timers.borrow_mut().remove(&timer.id) {
+            return;
+        }
+        // ② 窗口还在吗？（关窗后放回 ⇒ 孤儿）
+        if !self.windows().contains(&timer.window) {
+            return;
+        }
         let Some(interval) = timer.interval else {
             return; // 一次性：跑完即消失
         };
@@ -215,9 +221,7 @@ impl Runtime {
             .filter(|t| t.window == window)
             .map(|t| t.deadline)
             .min();
-        let anim = self
-            .animation_pending(window)
-            .then(|| Instant::now() + FRAME_PERIOD);
+        let anim = self.animation_pending(window).then(|| Instant::now() + FRAME_PERIOD);
         match (due, anim) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -226,10 +230,18 @@ impl Runtime {
 
     /// 清掉某窗口的定时器与动画请求（窗口关闭时调用）
     pub(crate) fn cancel_timers_of(&self, window: WindowId) {
-        self.inner
-            .timers
-            .borrow_mut()
-            .retain(|t| t.window != window);
+        // 先把该窗口所有定时器 id 记进"取消名单"，再从表里删。
+        // 名单用于堵住这个洞：**正在执行回调**的那个定时器此刻不在表里，
+        // `retain` 删不到它；回调返回后 `reschedule_timer` 会把它放回去
+        // ⇒ 变成永不触发、却一直持有闭包捕获的孤儿（D9）。
+        {
+            let mut timers = self.inner.timers.borrow_mut();
+            let mut cancelled = self.inner.cancelled_timers.borrow_mut();
+            for t in timers.iter().filter(|t| t.window == window) {
+                cancelled.insert(t.id);
+            }
+            timers.retain(|t| t.window != window);
+        }
         self.inner.animating.borrow_mut().retain(|w| *w != window);
     }
 
@@ -303,6 +315,116 @@ mod tests {
         h.cancel();
         assert_eq!(rt.timer_count(), 0);
         assert!(!h.is_active());
+    }
+
+    /// 回归（D9）：在**定时器自己的回调里**调 `cancel()` 必须有效。
+    ///
+    /// bug 表现：`take_due_timers` 把到期的定时器**移出表**再执行回调（为了让回调里
+    /// 能安全地再设定时器）。于是回调内的 `cancel()` 走 `retain` 命中不到任何东西 ⇒
+    /// **取消无效** ⇒ 周期定时器被放回表里，下个周期再跑，**永远停不下来**。
+    ///
+    /// 这条路径在真实应用里就是"在 `on_tick` 里根据状态停掉轮询"，非常常用。
+    #[test]
+    fn cancel_inside_own_callback_stops_interval_timer() {
+        let rt = Runtime::new();
+        rt.register_window(win());
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0u32));
+
+        // 回调里靠句柄取消自己 —— 用 `Rc<RefCell<Option<TimerHandle>>>` 打破循环借用：
+        // 闭包捕获槽位（此时为空），定时器建好后再把句柄写回槽位。
+        let slot: std::rc::Rc<std::cell::RefCell<Option<TimerHandle>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let s2 = slot.clone();
+        let c2 = hits.clone();
+        let h = rt.set_interval(win(), Duration::from_millis(10), move |_| {
+            c2.set(c2.get() + 1);
+            if let Some(h) = s2.borrow().as_ref() {
+                h.cancel(); // ★ 回调内取消自己
+            }
+        });
+        *slot.borrow_mut() = Some(h);
+
+        // 触发一次
+        force_due(&rt, win());
+        let mut due = rt.take_due_timers(win(), Instant::now());
+        assert_eq!(due.len(), 1);
+        // ⚠️ 必须照 `WindowCtx::tick` 的做法**把 cb 还回去**（`take_cb` 之后 `reschedule_timer`
+        // 靠它恢复回调）。否则 `reschedule_timer` 会因"cb 不在了"提前 return，
+        // 测试就成了假通过 —— 压根没走到取消检查。
+        run_one(&mut due.remove(0), &rt);
+        assert_eq!(hits.get(), 1, "回调应执行过一次");
+        assert_eq!(
+            rt.timer_count(),
+            0,
+            "回调内 cancel() 后不应被 reschedule_timer放回（D9）"
+        );
+
+        // 再触发一次：什么都不会发生
+        force_due(&rt, win());
+        let due2 = rt.take_due_timers(win(), Instant::now());
+        assert!(due2.is_empty(), "周期定时器确实停下来了");
+    }
+
+    /// 回归（D9 另一半）：关窗时**正在执行回调**的周期定时器不能变成孤儿。
+    ///
+    /// bug 表现：`cancel_timers_of` 删掉表里该窗口的定时器，但正在执行的那个不在表里；
+    /// 回调返回后 `reschedule_timer` 又把它推回表 ⇒ 永不触发的孤儿，
+    /// 且一直持有闭包捕获（内存泄漏）。
+    #[test]
+    fn closing_window_does_not_orphan_the_executing_interval_timer() {
+        let rt = Runtime::new();
+        rt.register_window(win());
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let c = hits.clone();
+        let _h = rt.set_interval(win(), Duration::from_millis(10), move |_| {
+            c.set(c.get() + 1);
+        });
+
+        // 取出一个"正在执行"的定时器（此刻它已不在表里）
+        force_due(&rt, win());
+        let mut due = rt.take_due_timers(win(), Instant::now());
+        assert_eq!(due.len(), 1);
+        let mut timer = due.remove(0);
+
+        // 回调"执行中"：取出 cb 并执行（不还回去，模拟 app.rs 的 `cb(&mut cx)` 那一刻）
+        let mut cb = timer.take_cb().expect("应有回调");
+        cb(&mut Ctx::new(&rt, win(), crate::event::EventView::tick()));
+        assert_eq!(hits.get(), 1);
+
+        // 回调执行期间关窗（此时 timer 已不在表里，`retain` 删不到它）
+        rt.cancel_timers_of(win());
+        rt.unregister_window(win());
+
+        // app.rs 的 tick 随后把 cb 还回并放回表 —— 这一步必须被拦住
+        timer.cb = Some(cb);
+        rt.reschedule_timer(timer, Instant::now());
+        assert_eq!(
+            rt.timer_count(),
+            0,
+            "关窗后周期定时器不应回到表里（否则是永不触发的孤儿）"
+        );
+    }
+
+    /// 照`WindowCtx::tick` 的方式执行一个到期定时器：取出 cb → 跑 → **还回**。
+    ///
+    /// 这个"还回"是关键：`reschedule_timer` 靠它恢复回调，
+    /// 测试里漏掉就会因"cb 不在了"提前 return，让断言变成假通过。
+    fn run_one(timer: &mut Timer, rt: &Runtime) {
+        let mut cb = timer.take_cb().expect("应有回调");
+        cb(&mut Ctx::new(rt, win(), crate::event::EventView::tick()));
+        timer.cb = Some(cb);
+        rt.reschedule_timer(std::mem::replace(timer, dummy_timer()), Instant::now());
+    }
+
+    /// 换出用（`take` 后需要填回一个合法值）。
+    fn dummy_timer() -> Timer {
+        Timer {
+            id: u64::MAX,
+            window: win(),
+            deadline: Instant::now(),
+            interval: None,
+            cb: None,
+        }
     }
 
     #[test]

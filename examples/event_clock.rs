@@ -81,8 +81,11 @@ impl ViewModel for Demo {
             c.gap(14.0);
             c.text("事件通道 + 统一时钟").font_size(18.0);
             c.custom(&self.dial_cell); // 自绘：动画相位每帧变
-            c.text(format!("已运行 {} 秒（interval 驱动）", self.seconds.get())).font_size(13.0);
-            c.text(self.log.get()).font_size(12.0).color(Color::rgba(0x66, 0x66, 0x66, 255));
+            c.text(format!("已运行 {} 秒（interval 驱动）", self.seconds.get()))
+                .font_size(13.0);
+            c.text(self.log.get())
+                .font_size(12.0)
+                .color(Color::rgba(0x66, 0x66, 0x66, 255));
 
             let me = Rc::clone(self);
             c.button("开始 3 秒后重置相位").on_tap(move || {

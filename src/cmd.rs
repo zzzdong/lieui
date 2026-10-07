@@ -20,34 +20,69 @@ use crate::track::{FocusState, KindDesc, Layer, NodeId, RootId, Track, Visibilit
 pub enum Cmd {
     // ── 局部内容刷新（不重跑 `view()`）──
     /// 直接改一个文本节点的内容
-    SetText { id: NodeId, text: String },
+    SetText {
+        id: NodeId,
+        text: String,
+    },
     /// 覆盖组件的 desc 组字段（state 组保留，见 §3.4.1）
-    SetKindDesc { id: NodeId, desc: KindDesc },
+    SetKindDesc {
+        id: NodeId,
+        desc: KindDesc,
+    },
     /// 可见性
-    SetVisibility { id: NodeId, visibility: Visibility },
+    SetVisibility {
+        id: NodeId,
+        visibility: Visibility,
+    },
 
     // ── 交互态（框架内置行为使用）──
-    SetPointerOver { id: NodeId, over: bool },
-    SetPressed { id: NodeId, pressed: bool },
+    SetPointerOver {
+        id: NodeId,
+        over: bool,
+    },
+    SetPressed {
+        id: NodeId,
+        pressed: bool,
+    },
     /// 设置键盘焦点（`FocusState::Unfocused` 表示清除）
-    SetFocus { id: NodeId, state: FocusState },
+    SetFocus {
+        id: NodeId,
+        state: FocusState,
+    },
 
     // ── 指针捕获（多指针）──
-    CapturePointer { pointer: PointerId, id: NodeId },
-    ReleasePointer { pointer: PointerId },
+    CapturePointer {
+        pointer: PointerId,
+        id: NodeId,
+    },
+    ReleasePointer {
+        pointer: PointerId,
+    },
 
     // ── 滚动（M2 由布局/滚动容器消费）──
-    ScrollTo { id: NodeId, offset: (f32, f32) },
+    ScrollTo {
+        id: NodeId,
+        offset: (f32, f32),
+    },
     /// "让我可见"：沿祖先冒泡到最近的滚动容器处理
-    BringIntoView { id: NodeId },
+    BringIntoView {
+        id: NodeId,
+    },
 
     // ── 层 ──
-    Mount { layer: Layer, id: NodeId },
-    Unmount { root: RootId },
+    Mount {
+        layer: Layer,
+        id: NodeId,
+    },
+    Unmount {
+        root: RootId,
+    },
 
     // ── 重绘 / 失效 ──
     /// 只把这些节点的矩形并入脏区
-    DamageNode { id: NodeId },
+    DamageNode {
+        id: NodeId,
+    },
     /// 整窗脏
     DamageAll,
     /// 需要重排（外部改了布局相关的东西）
@@ -98,10 +133,7 @@ impl CmdBuf {
     // ── 便捷构造（内置行为与 `Ctx` 用）──
 
     pub fn set_text(&mut self, id: NodeId, text: impl Into<String>) {
-        self.push(Cmd::SetText {
-            id,
-            text: text.into(),
-        });
+        self.push(Cmd::SetText { id, text: text.into() });
     }
 
     pub fn set_kind_desc(&mut self, id: NodeId, desc: KindDesc) {
@@ -160,10 +192,7 @@ pub fn apply_cmds(track: &mut Track, cmds: &[Cmd]) -> Dirty {
                 }
             }
             Cmd::SetKindDesc { id, desc } => {
-                let changed = track
-                    .get_mut(*id)
-                    .map(|n| desc.apply_to(&mut n.kind))
-                    .unwrap_or(false);
+                let changed = track.get_mut(*id).map(|n| desc.apply_to(&mut n.kind)).unwrap_or(false);
                 if changed {
                     track.mark_layout_dirty(*id);
                     track.mark_paint_dirty(*id);
@@ -235,10 +264,7 @@ pub fn apply_cmds(track: &mut Track, cmds: &[Cmd]) -> Dirty {
                 // 沿祖先找最近的滚动容器（M2 接上真实视口与内容尺寸后生效）
                 let mut cur = track.parent_of(*id);
                 while let Some(c) = cur {
-                    let is_scroller = track
-                        .get(c)
-                        .map(|n| n.layout.overflow_scroll)
-                        .unwrap_or(false);
+                    let is_scroller = track.get(c).map(|n| n.layout.overflow_scroll).unwrap_or(false);
                     if is_scroller {
                         track.mark_paint_dirty(c);
                         dirty |= Dirty::PAINT | Dirty::PRESENT;
@@ -281,7 +307,7 @@ pub fn apply_cmds(track: &mut Track, cmds: &[Cmd]) -> Dirty {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::track::{Kind, Key, Layer, Track};
+    use crate::track::{Key, Kind, Layer, Track};
 
     fn text_node(t: &mut Track, s: &str) -> NodeId {
         t.create(Kind::Text(s.to_string()), None)
@@ -329,7 +355,11 @@ mod tests {
             &mut t,
             &[Cmd::SetKindDesc {
                 id,
-                desc: KindDesc::Slider { value: 0.9, min: 0.0, max: 1.0 },
+                desc: KindDesc::Slider {
+                    value: 0.9,
+                    min: 0.0,
+                    max: 1.0,
+                },
             }],
         );
         assert!(d.contains(Dirty::PAINT));
@@ -346,7 +376,11 @@ mod tests {
             &mut t,
             &[Cmd::SetKindDesc {
                 id,
-                desc: KindDesc::Slider { value: 0.9, min: 0.0, max: 1.0 },
+                desc: KindDesc::Slider {
+                    value: 0.9,
+                    min: 0.0,
+                    max: 1.0,
+                },
             }],
         );
         assert!(d.is_empty());

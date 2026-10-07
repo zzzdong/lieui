@@ -327,7 +327,13 @@ mod tests {
         assert!(!t.spec.wrap);
         assert_eq!(t.color, Color::RED);
         // 排版字段变化必须体现在 spec 上（布局引擎读的就是它）
-        assert_eq!(t.spec, TextSpec::new(48.0).font_family("serif").text_align(TextAlign::Center).wrap(false));
+        assert_eq!(
+            t.spec,
+            TextSpec::new(48.0)
+                .font_family("serif")
+                .text_align(TextAlign::Center)
+                .wrap(false)
+        );
     }
 
     #[test]

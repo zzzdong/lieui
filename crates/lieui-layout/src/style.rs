@@ -32,6 +32,20 @@ pub struct FlexStyle {
     pub flex_shrink: f32,
 
     // CSS 属性数组
+    //
+    // ⚠️ **只有 `CSSDirection` 的前 6 个变体可用于索引这些数组**
+    // （`Left`/`Top`/`Right`/`Bottom`/`Start`/`End`，即 `K_CSS_PROPS_COUNT = 6`）。
+    //
+    // `CSSDirection` 还有 4 个变体 —— `Horizontal`(6) / `Vertical`(7) / `All`(8) /
+    // `None`(9) —— 它们**不能**用来索引本数组，越界会**运行时 panic**。
+    // 这个坑很隐蔽：`CSSDirection` 与这些数组都是 `pub`，看起来"枚举有多少个变体，
+    // 数组就有多长"，但实际长度是 6。常量索引能被编译器抓到（`unconditional_panic`），
+    // 非常量索引（`d as usize`）则是运行时炸弹。
+    //
+    // 要写"四边统一"请逐边设置（`src/view.rs:976` 就是这么做的：`for i in 0..4`），
+    // 或用 `*_from` 数组声明"从哪个物理边读该槽位的值"。
+    //
+    // 契约由 `tests/feature_position.rs::only_first_six_css_directions_are_indexable` 钉住。
     pub margin: [f32; K_CSS_PROPS_COUNT],
     pub margin_from: [CSSDirection; K_CSS_PROPS_COUNT],
     pub padding: [f32; K_CSS_PROPS_COUNT],
@@ -379,18 +393,14 @@ impl FlexStyle {
     }
 
     pub fn is_auto_start_margin(&self, axis: FlexDirection) -> bool {
-        if is_row_direction(axis)
-            && self.margin_from[CSSDirection::Start as usize] != CSSDirection::None
-        {
+        if is_row_direction(axis) && self.margin_from[CSSDirection::Start as usize] != CSSDirection::None {
             return is_undefined(self.margin[CSSDirection::Start as usize]);
         }
         is_undefined(self.margin[K_AXIS_START[axis as usize] as usize])
     }
 
     pub fn is_auto_end_margin(&self, axis: FlexDirection) -> bool {
-        if is_row_direction(axis)
-            && self.margin_from[CSSDirection::End as usize] != CSSDirection::None
-        {
+        if is_row_direction(axis) && self.margin_from[CSSDirection::End as usize] != CSSDirection::None {
             return is_undefined(self.margin[CSSDirection::End as usize]);
         }
         is_undefined(self.margin[K_AXIS_END[axis as usize] as usize])

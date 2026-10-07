@@ -50,6 +50,9 @@ pub fn layout(track: &mut Track, window: Size) -> LayoutStats {
     if boundaries.is_empty() {
         return LayoutStats::default();
     }
+    // ★ 在动手之前开新纪元（D58）：本轮期间新提的脏标不能被末尾的
+    //   `clear_layout_flags` 清掉，它们属于下一轮。
+    track.begin_layout_epoch();
 
     let mut st = LayoutStats {
         ran: true,
@@ -75,20 +78,14 @@ pub fn layout(track: &mut Track, window: Size) -> LayoutStats {
             if anchored_roots.contains(&b) {
                 // 可用空间未定义 ⇒ 引擎收缩到内容（否则层根会被拉伸成整窗，
                 // 锚点定位就无从谈起）。显式定宽的层不受影响（dim 仍生效）。
-                (
-                    Size::new(VALUE_UNDEFINED, VALUE_UNDEFINED),
-                    None,
-                )
+                (Size::new(VALUE_UNDEFINED, VALUE_UNDEFINED), None)
             } else {
                 (window, None)
             }
         } else {
             let r = track.get(b).map(|n| n.rect()).unwrap_or_default();
             // 边界自身尺寸确定 ⇒ 父给它的大小没变，沿用现有 computed 尺寸
-            (
-                Size::new(r.width.max(0.0), r.height.max(0.0)),
-                Some((r.x, r.y)),
-            )
+            (Size::new(r.width.max(0.0), r.height.max(0.0)), Some((r.x, r.y)))
         };
 
         let mut flex = build(track, b);
@@ -156,12 +153,7 @@ pub fn place_anchored_layers(track: &mut Track, window: Size) -> usize {
 }
 
 /// 求锚定层的目标原点（含翻转与钳制）；`Key` 锚点查不到 ⇒ `None`（保持原位）
-fn anchored_origin(
-    track: &Track,
-    layer: NodeId,
-    anchor: &crate::track::Anchor,
-    window: Size,
-) -> Option<(f32, f32)> {
+fn anchored_origin(track: &Track, layer: NodeId, anchor: &crate::track::Anchor, window: Size) -> Option<(f32, f32)> {
     let lr = track.get(layer).map(|n| n.rect()).unwrap_or_default();
     let (sw, sh) = (lr.width, lr.height);
     // 锚点矩形。**点锚点 = 零尺寸的退化矩形** —— 于是下面那套翻转 / 钳制逻辑
@@ -171,37 +163,23 @@ fn anchored_origin(
             let id = track.find_by_key(key)?;
             track.get(id).map(|n| n.rect()).unwrap_or_default()
         }
-        crate::track::AnchorTarget::Node(id) => {
-            track.get(*id).map(|n| n.rect()).unwrap_or_default()
-        }
+        crate::track::AnchorTarget::Node(id) => track.get(*id).map(|n| n.rect()).unwrap_or_default(),
         crate::track::AnchorTarget::Point(p) => Rect::new(p.x, p.y, 0.0, 0.0),
     };
 
     let mut p = anchor.placement;
     // 翻转：默认侧放不下 **且** 另一侧放得下才翻（避免在两个都放不下时来回抖动）
     match p {
-        Placement::Below
-            if ar.bottom() + ANCHOR_GAP + sh > window.height
-                && ar.y - ANCHOR_GAP - sh >= 0.0 =>
-        {
+        Placement::Below if ar.bottom() + ANCHOR_GAP + sh > window.height && ar.y - ANCHOR_GAP - sh >= 0.0 => {
             p = Placement::Above
         }
-        Placement::Above
-            if ar.y - ANCHOR_GAP - sh < 0.0
-                && ar.bottom() + ANCHOR_GAP + sh <= window.height =>
-        {
+        Placement::Above if ar.y - ANCHOR_GAP - sh < 0.0 && ar.bottom() + ANCHOR_GAP + sh <= window.height => {
             p = Placement::Below
         }
-        Placement::RightOf
-            if ar.right() + ANCHOR_GAP + sw > window.width
-                && ar.x - ANCHOR_GAP - sw >= 0.0 =>
-        {
+        Placement::RightOf if ar.right() + ANCHOR_GAP + sw > window.width && ar.x - ANCHOR_GAP - sw >= 0.0 => {
             p = Placement::LeftOf
         }
-        Placement::LeftOf
-            if ar.x - ANCHOR_GAP - sw < 0.0
-                && ar.right() + ANCHOR_GAP + sw <= window.width =>
-        {
+        Placement::LeftOf if ar.x - ANCHOR_GAP - sw < 0.0 && ar.right() + ANCHOR_GAP + sw <= window.width => {
             p = Placement::RightOf
         }
         _ => {}
@@ -275,9 +253,7 @@ pub(crate) fn build(track: &Track, id: NodeId) -> FlexNode {
         // 按钮的文字参与固有尺寸，容器 padding 由 style 提供
         Kind::Button { label } => flex.measure_text = Some((label.clone(), n.text.spec.clone())),
         // 输入框：空文本时按 placeholder 测度，避免"有提示语就有高度、清空后盒子塌掉"
-        Kind::Input {
-            text, placeholder, ..
-        } => {
+        Kind::Input { text, placeholder, .. } => {
             let s = if text.is_empty() { placeholder } else { text };
             flex.measure_text = Some((s.clone(), n.text.spec.clone()));
         }
@@ -311,23 +287,13 @@ pub(crate) fn build(track: &Track, id: NodeId) -> FlexNode {
 
 // ───────────────────────── 写回 ─────────────────────────
 
-fn write_back(
-    track: &mut Track,
-    id: NodeId,
-    flex: &FlexNode,
-    ox: f32,
-    oy: f32,
-    st: &mut LayoutStats,
-) {
+fn write_back(track: &mut Track, id: NodeId, flex: &FlexNode, ox: f32, oy: f32, st: &mut LayoutStats) {
     let x = ox + flex.get_left();
     let y = oy + flex.get_top();
     let w = flex.get_width();
     let h = flex.get_height();
 
-    let is_scroll = track
-        .get(id)
-        .map(|n| n.layout.overflow_scroll)
-        .unwrap_or(false);
+    let is_scroll = track.get(id).map(|n| n.layout.overflow_scroll).unwrap_or(false);
     let children = layout_children(track, id);
 
     // ① 写 computed / desired，并把"旧 bounds ∪ 新 bounds"并入脏区
@@ -394,20 +360,43 @@ fn desired_size(track: &Track, id: NodeId, flex: &FlexNode, w: f32, h: f32) -> S
     if !flex.children.is_empty() {
         return Size::new(w, h);
     }
+    // ★ D-a：文本/ Input **直接复用 flex 本轮测量的内容尺寸**，不再重新测一遍。
+    //
+    //   flex 引擎在 `layout_single_node` 里已经测过一次（并记在 `measured_content`），
+    //   此前这里对每个文本叶子**又测一次** —— 每次布局多一次 `measure_text`
+    //   （含缓存键构造 `text.to_owned()` 的一次堆分配）。
+    //
+    //   用 `measured_content` 而不是 `layout_result.dim` 是**必须的**：后者是**布局后**尺寸
+    //   （可能被 flex 拉伸/收缩），而 `desired` 走 `paint_bounds` 的文本收缩路径，
+    //   误用会让脏区偏大 ⇒ "精确脏区"退化。
+    //
+    //   `[0.0, 0.0]` = 本轮没测量（引擎走了非文本分支）⇒ 回落到原路径。
+    let mc = flex.measured_content;
+    let has_measured_content = mc[0] > 0.0 && mc[1] > 0.0;
+    if has_measured_content
+        && matches!(
+            track.get(id).map(|n| &n.kind),
+            Some(Kind::Text(_)) | Some(Kind::Input { .. })
+        )
+    {
+        return Size::new(mc[0], mc[1]);
+    }
     match track.get(id).map(|n| &n.kind) {
-        Some(Kind::Text(s)) => {
-            let spec = track.get(id).map(|n| n.text.spec.clone()).unwrap_or_default();
-            let (mw, mh) = TextEngine::measure_text(s, &spec);
-            Size::new(mw as f32, mh as f32)
-        }
-        Some(Kind::Input {
-            text, placeholder, ..
-        }) => {
-            let spec = track.get(id).map(|n| n.text.spec.clone()).unwrap_or_default();
-            let s = if text.is_empty() { placeholder } else { text };
-            let (mw, mh) = TextEngine::measure_text(s, &spec);
-            Size::new(mw as f32, mh as f32)
-        }
+        Some(Kind::Text(s)) => match track.get(id) {
+            Some(n) => {
+                let (mw, mh) = TextEngine::measure_text(s, &n.text.spec);
+                Size::new(mw as f32, mh as f32)
+            }
+            None => Size::new(w, h),
+        },
+        Some(Kind::Input { text, placeholder, .. }) => match track.get(id) {
+            Some(n) => {
+                let s = if text.is_empty() { placeholder } else { text };
+                let (mw, mh) = TextEngine::measure_text(s, &n.text.spec);
+                Size::new(mw as f32, mh as f32)
+            }
+            None => Size::new(w, h),
+        },
         Some(Kind::Image(img)) => Size::new(img.width as f32, img.height as f32),
         Some(Kind::Custom(cell)) => {
             let s = cell.intrinsic_size();
@@ -490,12 +479,7 @@ mod tests {
         layout(t, WIN);
         place_anchored_layers(t, WIN);
         let anchor = t.find_by_key(&Key::from("anchor")).unwrap();
-        let popup = t
-            .roots()
-            .iter()
-            .find(|r| r.layer == Layer::Popup)
-            .unwrap()
-            .node;
+        let popup = t.roots().iter().find(|r| r.layer == Layer::Popup).unwrap().node;
         (t.get(anchor).unwrap().rect(), t.get(popup).unwrap().rect())
     }
 
@@ -520,12 +504,7 @@ mod tests {
     fn place_point(t: &mut Track) -> Rect {
         layout(t, WIN);
         place_anchored_layers(t, WIN);
-        let popup = t
-            .roots()
-            .iter()
-            .find(|r| r.layer == Layer::Popup)
-            .unwrap()
-            .node;
+        let popup = t.roots().iter().find(|r| r.layer == Layer::Popup).unwrap().node;
         t.get(popup).unwrap().rect()
     }
 
@@ -562,10 +541,7 @@ mod tests {
     fn point_anchor_is_pulled_back_inside_the_window() {
         let (mut t, _) = point_anchored(WIN.width - 2.0, 40.0, Placement::Below);
         let pr = place_point(&mut t);
-        assert!(
-            (pr.x - (WIN.width - pr.width)).abs() < 0.5,
-            "被平移到右边缘：{pr:?}"
-        );
+        assert!((pr.x - (WIN.width - pr.width)).abs() < 0.5, "被平移到右边缘：{pr:?}");
         assert!((pr.y - 44.0).abs() < 0.5, "纵向不受影响：{pr:?}");
     }
 
@@ -685,11 +661,7 @@ mod tests {
         let root = t.create(Kind::Box, None);
         {
             let n = t.get_mut(root).unwrap();
-            n.layout = n
-                .layout
-                .clone()
-                .padding_all(10.0)
-                .gap(5.0);
+            n.layout = n.layout.clone().padding_all(10.0).gap(5.0);
             n.layout.flex_direction = FlexDirection::Column;
         }
         t.add_root(Layer::Content, None, root);
@@ -704,11 +676,7 @@ mod tests {
         assert_eq!(rect_of(&t, root), Rect::new(0.0, 0.0, 300.0, 200.0), "自适应根填满窗口");
         assert_eq!(rect_of(&t, a).x, 10.0, "padding 生效");
         assert_eq!(rect_of(&t, a).y, 10.0);
-        assert_eq!(
-            rect_of(&t, b).y,
-            rect_of(&t, a).height + 10.0 + 5.0,
-            "gap 生效"
-        );
+        assert_eq!(rect_of(&t, b).y, rect_of(&t, a).height + 10.0 + 5.0, "gap 生效");
         // 文本叶子的 DesiredSize = 测度尺寸
         assert!(t.get(a).unwrap().desired.width > 0.0);
         assert!(t.get(a).unwrap().desired.height > 0.0);
@@ -850,10 +818,7 @@ mod tests {
         assert_eq!(st2.boundaries, 1, "边界收敛到 card");
         assert_eq!(st2.nodes, 2, "只重建了 card 子树（不含 root）");
         assert_eq!(rect_of(&t, card), Rect::new(0.0, 0.0, 300.0, 200.0), "card 尺寸不变");
-        assert!(
-            t.get(label).unwrap().desired.width > old_desired,
-            "文本被重新测度"
-        );
+        assert!(t.get(label).unwrap().desired.width > old_desired, "文本被重新测度");
     }
 
     #[test]
@@ -1009,5 +974,85 @@ mod tests {
         assert_eq!(st.nodes, 2);
         assert_eq!(rect_of(&t, card), Rect::new(0.0, 0.0, 120.0, 40.0));
         assert!(contains(&t, inner, Point::new(1.0, 1.0)));
+    }
+
+    /// 回归（D-a）：文本节点布局后，`desired` 必须是**内容测量尺寸**，
+    /// 且 `TextSpec` 按引用传递（不再 `clone()`）后行为不变。
+    ///
+    /// `desired` 走`paint_bounds` 的文本收缩路径 —— 它若变成布局后尺寸（被 flex 拉伸过），
+    /// 脏区就会偏大，"精确脏区"退化。
+    #[test]
+    fn text_desired_size_is_the_measured_content_size() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [300.0, 200.0];
+        t.add_root(Layer::Content, None, root);
+
+        // 固定**内容**尺寸的文本（显式 width/height 会被 flex 用作 basis）
+        let id = t.create(Kind::Text("Hello".to_string()), None);
+        {
+            let n = t.get_mut(id).unwrap();
+            n.text.spec.font_size = 20.0;
+            n.layout.dim = [VALUE_UNDEFINED, VALUE_UNDEFINED];
+        }
+        t.append_child(root, id);
+
+        layout(&mut t, Size::new(300.0, 200.0));
+
+        let n = t.get(id).unwrap();
+        assert!(
+            n.desired.width > 0.0 && n.desired.height > 0.0,
+            "文本应有内容尺寸：{:?}",
+            n.desired
+        );
+        // 内容宽度不应被拉成整行宽（那是 stretch 的结果，不是内容尺寸）
+        assert!(
+            n.desired.width < 300.0,
+            "desired 应是内容宽度而非拉伸后的宽度：{}",
+            n.desired.width
+        );
+        // 内容高度应接近字号（单行）
+        assert!(
+            n.desired.height < 200.0,
+            "desired 高度应是单行高度：{}",
+            n.desired.height
+        );
+    }
+
+    /// 配套：Input（placeholder / text 两种来源）同样走内容测量，且不被拉伸。
+    #[test]
+    fn input_desired_size_uses_placeholder_when_empty() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [300.0, 200.0];
+        t.add_root(Layer::Content, None, root);
+
+        let id = t.create(
+            Kind::Input {
+                text: String::new(),
+                placeholder: "ph".to_string(),
+                caret: 0,
+                anchor: 0,
+                preedit: String::new(),
+                scroll: 0.0,
+            },
+            None,
+        );
+        {
+            let n = t.get_mut(id).unwrap();
+            n.text.spec.font_size = 20.0;
+            n.layout.dim = [VALUE_UNDEFINED, VALUE_UNDEFINED];
+        }
+        t.append_child(root, id);
+
+        layout(&mut t, Size::new(300.0, 200.0));
+
+        let n = t.get(id).unwrap();
+        assert!(n.desired.width > 0.0, "空Input 应按 placeholder 测量：{:?}", n.desired);
+        assert!(
+            n.desired.width < 300.0,
+            "desired 不应是拉伸后的宽度：{}",
+            n.desired.width
+        );
     }
 }

@@ -15,7 +15,7 @@ use lieui_geom::Point;
 use crate::event::{Event, EventKind, PointerButton, PointerId};
 use crate::focus;
 use crate::hit;
-use crate::track::{FocusState, Layer, NodeId, Track};
+use crate::track::{FocusState, Layer, NodeId, PressState, Track};
 
 /// 低层输入
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,18 +88,31 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
     match ev {
         InputEvent::Move { pointer, pos } => {
             out.hover_changed = update_hover(track, pos, pointer, &mut out.events);
-            push(&mut out, pointer, pos, EventKind::PointerMoved, PointerButton::Left, track);
+            push(
+                &mut out,
+                pointer,
+                pos,
+                EventKind::PointerMoved,
+                PointerButton::Left,
+                track,
+            );
         }
 
-        InputEvent::Down {
-            pointer,
-            pos,
-            button,
-        } => {
+        InputEvent::Down { pointer, pos, button } => {
             out.hover_changed = update_hover(track, pos, pointer, &mut out.events);
             let path = hit::hit_path_for(track, pointer, pos);
+
+            // 二次按下先清掉上一条按下链（D10）：否则 `pressed_path` 被直接覆盖，
+            // 旧链上的节点**永久残留 pressed 视觉**（后续的Up / Cancel 只清最新那条链）。
+            clear_pressed(track);
+
             if let Some(target) = path.last().copied() {
-                track.pressed = Some(target);
+                track.pressed = Some(PressState {
+                    node: target,
+                    pointer,
+                    button,
+                    pos,
+                });
                 track.pressed_path = path.clone();
                 track.set_pressed(target, true);
 
@@ -107,32 +120,22 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
                 if let Some(f) = focus::focusable_ancestor(track, &path) {
                     let change = focus::set_focus(track, Some(f), FocusState::Pointer);
                     if let Some(lost) = change.lost {
-                        out.events.push((
-                            hit::path_to(track, lost),
-                            Event::simple(EventKind::LostFocus),
-                        ));
+                        out.events
+                            .push((hit::path_to(track, lost), Event::simple(EventKind::LostFocus)));
                     }
                     if let Some(got) = change.got {
-                        out.events.push((
-                            hit::path_to(track, got),
-                            Event::simple(EventKind::GotFocus),
-                        ));
+                        out.events
+                            .push((hit::path_to(track, got), Event::simple(EventKind::GotFocus)));
                     }
                 }
             }
             if !path.is_empty() {
-                out.events.push((
-                    path,
-                    Event::pointer(EventKind::PointerPressed, pointer, pos, button),
-                ));
+                out.events
+                    .push((path, Event::pointer(EventKind::PointerPressed, pointer, pos, button)));
             }
         }
 
-        InputEvent::Up {
-            pointer,
-            pos,
-            button,
-        } => {
+        InputEvent::Up { pointer, pos, button } => {
             let path = hit::hit_path_for(track, pointer, pos);
             if !path.is_empty() {
                 out.events.push((
@@ -141,22 +144,26 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
                 ));
             }
 
-            // 点击合成：按下时的目标仍在释放链上（含自身）⇒ 点击事件发给它。
+            // 点击合成：按下时的目标仍在释放链上（含自身）**且抬起的是同一按键** ⇒ 点击事件发给它。
             //
-            // **右键合成 `RightTapped`**（不是 `Tapped`）：否则"右键"会顺带触发所有
-            // 左键行为（勾选、按下、提交……）。需要上下文菜单的节点监听 `RightTapped`，
-            // 其余组件完全不受右键影响。
-            if let Some(pressed) = track.pressed
-                && path.contains(&pressed)
+            // **按键配对是必需的**（D1）：只判"按下节点是否在释放链上"的话，
+            // **右键按下 + 左键抬起落在同一节点会被判成 `Tapped`** ⇒ 触发勾选 / 提交 / 删除。
+            //
+            // **右键合成 `RightTapped`**（不是 `Tapped`）：配对通过后，右键按下→右键抬起
+            // 得到 `RightTapped`，不会顺带触发所有左键行为。需要上下文菜单的节点监听
+            // `RightTapped`，其余组件完全不受右键影响。
+            if let Some(press) = track.pressed
+                && press.button == button
+                && path.contains(&press.node)
             {
-                out.tapped = Some(pressed);
+                out.tapped = Some(press.node);
                 let kind = if button == PointerButton::Right {
                     EventKind::RightTapped
                 } else {
                     EventKind::Tapped
                 };
                 out.events.push((
-                    hit::path_to(track, pressed),
+                    hit::path_to(track, press.node),
                     Event::pointer(kind, pointer, pos, button),
                 ));
             }
@@ -169,22 +176,17 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
             out.events.extend(dismiss_outside_popups(track, &path));
 
             // 清按下态（整条按下链都清，避免捕获导致漏清）
-            let pressed_path = std::mem::take(&mut track.pressed_path);
-            for id in pressed_path {
-                track.set_pressed(id, false);
-            }
-            track.pressed = None;
+            clear_pressed(track);
 
             out.hover_changed |= update_hover(track, pos, pointer, &mut out.events);
         }
 
-        InputEvent::Wheel {
-            pointer,
-            pos,
-            delta,
-        } => {
-            let _ = pointer;
-            let path = hit::hit_path(track, pos);
+        InputEvent::Wheel { pointer, pos, delta } => {
+            // ★ 走 `hit_path_for`（D61）：此前用 `hit_path` + `let _ = pointer;`
+            //   **绕过了指针捕获** ⇒ 拖拽过程中（某节点已 `capture_pointer`）滚轮事件
+            //   会按命中链重新路由，而不是送给捕获者 —— 与其它指针事件语义不一致，
+            //   表现为"拖拽时滚轮 scrolls 别的容器 / 拖拽对滚轮无反应"。
+            let path = hit::hit_path_for(track, pointer, pos);
             if !path.is_empty() {
                 out.events.push((path, Event::wheel(pos, delta)));
             }
@@ -213,19 +215,10 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
             if let Some(target) = hover_path.last().copied() {
                 out.events.push((
                     hit::path_to(track, target),
-                    Event::pointer(
-                        EventKind::PointerCanceled,
-                        pointer,
-                        Point::zero(),
-                        PointerButton::Left,
-                    ),
+                    Event::pointer(EventKind::PointerCanceled, pointer, Point::zero(), PointerButton::Left),
                 ));
             }
-            let pressed_path = std::mem::take(&mut track.pressed_path);
-            for id in pressed_path {
-                track.set_pressed(id, false);
-            }
-            track.pressed = None;
+            clear_pressed(track);
         }
 
         InputEvent::Leave => {
@@ -236,18 +229,24 @@ pub fn step(track: &mut Track, ev: InputEvent) -> InputStep {
     out
 }
 
-fn push(
-    out: &mut InputStep,
-    pointer: PointerId,
-    pos: Point,
-    kind: EventKind,
-    button: PointerButton,
-    track: &Track,
-) {
+/// 清掉整条按下链的 `pressed` 视图态 + 窗口级按下态。
+///
+/// **必须清整条链**，不只是按下目标：`pressed_path` 上的每个节点都被标了 pressed
+/// （用于父容器联动高亮），只清目标会让祖先的按下态残留。
+///
+/// `Down` / `Up` / `Cancel` 三处共用，避免"清法不一致"导致按���态泄漏（D10）。
+fn clear_pressed(track: &mut Track) {
+    let pressed_path = std::mem::take(&mut track.pressed_path);
+    for id in pressed_path {
+        track.set_pressed(id, false);
+    }
+    track.pressed = None;
+}
+
+fn push(out: &mut InputStep, pointer: PointerId, pos: Point, kind: EventKind, button: PointerButton, track: &Track) {
     let path = hit::hit_path_for(track, pointer, pos);
     if !path.is_empty() {
-        out.events
-            .push((path, Event::pointer(kind, pointer, pos, button)));
+        out.events.push((path, Event::pointer(kind, pointer, pos, button)));
     }
 }
 
@@ -272,12 +271,7 @@ fn dismiss_outside_popups(track: &Track, tap_path: &[NodeId]) -> Vec<(Vec<NodeId
 }
 
 /// 按真实位置刷新 hover 链
-fn update_hover(
-    track: &mut Track,
-    pos: Point,
-    pointer: PointerId,
-    events: &mut Vec<(Vec<NodeId>, Event)>,
-) -> bool {
+fn update_hover(track: &mut Track, pos: Point, pointer: PointerId, events: &mut Vec<(Vec<NodeId>, Event)>) -> bool {
     let new_path = hit::hit_path(track, pos);
     update_hover_path(track, &new_path, pointer, pos, events)
 }
@@ -372,8 +366,22 @@ mod tests {
         let target = kids[0];
         let pos = rect_of(&t, target).center();
 
-        let down = step(&mut t, InputEvent::Down { pointer: P, pos, button: PointerButton::Right });
-        let up = step(&mut t, InputEvent::Up { pointer: P, pos, button: PointerButton::Right });
+        let down = step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos,
+                button: PointerButton::Right,
+            },
+        );
+        let up = step(
+            &mut t,
+            InputEvent::Up {
+                pointer: P,
+                pos,
+                button: PointerButton::Right,
+            },
+        );
         let right: Vec<EventKind> = down
             .events
             .iter()
@@ -383,8 +391,22 @@ mod tests {
         assert!(right.contains(&EventKind::RightTapped), "右键 ⇒ RightTapped：{right:?}");
         assert!(!right.contains(&EventKind::Tapped), "右键不该合成 Tapped：{right:?}");
 
-        let down = step(&mut t, InputEvent::Down { pointer: P, pos, button: PointerButton::Left });
-        let up = step(&mut t, InputEvent::Up { pointer: P, pos, button: PointerButton::Left });
+        let down = step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos,
+                button: PointerButton::Left,
+            },
+        );
+        let up = step(
+            &mut t,
+            InputEvent::Up {
+                pointer: P,
+                pos,
+                button: PointerButton::Left,
+            },
+        );
         let left: Vec<EventKind> = down
             .events
             .iter()
@@ -451,10 +473,22 @@ mod tests {
     #[test]
     fn hover_moves_clear_the_old_chain() {
         let (mut t, root, kids) = setup();
-        step(&mut t, InputEvent::Move { pointer: P, pos: Point::new(50.0, 50.0) });
+        step(
+            &mut t,
+            InputEvent::Move {
+                pointer: P,
+                pos: Point::new(50.0, 50.0),
+            },
+        );
         assert!(t.state(kids[0]).pointer_over);
 
-        let s = step(&mut t, InputEvent::Move { pointer: P, pos: Point::new(150.0, 50.0) });
+        let s = step(
+            &mut t,
+            InputEvent::Move {
+                pointer: P,
+                pos: Point::new(150.0, 50.0),
+            },
+        );
         assert!(!t.state(kids[0]).pointer_over, "旧目标已离开");
         assert!(t.state(kids[1]).pointer_over);
         assert!(t.state(root).pointer_over, "公共祖先保持不变");
@@ -471,15 +505,18 @@ mod tests {
     #[test]
     fn leave_clears_everything() {
         let (mut t, root, kids) = setup();
-        step(&mut t, InputEvent::Move { pointer: P, pos: Point::new(50.0, 50.0) });
+        step(
+            &mut t,
+            InputEvent::Move {
+                pointer: P,
+                pos: Point::new(50.0, 50.0),
+            },
+        );
         let s = step(&mut t, InputEvent::Leave);
         assert_eq!(t.hover, None);
         assert!(t.hover_path.is_empty());
         assert!(!t.state(root).pointer_over && !t.state(kids[0]).pointer_over);
-        assert_eq!(
-            kinds(&s),
-            vec![EventKind::PointerExited, EventKind::PointerExited]
-        );
+        assert_eq!(kinds(&s), vec![EventKind::PointerExited, EventKind::PointerExited]);
     }
 
     #[test]
@@ -493,7 +530,8 @@ mod tests {
                 button: PointerButton::Left,
             },
         );
-        assert_eq!(t.pressed, Some(kids[1]));
+        assert_eq!(t.pressed.map(|p| p.node), Some(kids[1]));
+        assert_eq!(t.pressed.map(|p| p.button), Some(PointerButton::Left));
         assert!(t.state(kids[1]).pressed);
         assert!(kinds(&down).contains(&EventKind::PointerPressed));
 
@@ -509,6 +547,126 @@ mod tests {
         assert!(kinds(&up).contains(&EventKind::Tapped));
         assert_eq!(t.pressed, None);
         assert!(!t.state(kids[1]).pressed, "按下态已清理");
+    }
+
+    /// 回归（D1）：`Tapped` 必须校验**按下与抬起是同一按键**。
+    ///
+    /// bug 表现：点击合成只判"按下目标是否仍在释放链上"，不比对按下时的按键。
+    /// 于是 **右键按下 + 左键抬起落在同一节点 ⇒ 合成 `Tapped`** ⇒ 顺带触发
+    /// 勾选 / 提交 / 删除 —— 这是数据破坏级缺陷（用户只是想开右键菜单）。
+    #[test]
+    fn cross_button_release_does_not_synthesize_tapped() {
+        let (mut t, _, kids) = setup();
+        layout(&mut t, WINDOW);
+
+        // 右键按下
+        step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos: Point::new(150.0, 50.0),
+                button: PointerButton::Right,
+            },
+        );
+        assert_eq!(t.pressed.map(|p| p.button), Some(PointerButton::Right));
+
+        // 左键抬起，位置仍在同一目标上
+        let up = step(
+            &mut t,
+            InputEvent::Up {
+                pointer: P,
+                pos: Point::new(150.0, 50.0),
+                button: PointerButton::Left,
+            },
+        );
+        assert!(
+            up.tapped.is_none(),
+            "按键不配对时不得合成点击（否则右键按下会被当成左键点击）"
+        );
+        assert!(
+            !kinds(&up).contains(&EventKind::Tapped),
+            "不得派发 Tapped：{kinds:?}",
+            kinds = kinds(&up)
+        );
+        // 右键路径本身不该被左键抬起冒充
+        assert!(!kinds(&up).contains(&EventKind::RightTapped));
+        // 按下态照常清理
+        assert_eq!(t.pressed, None);
+        assert!(!t.state(kids[1]).pressed);
+    }
+
+    /// 回归（D1 反向）：按键配对通过时，右键按下 → 右键抬起仍要合成 `RightTapped`。
+    /// 配对校验不能把右键菜单功能一起堵掉。
+    #[test]
+    fn right_button_press_and_release_still_taps() {
+        let (mut t, _, kids) = setup();
+        layout(&mut t, WINDOW);
+
+        step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos: Point::new(150.0, 50.0),
+                button: PointerButton::Right,
+            },
+        );
+        let up = step(
+            &mut t,
+            InputEvent::Up {
+                pointer: P,
+                pos: Point::new(150.0, 50.0),
+                button: PointerButton::Right,
+            },
+        );
+        assert_eq!(up.tapped, Some(kids[1]));
+        assert!(kinds(&up).contains(&EventKind::RightTapped));
+        assert!(!kinds(&up).contains(&EventKind::Tapped));
+    }
+
+    /// 回归（D10）：二次按下时，上一条按下链必须被清干净。
+    ///
+    /// bug 表现：`Down` 直接覆盖 `pressed_path`，而后续 `Up` / `Cancel` 只清最新那条链
+    /// ⇒ 旧链上的节点**永久残留 pressed 视觉**（捕获 / 多指 / 中键+左键同时按下的场景）。
+    #[test]
+    fn second_down_clears_previous_pressed_chain() {
+        let (mut t, _, kids) = setup();
+        let other = fixed(&mut t, 60.0, 60.0);
+        t.append_child(kids[0], other);
+        layout(&mut t, WINDOW);
+
+        // 在 kids[1] 上按下
+        step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos: Point::new(150.0, 50.0),
+                button: PointerButton::Left,
+            },
+        );
+        assert!(t.state(kids[1]).pressed);
+
+        // 在别的节点上再次按下（不抬起上一次）
+        step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos: Point::new(30.0, 30.0),
+                button: PointerButton::Left,
+            },
+        );
+        assert!(!t.state(kids[1]).pressed, "上一次按下的节点不应残留 pressed 视觉");
+
+        // 收尾：最后一次按下的节点仍应正常清理
+        let up = step(
+            &mut t,
+            InputEvent::Up {
+                pointer: P,
+                pos: Point::new(30.0, 30.0),
+                button: PointerButton::Left,
+            },
+        );
+        assert_eq!(t.pressed, None);
+        assert!(up.tapped.is_some());
     }
 
     #[test]
@@ -627,7 +785,13 @@ mod tests {
                 },
             ],
         );
-        step(&mut t, InputEvent::Move { pointer: P, pos: Point::new(50.0, 50.0) });
+        step(
+            &mut t,
+            InputEvent::Move {
+                pointer: P,
+                pos: Point::new(50.0, 50.0),
+            },
+        );
 
         let s = step(&mut t, InputEvent::Cancel { pointer: P });
         assert!(kinds(&s).contains(&EventKind::PointerCaptureLost));
@@ -700,5 +864,85 @@ mod tests {
         assert_eq!(e.pointer(), PointerId(2));
         assert_eq!(e.pos(), Some(Point::new(1.0, 2.0)));
         assert_eq!(InputEvent::Leave.pos(), None);
+    }
+
+    /// 节点中心（命中测试用点）。pp.rs 里有同名helper，但那边不是 pub。
+    fn center_of(t: &Track, id: NodeId) -> Point {
+        let r = crate::layout::rect_of(t, id);
+        Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
+    }
+
+    // ─────────────────── A7 回归（D61） ───────────────────
+
+    /// 回归（D61）：滚轮事件也必须走**指针捕获**。
+    ///
+    /// bug 表现：`InputEvent::Wheel` 分支写的是 `let _ = pointer; hit::hit_path(...)`
+    /// —— **绕过了 `hit_path_for` 的捕获优先逻辑**。于是拖拽过程中（某节点已
+    /// `capture_pointer`）滚轮会按命中链重新路由，而不是送给捕获者，
+    /// 表现为"拖拽对滚轮无反应 / 滚轮滚到了别的容器"。
+    #[test]
+    fn wheel_is_routed_through_pointer_capture() {
+        let (mut t, _, kids) = setup();
+        let inner = fixed(&mut t, 40.0, 40.0);
+        t.append_child(kids[0], inner);
+        layout(&mut t, WINDOW);
+
+        // 在 kids[1] 上按下并捕获（坐标先算出来：`step` 要 `&mut t`）
+        let p1 = center_of(&t, kids[1]);
+        step(
+            &mut t,
+            InputEvent::Down {
+                pointer: P,
+                pos: p1,
+                button: PointerButton::Left,
+            },
+        );
+        t.capture_pointer(P, kids[1]);
+
+        // 滚轮落在 kids[0]（**不是**捕获者）上
+        let p0 = center_of(&t, kids[0]);
+        let out = step(
+            &mut t,
+            InputEvent::Wheel {
+                pointer: P,
+                pos: p0,
+                delta: (0.0, 10.0),
+            },
+        );
+
+        let wheel = out
+            .events
+            .iter()
+            .find(|(_, e)| matches!(e.kind(), EventKind::PointerWheelChanged))
+            .expect("应产生滚轮事件");
+        assert_eq!(
+            wheel.0.last().copied(),
+            Some(kids[1]),
+            "D61：滚轮应路由给捕获者 kids[1]，实际 {:?}",
+            wheel.0
+        );
+    }
+
+    /// 未捕获时滚轮仍按命中链路由（确认上一条不是"总是发给捕获者"）。
+    #[test]
+    fn wheel_without_capture_follows_hit_chain() {
+        let (mut t, _, kids) = setup();
+        layout(&mut t, WINDOW);
+
+        let p0 = center_of(&t, kids[0]);
+        let out = step(
+            &mut t,
+            InputEvent::Wheel {
+                pointer: P,
+                pos: p0,
+                delta: (0.0, 10.0),
+            },
+        );
+        let wheel = out
+            .events
+            .iter()
+            .find(|(_, e)| matches!(e.kind(), EventKind::PointerWheelChanged))
+            .expect("应产生滚轮事件");
+        assert_eq!(wheel.0.last().copied(), Some(kids[0]));
     }
 }

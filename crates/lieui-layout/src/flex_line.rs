@@ -78,14 +78,9 @@ impl FlexLine {
     }
 
     /// 冻结不可变 item
-    pub fn freeze_inflexible_items(
-        &mut self,
-        main_axis: FlexDirection,
-        children: &mut [FlexNode],
-    ) -> Vec<usize> {
+    pub fn freeze_inflexible_items(&mut self, main_axis: FlexDirection, children: &mut [FlexNode]) -> Vec<usize> {
         let flex_sign = self.sign();
-        self.remaining_free_space =
-            self.container_main_inner_size - self.sum_hypothetical_main_size;
+        self.remaining_free_space = self.container_main_inner_size - self.sum_hypothetical_main_size;
 
         let mut inflexible_items = Vec::new();
 
@@ -99,11 +94,9 @@ impl FlexLine {
                 };
                 flex_factor == 0.0
                     || (flex_sign == FlexSign::PositiveFlexibility
-                        && item.layout_result.flex_base_size
-                            > item.layout_result.hypothetical_main_axis_size)
+                        && item.layout_result.flex_base_size > item.layout_result.hypothetical_main_axis_size)
                     || (flex_sign == FlexSign::NegativeFlexibility
-                        && item.layout_result.flex_base_size
-                            < item.layout_result.hypothetical_main_axis_size)
+                        && item.layout_result.flex_base_size < item.layout_result.hypothetical_main_axis_size)
             };
 
             if freeze {
@@ -119,12 +112,7 @@ impl FlexLine {
     }
 
     /// 冻结违规 item
-    pub fn freeze_violations(
-        &mut self,
-        violations: &[usize],
-        main_axis: FlexDirection,
-        children: &mut [FlexNode],
-    ) {
+    pub fn freeze_violations(&mut self, violations: &[usize], main_axis: FlexDirection, children: &mut [FlexNode]) {
         for &idx in violations {
             if children[idx].is_frozen {
                 continue;
@@ -132,8 +120,7 @@ impl FlexLine {
 
             let dim = K_AXIS_DIM[main_axis as usize] as usize;
             let layout_dim = children[idx].layout_result.dim[dim];
-            self.remaining_free_space -=
-                layout_dim - children[idx].layout_result.hypothetical_main_axis_size;
+            self.remaining_free_space -= layout_dim - children[idx].layout_result.hypothetical_main_axis_size;
 
             self.total_flex_grow -= children[idx].style.flex_grow;
             self.total_flex_shrink -= children[idx].style.flex_shrink;
@@ -146,11 +133,7 @@ impl FlexLine {
     }
 
     /// 解析弹性长度 (W3C §9.7)
-    pub fn resolve_flexible_lengths(
-        &mut self,
-        main_axis: FlexDirection,
-        children: &mut [FlexNode],
-    ) -> bool {
+    pub fn resolve_flexible_lengths(&mut self, main_axis: FlexDirection, children: &mut [FlexNode]) -> bool {
         let flex_sign = self.sign();
         let sum_flex_factors = if flex_sign == FlexSign::PositiveFlexibility {
             self.total_flex_grow
@@ -187,9 +170,7 @@ impl FlexLine {
                     && self.total_weighted_flex_shrink > 0.0
                     && flex_sign == FlexSign::NegativeFlexibility
                 {
-                    remaining_free_space
-                        * item.style.flex_shrink
-                        * item.layout_result.flex_base_size
+                    remaining_free_space * item.style.flex_shrink * item.layout_result.flex_base_size
                         / self.total_weighted_flex_shrink
                 } else {
                     0.0
@@ -197,8 +178,7 @@ impl FlexLine {
             };
 
             let violation = if extra_space.is_finite() {
-                let item_main_size =
-                    children[idx].layout_result.hypothetical_main_axis_size + extra_space;
+                let item_main_size = children[idx].layout_result.hypothetical_main_axis_size + extra_space;
                 let adjust = children[idx].bound_axis(main_axis, item_main_size);
                 children[idx].layout_result.dim[K_AXIS_DIM[main_axis as usize] as usize] = adjust;
                 used_free_space += adjust - children[idx].layout_result.hypothetical_main_axis_size;

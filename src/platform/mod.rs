@@ -49,9 +49,9 @@ use std::time::Instant;
 
 use lieui_geom::{Point, Rect, Size};
 use winit::application::ApplicationHandler;
-use winit::event_loop::ControlFlow;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::ControlFlow;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId as OsWindowId};
@@ -81,9 +81,7 @@ fn clipboard_set(text: &str) {
 }
 
 fn clipboard_get() -> Option<String> {
-    arboard::Clipboard::new()
-        .ok()
-        .and_then(|mut cb| cb.get_text().ok())
+    arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok())
 }
 
 /// 跨线程事件（`RepaintHandle` → 事件循环）
@@ -92,10 +90,7 @@ pub enum AppEvent {
     /// 唤醒事件循环跑一帧（后台线程改完状态后调用）
     Wake,
     /// 给某个窗口投递外部数据
-    External {
-        window: WindowId,
-        data: ExternalData,
-    },
+    External { window: WindowId, data: ExternalData },
 }
 
 /// 显式重绘句柄（**不是**全局单例）：后台线程用它唤醒 UI 线程。
@@ -119,9 +114,7 @@ impl RepaintHandle {
 
     /// 投递外部数据并唤醒
     pub fn post_external(&self, window: WindowId, data: ExternalData) -> bool {
-        self.proxy
-            .send_event(AppEvent::External { window, data })
-            .is_ok()
+        self.proxy.send_event(AppEvent::External { window, data }).is_ok()
     }
 }
 
@@ -172,30 +165,68 @@ pub fn pack_xrgb(src: &[vello_cpu::color::PremulRgba8], out: &mut [u32]) -> usiz
     n
 }
 
+/// 只把 `rects` **覆盖到的像素**从 `src`（premul RGBA8）拷进 `dst`（u32 XRGB），
+/// 返回实际拷贝的像素数。
+///
+/// ## 为什么抽成独立函数（D22 / C1）
+///
+/// 此前局部上屏是**内联**在 `present` 里的，而它按 `row * stride .. +stride` **整行拷**、
+/// **完全忽略 `r.x` / `r.width`** ⇒ 一个 40×20 的脏区被展开成 20 行 × 全窗宽，
+/// 呈现带宽白白翻倍（光栅化已经是局部的，瓶颈就卡在上屏这一侧）。
+///
+/// 而它内联在 `#[cfg(feature = "winit")]` 的平台层里、需要真实 `surface` ⇒ **无法测试**。
+/// 抽成纯函数后，`copy_damage_rects_only_touches_the_rect` 才能钉住"拷贝量 ∝ 脏区面积"。
+///
+/// ## 语义
+///
+/// - `stride` = 每行像素数（= pixmap 宽）；`src.len() == stride * 高度`，
+///   所以"行内越界"与"整体越界"都用同一处`saturating_sub` 夹住，**不会 panic**。
+/// - 超出 `src` / `dst` 的部分**静默裁剪**（与 `pack_xrgb` 的取 min 语义一致）。
+/// - 宽度为 0 / 高度为 0 的矩形直接跳过。
+pub fn copy_damage_rects(
+    src: &[vello_cpu::color::PremulRgba8],
+    dst: &mut [u32],
+    stride: usize,
+    rects: &[softbuffer::Rect],
+) -> usize {
+    if stride == 0 {
+        return 0;
+    }
+    let mut copied = 0usize;
+    for r in rects {
+        let x0 = r.x as usize;
+        let y0 = r.y as usize;
+        // 横向裁到本行内（x0 越界 ⇒ w 变 0）
+        let w = (r.width.get() as usize).min(stride.saturating_sub(x0));
+        let h = r.height.get() as usize;
+        if w == 0 || h == 0 {
+            continue;
+        }
+        for row in y0..y0.saturating_add(h) {
+            let start = row * stride + x0;
+            // 纵向/整体越界在此一并夹住（src.len() == stride * 高度）
+            let w_fit = w
+                .min(src.len().saturating_sub(start))
+                .min(dst.len().saturating_sub(start));
+            if w_fit == 0 {
+                break; // 整行都在界外 ⇒ 更后面的行也不在
+            }
+            copied += pack_xrgb(&src[start..start + w_fit], &mut dst[start..start + w_fit]);
+        }
+    }
+    copied
+}
+
 /// 逻辑脏区 → 物理像素的 softbuffer 矩形（取整、裁剪、去重）
-pub fn softbuffer_damage(
-    physical: Size,
-    damage: &[Rect],
-    damage_all: bool,
-    scale: f32,
-) -> Vec<softbuffer::Rect> {
+pub fn softbuffer_damage(physical: Size, damage: &[Rect], damage_all: bool, scale: f32) -> Vec<softbuffer::Rect> {
     let scaled: Vec<Rect> = damage
         .iter()
-        .map(|d| {
-            Rect::new(
-                d.x * scale,
-                d.y * scale,
-                d.width * scale,
-                d.height * scale,
-            )
-        })
+        .map(|d| Rect::new(d.x * scale, d.y * scale, d.width * scale, d.height * scale))
         .collect();
     crate::render::damage_batches(physical, &scaled, damage_all)
         .into_iter()
         .map(|r| {
-            let nz = |v: f32| {
-                NonZeroU32::new((v.max(1.0).round() as u32).max(1)).unwrap_or(NonZeroU32::MIN)
-            };
+            let nz = |v: f32| NonZeroU32::new((v.max(1.0).round() as u32).max(1)).unwrap_or(NonZeroU32::MIN);
             softbuffer::Rect {
                 x: r.x.max(0.0).round() as u32,
                 y: r.y.max(0.0).round() as u32,
@@ -213,11 +244,7 @@ pub fn softbuffer_damage(
 /// 平台的 `scale_factor` 理论上恒 > 0，但**除零会污染整条布局链**（NaN 尺寸 ⇒ 全树失效），
 /// 所以入口统一夹一次。
 pub fn sane_scale(scale: f32) -> f32 {
-    if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    }
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
 }
 
 /// 物理光标位置 → 逻辑坐标（命中测试吃逻辑坐标）。
@@ -326,9 +353,9 @@ impl Runner {
                 .set_system_dark(matches!(t, winit::window::Theme::Dark));
         }
 
-        let context = self.context.get_or_insert_with(|| {
-            softbuffer::Context::new(Rc::clone(&window)).expect("softbuffer context")
-        });
+        let context = self
+            .context
+            .get_or_insert_with(|| softbuffer::Context::new(Rc::clone(&window)).expect("softbuffer context"));
         let surface = match softbuffer::Surface::new(context, Rc::clone(&window)) {
             Ok(s) => s,
             Err(e) => {
@@ -366,7 +393,11 @@ impl Runner {
         }
     }
 
-    /// 一帧：请求 → tick → frame → 上屏
+    /// 一帧：**请求 → 本地投递队列 → 定时器 → frame → 上屏**（只在 `RedrawRequested` 调用）。
+    ///
+    /// ★ 主线 B：`frame()` 的**唯一入口**。此前 `about_to_wait` / `user_event` 也会跑
+    /// 完整一帧，于是"一次鼠标移动"会跑 2 次 `frame`（第二次无脏、空跑）。
+    /// 现在那两个唤醒点只调 [`Self::pump`]（消费定时器，不渲染）。
     fn tick(&mut self, el: &ActiveEventLoop, now: Instant) {
         let (opened, closed) = self.app.drain_requests();
         for id in opened {
@@ -374,6 +405,26 @@ impl Runner {
         }
         for id in closed {
             self.destroy_window(id);
+        }
+
+        // ★ 消费本地投递队列（A6）。**此前平台层完全没做这件事**，于是：
+        //
+        //   `TaskCtx` 持有的是 **spawn 时**的 `WakerSlot` 快照，而平台 waker 是
+        //   在 `run()` 里才 `set_waker` 注入的 ⇒ **在 `run()` 之前 spawn 的任务**
+        //   （典型：ViewModel 构造期起预加载 / 预热任务）永远持有 `Local` 槽位，
+        //   `post()` 全部落进 `LocalQueue`。而 `LocalQueue` 只被
+        //   `App::frame_all` 消费，平台层走的是逐窗口 `ctx.tick/frame`，**从不调它**
+        //   ⇒ 消息积压、无任何人消费 ⇒ **任务永不回调、界面毫无反应，且零报错**。
+        //
+        // `App::frame_all` 的文档注释曾写"有平台时队列恒空 ⇒ 零开销"——**那个假设是错的**，
+        // 正是这个 bug 的来源。现在两边都 drain，假设才成立。
+        {
+            let rt = self.app.runtime();
+            for (w, data) in rt.take_pending_external() {
+                if let Some(ctx) = self.app.window_ctx_mut(w) {
+                    ctx.external(&rt, data);
+                }
+            }
         }
 
         let ids: Vec<WindowId> = self.app.windows().iter().map(|w| w.id()).collect();
@@ -414,6 +465,48 @@ impl Runner {
         }
 
         // 光标闪烁调度：有聚焦输入框 ⇒ 定时唤醒；否则纯 Wait（空闲帧零功耗）
+        self.schedule_wakeup(el);
+    }
+
+    /// 只消费**定时器 / 动画帧 / 本地投递**，**不渲染**。返回"是否有窗口真的做了事"。
+    ///
+    /// ★ 主线 B 的闭环（`refactor-plan` §四·主线 B）：这是 `RedrawRequested` **之外**
+    /// 的唤醒点（`about_to_wait` / `user_event`）走的路径。
+    /// 定时器回调改了状态之后**必须有人请求重绘**，否则画面停在旧帧 ——
+    /// "把 `frame` 收敛到单一入口"这个改法如果少了这一环，就会把
+    /// "帧跑 3 次"换成**"定时器和动画停帧"**。
+    fn pump(&mut self, now: Instant) -> bool {
+        let rt = self.app.runtime();
+        let mut did_work = false;
+
+        // 本地投递队列（A6：`run()` 之前 spawn 的任务会往这里投）
+        for (w, data) in rt.take_pending_external() {
+            if let Some(ctx) = self.app.window_ctx_mut(w) {
+                ctx.external(&rt, data);
+                did_work = true;
+            }
+        }
+
+        let ids: Vec<WindowId> = self.app.windows().iter().map(|w| w.id()).collect();
+        for id in ids {
+            let Some(ctx) = self.app.window_ctx_mut(id) else {
+                continue;
+            };
+            ctx.animate(now); // 光标闪烁翻相位（无聚焦输入框时 no-op）
+            did_work |= ctx.tick(&rt, now);
+        }
+        did_work
+    }
+
+    /// 全部窗口请求重绘（`pump` 发现状态变化后调用，否则停帧）。
+    fn request_redraw_all(&self) {
+        for ws in self.windows.values() {
+            ws.window.request_redraw();
+        }
+    }
+
+    /// 按"下一个时钟事件"设定唤醒策略（无事件则纯 `Wait`，空闲零功耗）。
+    fn schedule_wakeup(&self, el: &ActiveEventLoop) {
         let mut wakeup: Option<Instant> = None;
         // `next_wakeup` 要问"还有没有忙碌项"（spinner），真相在 Runtime 里 ——
         // 好处是窗口不必每帧缓存一份 busy 快照，也就没有"过期真相"这回事。
@@ -465,11 +558,10 @@ impl Runner {
 
         ws.window.pre_present_notify();
 
-        let mut buffer: softbuffer::Buffer<'_, Rc<Window>, Rc<Window>> =
-            match ws.surface.buffer_mut() {
-                Ok(b) => b,
-                Err(_) => return,
-            };
+        let mut buffer: softbuffer::Buffer<'_, Rc<Window>, Rc<Window>> = match ws.surface.buffer_mut() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
         let full = resized || damage_all || buffer.age() == 0;
         let batches = softbuffer_damage(physical, damage, full, scale);
 
@@ -481,20 +573,10 @@ impl Runner {
             if full {
                 pack_xrgb(src, dst);
             } else {
-                // 只打包脏区那几行（局部上屏：省掉整窗的像素拷贝）
-                for r in &batches {
-                    let (y, h) = (r.y as usize, r.height.get() as usize);
-                    for row in y..(y + h).min(ph as usize) {
-                        let start = row * stride;
-                        let end = (start + stride).min(src.len()).min(dst.len());
-                        if start >= end {
-                            continue;
-                        }
-                        let s = &src[start..end];
-                        let d = &mut dst[start..end];
-                        let _ = pack_xrgb(s, d);
-                    }
-                }
+                // ★ 只拷脏区**矩形内的像素**（C1 / D22）。此前是"按整行拷"
+                //   （`row*stride .. +stride`，忽略 `r.x`/`r.width`）
+                // ⇒ 40×20 的脏区被展开成 20 行 × 全窗宽，呈现带宽白白翻倍。
+                let _ = copy_damage_rects(src, dst, stride, &batches);
             }
         }
 
@@ -509,10 +591,7 @@ impl Runner {
 
     /// 该窗口当前的 DPI 缩放（窗口不在 ⇒ 1.0）
     fn window_scale(&self, id: WindowId) -> f32 {
-        self.app
-            .window_ctx(id)
-            .map(|c| c.scale_factor())
-            .unwrap_or(1.0)
+        self.app.window_ctx(id).map(|c| c.scale_factor()).unwrap_or(1.0)
     }
 
     fn to_logical(&self, id: WindowId, p: PhysicalPosition<f64>) -> Point {
@@ -557,9 +636,7 @@ impl Runner {
     /// Ctrl+C / X / V：直接操作聚焦的输入框（剪贴板归平台层，核心不依赖 `arboard`）
     fn handle_clipboard(&mut self, id: WindowId, ev: &Event) -> bool {
         let Event::Key {
-            code,
-            modifiers: mods,
-            ..
+            code, modifiers: mods, ..
         } = ev
         else {
             return false;
@@ -648,9 +725,11 @@ impl Runner {
                 NamedKey::Meta => crate::event::NamedKey::Meta,
                 other => crate::event::NamedKey::Other(*other as u32),
             }),
-            Key::Character(s) => s.chars().next().map(KeyCode::Char).unwrap_or(KeyCode::Named(
-                crate::event::NamedKey::Other(0),
-            )),
+            Key::Character(s) => s
+                .chars()
+                .next()
+                .map(KeyCode::Char)
+                .unwrap_or(KeyCode::Named(crate::event::NamedKey::Other(0))),
             _ => KeyCode::Named(crate::event::NamedKey::Other(0)),
         }
     }
@@ -703,9 +782,7 @@ impl Runner {
                 if scale.is_finite() && scale > 0.0 {
                     if let Some(logical) = self.app.window_ctx(id).map(|c| c.size()) {
                         // 失败（后端不支持同步改尺寸）不算错：平台的 `Resized` 会兜底。
-                        let _ = inner_size_writer.request_inner_size(logical_size_to_physical(
-                            logical, scale,
-                        ));
+                        let _ = inner_size_writer.request_inner_size(logical_size_to_physical(logical, scale));
                     }
                     if let Some(ctx) = self.app.window_ctx_mut(id) {
                         ctx.set_scale_factor(&rt, scale);
@@ -805,9 +882,7 @@ impl Runner {
                 let mods = Self::modifiers(self.modifiers);
 
                 // Tab / Shift+Tab：框架默认的焦点迁移
-                if key.state == ElementState::Pressed
-                    && code == KeyCode::Named(crate::event::NamedKey::Tab)
-                {
+                if key.state == ElementState::Pressed && code == KeyCode::Named(crate::event::NamedKey::Tab) {
                     let forward = !self.modifiers.shift_key();
                     if let Some(ctx) = self.app.window_ctx_mut(id) {
                         ctx.tab(&rt, forward);
@@ -815,10 +890,7 @@ impl Runner {
                 }
 
                 let mut ev = Event::key_with(kind, code, mods);
-                if let Event::Key {
-                    text, repeat: r, ..
-                } = &mut ev
-                {
+                if let Event::Key { text, repeat: r, .. } = &mut ev {
                     *r = key.repeat;
                     if kind == EventKind::KeyDown
                         && let Key::Character(s) = &key.logical_key
@@ -891,17 +963,20 @@ impl ApplicationHandler<AppEvent> for Runner {
         self.tick(el, Instant::now());
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, event: AppEvent) {
+    fn user_event(&mut self, _el: &ActiveEventLoop, event: AppEvent) {
         match event {
+            // 后台线程只要 UI 跑一帧（如任务进度上报）—— 只消费定时器，渲染交给
+            // 下面的"脏了就 request_redraw"（`frame` 收敛到 `RedrawRequested` 之后，
+            // 这里再跑完整帧就又把入口扩回两个了）。
             AppEvent::Wake => {
-                self.tick(el, Instant::now());
+                self.pump(Instant::now());
             }
             AppEvent::External { window, data } => {
                 let rt = self.app.runtime();
                 if let Some(ctx) = self.app.window_ctx_mut(window) {
                     ctx.external(&rt, data);
                 }
-                self.tick(el, Instant::now());
+                self.pump(Instant::now());
             }
         }
         // 唤醒后立刻重绘（避免等下一个周期）
@@ -935,8 +1010,21 @@ impl ApplicationHandler<AppEvent> for Runner {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // ★ 主线 B：这里**不再**跑完整帧（`frame()` 收敛到 `RedrawRequested` 单一入口）。
+        // 但**必须消费定时器**，否则定时器永远不被触发；而消费之后**必须请求重绘**，
+        // 否则回调改了状态却没人画 ⇒ 停帧。这就是 `pump` 返回值的用途。
+        if self.pump(Instant::now()) {
+            self.request_redraw_all();
+        }
         // 请求队列可能在事件里被写入（如关闭按钮 ⇒ `ctx.close_window`）
-        self.tick(el, Instant::now());
+        let (opened, closed) = self.app.drain_requests();
+        for id in opened {
+            self.create_window(el, id);
+        }
+        for id in closed {
+            self.destroy_window(id);
+        }
+        self.schedule_wakeup(el);
     }
 }
 
@@ -944,10 +1032,7 @@ impl ApplicationHandler<AppEvent> for Runner {
 ///
 /// `on_ready` 在事件循环建好后、进入循环前调用 —— 这是拿到 [`RepaintHandle`]
 /// 交给后台线程的唯一时机（`EventLoopProxy` 必须由 `EventLoop` 创建）。
-pub fn run(
-    app: App,
-    on_ready: Option<Box<dyn FnOnce(RepaintHandle)>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(app: App, on_ready: Option<Box<dyn FnOnce(RepaintHandle)>>) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop: EventLoop<AppEvent> = EventLoop::with_user_event().build()?;
     let handle = RepaintHandle::new(event_loop.create_proxy());
     // 唤醒器注入运行时：`Runtime::spawn_task` / `TaskCtx::post` / `Runtime::wake`
@@ -1065,8 +1150,7 @@ mod tests {
             // 1.25 / 2 / 3 能精确回推；1.5 的 600 → 900 也精确
             let back = physical_size_to_logical(physical, scale);
             assert!(
-                (back.width - logical.width).abs() < 0.001
-                    && (back.height - logical.height).abs() < 0.001,
+                (back.width - logical.width).abs() < 0.001 && (back.height - logical.height).abs() < 0.001,
                 "scale {scale}: {back:?} != {logical:?}"
             );
         }
@@ -1079,4 +1163,141 @@ mod tests {
         assert_eq!((p.width, p.height), (1, 1));
     }
 
+    // ─────────────────── C1 / D22：局部上屏只拷矩形内像素 ───────────────────
+
+    /// 构造 `w × h` 的 premul pixmap，像素值按 `(x, y)` 唯一编码，便于定位拷贝范围。
+    fn marker_pixmap(w: u32, h: u32) -> Vec<vello_cpu::color::PremulRgba8> {
+        use vello_cpu::color::PremulRgba8;
+        (0..(w * h) as usize)
+            .map(|i| {
+                let v = (i % 251 + 1) as u8;
+                PremulRgba8 {
+                    r: v,
+                    g: v,
+                    b: v,
+                    a: 255,
+                }
+            })
+            .collect()
+    }
+
+    /// ⚠️ `softbuffer::Length` 是 `NonZeroU32` ⇒ 长度 0 **无法表达**。
+    /// `softbuffer_damage` 里同样用 `.max(1)` 兜底（见其 `nz`），这里保持一致：
+    /// 传 0 会被夹成 1。
+    fn sb_rect(x: u32, y: u32, w: u32, h: u32) -> softbuffer::Rect {
+        let nz = |v: u32| NonZeroU32::new(v.max(1)).unwrap_or(NonZeroU32::MIN);
+        softbuffer::Rect {
+            x,
+            y,
+            width: nz(w),
+            height: nz(h),
+        }
+    }
+
+    /// 回归（D22 / C1）：局部上屏的拷贝量必须 **∝ 脏区面积**，而不是"脏区高度 × 全窗宽"。
+    ///
+    /// bug 表现：旧实现按 `row * stride .. +stride` 整行拷、忽略 `r.x` / `r.width`
+    /// ⇒ 40×20 的脏区实际拷 20 × 全窗宽像素。
+    #[test]
+    fn copy_damage_rects_only_touches_the_rect() {
+        const W: u32 = 200;
+        const H: u32 = 100;
+        let src = marker_pixmap(W, H);
+        let mut dst = vec![0u32; src.len()];
+        let stride = W as usize;
+
+        // 一个 40×20 的小脏区
+        let rects = [sb_rect(10, 5, 40, 20)];
+        let copied = copy_damage_rects(&src, &mut dst, stride, &rects);
+
+        assert_eq!(copied, 40 * 20, "拷贝量应恰好等于脏区面积");
+        // 脏区外的像素一个都不该被动
+        let touched = dst.iter().filter(|d| **d != 0).count();
+        assert_eq!(touched, 40 * 20, "脏区外不得被写入");
+        // 脏区内每个像素都应被写入，且值与源一致（打包后 r 通道在高位）
+        for row in 5..25usize {
+            for col in 10..50usize {
+                let i = row * stride + col;
+                assert_ne!(dst[i], 0, "({row},{col}) 在脏区内却没被拷贝");
+            }
+        }
+        // 同行但脏区外（x < 10 / x >= 50）不应被动
+        assert_eq!(dst[5 * stride + 9], 0, "同行脏区左侧不应被动");
+        assert_eq!(dst[5 * stride + 50], 0, "同行脏区右侧不应被动");
+        // 相邻行也不应被动
+        assert_eq!(dst[4 * stride + 10], 0, "脏区上方一行不应被动");
+        assert_eq!(dst[25 * stride + 10], 0, "脏区下方一行不应被动");
+    }
+
+    /// 多个不相邻的脏区：拷贝量应是各面积之和（而不是并集/整窗）。
+    #[test]
+    fn copy_damage_rects_sums_multiple_rects() {
+        const W: u32 = 64;
+        const H: u32 = 64;
+        let src = marker_pixmap(W, H);
+        let mut dst = vec![0u32; src.len()];
+        let stride = W as usize;
+
+        let rects = [sb_rect(0, 0, 10, 10), sb_rect(50, 50, 8, 8)];
+        let copied = copy_damage_rects(&src, &mut dst, stride, &rects);
+        assert_eq!(copied, 100 + 64);
+        assert_eq!(dst.iter().filter(|d| **d != 0).count(), 100 + 64);
+    }
+
+    /// 越界必须**静默裁剪**而不是 panic（窗口被最小化 / 脏区超出表面尺寸）。
+    #[test]
+    fn copy_damage_rects_clips_out_of_bounds() {
+        const W: u32 = 32;
+        const H: u32 = 32;
+        let src = marker_pixmap(W, H);
+        let stride = W as usize;
+        let mut dst = vec![0u32; src.len()];
+
+        // 右边界溢出
+        let copied = copy_damage_rects(&src, &mut dst, stride, &[sb_rect(30, 0, 10, 2)]);
+        assert_eq!(copied, 2 * 2, "只应拷贝界内那2 列");
+        // 下边界溢出
+        let mut dst2 = vec![0u32; src.len()];
+        let copied2 = copy_damage_rects(&src, &mut dst2, stride, &[sb_rect(0, 31, 4, 10)]);
+        assert_eq!(copied2, 4, "下边界溢出：只拷界内那1 行 × 4 列");
+        // 完全在界外
+        let mut dst3 = vec![0u32; src.len()];
+        assert_eq!(
+            copy_damage_rects(&src, &mut dst3, stride, &[sb_rect(100, 100, 5, 5)]),
+            0
+        );
+        assert!(dst3.iter().all(|d| *d == 0));
+        // 零尺寸：`Length` 是 NonZero ⇒ 宽度 0 被夹成 1 ⇒ 拷 1 像素（与 `softbuffer_damage` 的
+        // `.max(1)` 兜底一致）。断言的是这个**已记录在案**的行为，不是"零尺寸不拷"。
+        let mut dst4 = vec![0u32; src.len()];
+        assert_eq!(copy_damage_rects(&src, &mut dst4, stride, &[sb_rect(0, 0, 0, 1)]), 1);
+        // stride 为 0 不应除零 panic
+        assert_eq!(copy_damage_rects(&src, &mut dst3, 0, &[sb_rect(0, 0, 5, 5)]), 0);
+    }
+
+    /// 回归对照：**旧行为**（整行拷）的拷贝量是多少 —— 量化 D22 到底浪费了多少。
+    /// 这条不是断言旧行为，而是把"整窗 × 高度"与"脏区面积"的倍数关系固定下来，
+    /// 让"修了之后省了多少"有据可查。
+    #[test]
+    fn old_behaviour_would_copy_the_whole_row() {
+        const W: u32 = 200;
+        const H: u32 = 100;
+        let src = marker_pixmap(W, H);
+        let stride = W as usize;
+        let rect = sb_rect(10, 5, 40, 20);
+
+        let new_copied = {
+            let mut dst = vec![0u32; src.len()];
+            copy_damage_rects(&src, &mut dst, stride, &[rect])
+        };
+        let old_copied = rect.height.get() as usize * stride; // 旧实现：整行 × 行数
+
+        assert_eq!(new_copied, 800);
+        assert_eq!(old_copied, 20 * 200);
+        assert_eq!(
+            old_copied / new_copied,
+            5,
+            "40×20 的脏区，旧实现多拷了 5 倍（= 整窗宽 / 脏区宽）"
+        );
+    }
 }

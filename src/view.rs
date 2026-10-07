@@ -16,9 +16,7 @@ use crate::event::{EventKind, HandlerSlot};
 use crate::reactive::Signal;
 use crate::style::{ImageStyle, PaintStyle, ShadowSpec, TextStyle};
 use crate::theme::Theme;
-use crate::track::{
-    Anchor, Bindings, ImageData, Key, KindDesc, Layer, LayerOpts, Placement, Transform, Visibility,
-};
+use crate::track::{Anchor, Bindings, ImageData, Key, KindDesc, Layer, LayerOpts, Placement, Transform, Visibility};
 
 /// 描述节点（`pub(crate)`：用户只通过 [`ViewBuf`] / [`DescRef`] 操作）
 pub(crate) struct DescNode {
@@ -334,9 +332,7 @@ impl ViewBuf {
     /// 本质是"图标字体里的一个字符"——测度/布局/绘制/hover 变色全部复用文本管线，
     /// 字体在首次使用时自动注册（`crate::icon`）。字号默认 20，链式 `.font_size(..)` 可改。
     pub fn icon(&mut self, name: impl AsRef<str>) -> DescRef<'_> {
-        let idx = self.push_desc(KindDesc::Text(
-            crate::icon::icon_char(name.as_ref()).to_string(),
-        ));
+        let idx = self.push_desc(KindDesc::Text(crate::icon::icon_char(name.as_ref()).to_string()));
         {
             let t = *self.theme();
             let n = self.node_mut(idx);
@@ -657,10 +653,7 @@ impl ViewBuf {
         // 包在普通 column 里（最常见的"标题 + 列表"排布），挂到当前节点会永远收不到
         // `ScrollChanged` ⇒ 窗口起点不推进 ⇒ 看起来"只有前若干项、滚下去没有新行"。
         // 没有滚动祖先时退回当前节点（等价于旧行为）。
-        let cur = *self
-            .stack
-            .last()
-            .expect("virtual_list 必须在容器闭包内调用");
+        let cur = *self.stack.last().expect("virtual_list 必须在容器闭包内调用");
         let host = self
             .stack
             .iter()
@@ -686,11 +679,7 @@ impl ViewBuf {
         self.column(|col| {
             col.padding_top(first as f32 * ih);
             col.padding_bottom((count - last) as f32 * ih);
-            col.keyed_list(
-                items[first..last].iter(),
-                |t: &&T| key_fn(*t),
-                |v, t: &&T| item(v, *t),
-            );
+            col.keyed_list(items[first..last].iter(), |t: &&T| key_fn(*t), |v, t: &&T| item(v, *t));
         });
     }
 
@@ -719,12 +708,7 @@ impl ViewBuf {
     ///
     /// 位置与那一行的 rect 有关（`Placement::Below` = 行的左边缘下方），
     /// **与鼠标位置无关** —— 要"贴着右键点出现"请用 [`Self::popup_at_point`]。
-    pub fn popup_at(
-        &mut self,
-        anchor_key: impl Into<Key>,
-        placement: Placement,
-        f: impl FnOnce(&mut Self),
-    ) {
+    pub fn popup_at(&mut self, anchor_key: impl Into<Key>, placement: Placement, f: impl FnOnce(&mut Self)) {
         let key: Key = anchor_key.into();
         self.layer(
             Layer::Popup,
@@ -763,12 +747,7 @@ impl ViewBuf {
     ///     });
     /// }
     /// ```
-    pub fn popup_at_point(
-        &mut self,
-        pos: Point,
-        placement: Placement,
-        f: impl FnOnce(&mut Self),
-    ) {
+    pub fn popup_at_point(&mut self, pos: Point, placement: Placement, f: impl FnOnce(&mut Self)) {
         self.layer(
             Layer::Popup,
             None,
@@ -783,12 +762,7 @@ impl ViewBuf {
     }
 
     /// 锚定 tooltip
-    pub fn tooltip_at(
-        &mut self,
-        anchor_key: impl Into<Key>,
-        placement: Placement,
-        f: impl FnOnce(&mut Self),
-    ) {
+    pub fn tooltip_at(&mut self, anchor_key: impl Into<Key>, placement: Placement, f: impl FnOnce(&mut Self)) {
         let key: Key = anchor_key.into();
         self.layer(
             Layer::Tooltip,
@@ -812,11 +786,7 @@ impl ViewBuf {
     ///
     /// 层根打上 [`crate::menu::CTX_MENU_TAG`] 标签，好让框架认回"这个弹层是我的"
     /// （app 自己声明的 popup 同在 `Layer::Popup` 组内，顺序会漂）。
-    pub(crate) fn push_context_menu(
-        &mut self,
-        at: lieui_geom::Point,
-        builder: &crate::menu::ContextMenu,
-    ) {
+    pub(crate) fn push_context_menu(&mut self, at: lieui_geom::Point, builder: &crate::menu::ContextMenu) {
         let prev = self.layer_tag;
         self.layer_tag = Some(crate::menu::CTX_MENU_TAG);
         self.layer(
@@ -1155,11 +1125,7 @@ impl<'a> DescRef<'a> {
     // ── 可视 / 命中 ──
 
     pub fn visible(mut self, v: bool) -> Self {
-        self.n().visibility = if v {
-            Visibility::Visible
-        } else {
-            Visibility::Collapsed
-        };
+        self.n().visibility = if v { Visibility::Visible } else { Visibility::Collapsed };
         self
     }
 
@@ -1273,11 +1239,7 @@ impl<'a> DescRef<'a> {
     /// 注册"即便已被处理也要调用"的处理器（≈ WinUI `handledEventsToo`）。
     ///
     /// 供**框架内置行为**使用（用户态一般不需要）；这是旧实现 `.builtin()` 排序 hack 的正面替换。
-    pub fn on_always(
-        mut self,
-        kind: EventKind,
-        f: impl Fn(&mut crate::event::Ctx) + 'static,
-    ) -> Self {
+    pub fn on_always(mut self, kind: EventKind, f: impl Fn(&mut crate::event::Ctx) + 'static) -> Self {
         self.n().handlers.push(HandlerSlot {
             kind,
             handler: Rc::new(f),
@@ -1348,11 +1310,7 @@ mod tests {
         });
         let root = &v.nodes[v.roots[0].node as usize];
         let a = &v.nodes[root.children[0] as usize];
-        assert_eq!(
-            a.kind.tag(),
-            crate::track::KindTag::Button,
-            "icon_button 走按钮交互"
-        );
+        assert_eq!(a.kind.tag(), crate::track::KindTag::Button, "icon_button 走按钮交互");
         match &a.kind {
             KindDesc::Button { label } => assert_eq!(label, "\u{e8b8}"),
             _ => panic!(),
@@ -1377,18 +1335,11 @@ mod tests {
         });
 
         let popup = v.roots.iter().find(|r| r.layer == Layer::Popup).unwrap();
-        let shadow = v.nodes[popup.node as usize]
-            .paint
-            .shadow
-            .expect("弹层根有投影");
+        let shadow = v.nodes[popup.node as usize].paint.shadow.expect("弹层根有投影");
         assert_eq!(shadow.color, dark.shadow, "投影色 = theme.shadow");
 
         let modal = v.roots.iter().find(|r| r.layer == Layer::Modal).unwrap();
-        assert_eq!(
-            modal.opts.backdrop,
-            Some(dark.backdrop),
-            "遮罩 = theme.backdrop"
-        );
+        assert_eq!(modal.opts.backdrop, Some(dark.backdrop), "遮罩 = theme.backdrop");
     }
 
     #[test]
@@ -1420,7 +1371,10 @@ mod tests {
         assert_eq!(title.text.spec.font_size, 48.0);
         let row = &v.nodes[root.children[1] as usize];
         assert_eq!(row.children.len(), 2);
-        assert_eq!(v.nodes[row.children[0] as usize].kind.tag(), crate::track::KindTag::Button);
+        assert_eq!(
+            v.nodes[row.children[0] as usize].kind.tag(),
+            crate::track::KindTag::Button
+        );
         assert_eq!(v.nodes.len(), 5);
     }
 
@@ -1428,13 +1382,17 @@ mod tests {
     fn begin_resets_for_reuse() {
         let mut v = ViewBuf::new();
         v.begin();
-        v.column(|c| { c.text("x"); });
+        v.column(|c| {
+            c.text("x");
+        });
         let cap = v.nodes.capacity();
 
         v.begin();
         assert!(v.nodes.is_empty());
         assert!(v.roots.is_empty());
-        v.column(|c| { c.text("y"); });
+        v.column(|c| {
+            c.text("y");
+        });
         assert_eq!(v.nodes.len(), 2, "复用后不残留");
         assert!(v.nodes.capacity() >= cap);
     }
@@ -1443,18 +1401,21 @@ mod tests {
     fn layers_are_nested_and_owned() {
         let mut v = ViewBuf::new();
         v.begin();
-        v.column(|c| { c.text("body"); });
-        v.overlay(|o| { o.text("WATERMARK"); });
+        v.column(|c| {
+            c.text("body");
+        });
+        v.overlay(|o| {
+            o.text("WATERMARK");
+        });
         v.modal(|m| {
             m.text("确认？");
-            m.popup_at("more", Placement::RightOf, |p| { p.text("子菜单"); });
+            m.popup_at("more", Placement::RightOf, |p| {
+                p.text("子菜单");
+            });
         });
 
         let layers: Vec<Layer> = v.roots.iter().map(|r| r.layer).collect();
-        assert_eq!(
-            layers,
-            vec![Layer::Content, Layer::Overlay, Layer::Modal, Layer::Popup]
-        );
+        assert_eq!(layers, vec![Layer::Content, Layer::Overlay, Layer::Modal, Layer::Popup]);
 
         // Content 无 owner；Overlay/Modal 的 owner 都是内容根；Popup 的 owner 是 Modal
         let content = 0;
@@ -1474,14 +1435,10 @@ mod tests {
         assert!(!v.roots[1].opts.hit_test_visible);
         // popup 锚点是 key
         assert_eq!(
-            v.roots[popup]
-                .opts
-                .anchor
-                .as_ref()
-                .map(|a| match &a.target {
-                    crate::track::AnchorTarget::Key(k) => k.clone(),
-                    _ => panic!("popup 锚点应为 key"),
-                }),
+            v.roots[popup].opts.anchor.as_ref().map(|a| match &a.target {
+                crate::track::AnchorTarget::Key(k) => k.clone(),
+                _ => panic!("popup 锚点应为 key"),
+            }),
             Some(Key::Str("more".into()))
         );
     }
@@ -1514,22 +1471,22 @@ mod tests {
     fn keyed_list_records_keys_in_order() {
         let mut v = ViewBuf::new();
         v.begin();
-        let items = vec![10u64, 20, 30];
+        let items = [10u64, 20, 30];
         v.column(|c| {
-            c.keyed_list(items.iter().copied(), |id| *id, |v, id| {
-                v.text(format!("item {id}"));
-            });
+            c.keyed_list(
+                items.iter().copied(),
+                |id| *id,
+                |v, id| {
+                    v.text(format!("item {id}"));
+                },
+            );
         });
 
         let root = &v.nodes[v.roots[0].node as usize];
         assert_eq!(root.children.len(), 3);
         assert_eq!(
             root.child_keys,
-            vec![
-                Some(Key::U64(10)),
-                Some(Key::U64(20)),
-                Some(Key::U64(30))
-            ]
+            vec![Some(Key::U64(10)), Some(Key::U64(20)), Some(Key::U64(30))]
         );
         // 顺序与 children 对齐
         let first = &v.nodes[root.children[0] as usize];
@@ -1577,7 +1534,11 @@ mod tests {
     fn second_content_root_panics() {
         let mut v = ViewBuf::new();
         v.begin();
-        v.column(|c| { c.text("a"); });
-        v.column(|c| { c.text("b"); }); // 顶层第二个内容根 → 应当被断言拦下
+        v.column(|c| {
+            c.text("a");
+        });
+        v.column(|c| {
+            c.text("b");
+        }); // 顶层第二个内容根 → 应当被断言拦下
     }
 }

@@ -113,6 +113,20 @@ pub(crate) struct RuntimeInner {
     pub(crate) timers: RefCell<Vec<crate::timer::Timer>>,
     /// 请求了下一动画帧的窗口（`request_animation`；每帧回调后清空，要持续就再请求）
     pub(crate) animating: RefCell<Vec<WindowId>>,
+    /// **回调执行期间**被取消的定时器 id（`refactor-plan` D9）。
+    ///
+    /// `take_due_timers` 会把到期的定时器**移出表**再执行回调（这样回调里能安全地
+    /// 再设定时器）。副作用是：回调内调 [`crate::timer::TimerHandle::cancel`] 时，
+    /// 该定时器已经不在表里 ⇒ `retain` 命中不到 ⇒ **取消无效**。
+    /// 关窗同理：`cancel_timers_of` 把表里该窗口的定时器删干净，
+    /// 而执行完的周期定时器又被 `reschedule_timer` 推回 ⇒ **永不触发的孤儿**，
+    /// 且一直持有闭包捕获。
+    ///
+    /// 这里记一份"已取消"名单，`reschedule_timer` 放回**之前**查它。
+    ///
+    /// 只有"回调执行期间取消"这种罕见情况才会进来（普通 `cancel()` 走 `retain` 即可），
+    /// 所以这个集合很小；`reschedule_timer` 消费后立即移除。
+    pub(crate) cancelled_timers: RefCell<std::collections::HashSet<u64>>,
     /// 每窗口的**逻辑像素尺寸**（帧驱动每帧写入；给 `view()` 里的"适应窗口"一类计算用）
     pub(crate) window_sizes: RefCell<Vec<(WindowId, lieui_geom::Size)>>,
 }
@@ -162,9 +176,7 @@ impl RequestQueue {
 
 impl std::fmt::Debug for RequestQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RequestQueue")
-            .field("pending", &self.len())
-            .finish()
+        f.debug_struct("RequestQueue").field("pending", &self.len()).finish()
     }
 }
 
@@ -185,6 +197,10 @@ impl Runtime {
     /// 注销窗口（关闭时调用）。其脏标志随之丢弃。
     pub fn unregister_window(&self, id: WindowId) {
         self.inner.windows.borrow_mut().retain(|(x, _)| *x != id);
+        // ★ `window_sizes` 也必须清（D59）：它只有 `push` / `find`、**从无删除路径**
+        //   （`set_window_size` 在帧驱动里每帧调用），此前 `unregister_window` 只删脏标志表
+        //   ⇒ **每次开关窗泄漏一条**（`WindowId` + `Size`），长时间开合窗会稳步增长。
+        self.inner.window_sizes.borrow_mut().retain(|(x, _)| *x != id);
     }
 
     /// 已注册窗口（按注册顺序）
@@ -282,13 +298,7 @@ impl Runtime {
 
     /// 取走某窗口的脏标志（帧循环消费一次）。未注册窗口返回 `EMPTY`。
     pub fn take_dirty(&self, id: WindowId) -> Dirty {
-        match self
-            .inner
-            .windows
-            .borrow_mut()
-            .iter_mut()
-            .find(|(x, _)| *x == id)
-        {
+        match self.inner.windows.borrow_mut().iter_mut().find(|(x, _)| *x == id) {
             Some((_, flags)) => std::mem::take(flags),
             None => Dirty::empty(),
         }
@@ -326,23 +336,37 @@ impl Runtime {
             .find(|(x, _)| *x == id)
             .map(|(_, s)| *s)
     }
+}
 
-    // ── view() 值守（防止在渲染函数里改状态）──
+// ── view() 值守（防止在渲染函数里改状态）──
 
-    /// 进入 `view()` 阶段（由 M1 的帧循环调用；当前只有单测在用）
-    #[allow(dead_code)]
-    pub(crate) fn begin_view(&self, id: WindowId) {
+/// `view()` 值守守卫（RAII）。
+///
+/// **为什么必须是 RAII 而不是 `begin_view()` / `end_view()` 成对调用**：
+/// `view()` 是**用户代码**，它一旦 panic，手写的 `end_view()` 永远不会执行 ⇒ `in_view`
+/// 永久停在 `Some(..)` ⇒ 此后该窗口所有 `Signal::set` 都会被 `assert_not_in_view` 拦下
+/// （debug panic / release 静默自激），**Runtime 被永久毒化**。
+/// 换成 `Drop` 之后，panic / `?` / 提前 return 都能正确恢复。
+pub(crate) struct ViewGuard<'a>(&'a Cell<Option<WindowId>>);
+
+impl Drop for ViewGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
+impl Runtime {
+    /// 进入 `view()` 阶段，返回的值守守卫（`Drop` 时自动退出）。
+    ///
+    /// 调用方**必须**持有返回值直到 `view()` 结束：
+    /// `let _guard = rt.begin_view(id); ...`
+    pub(crate) fn begin_view(&self, id: WindowId) -> ViewGuard<'_> {
         debug_assert!(
             self.inner.in_view.get().is_none(),
             "Runtime::begin_view 嵌套调用（应为每个窗口串行执行 view()）"
         );
         self.inner.in_view.set(Some(id));
-    }
-
-    /// 退出 `view()` 阶段
-    #[allow(dead_code)]
-    pub(crate) fn end_view(&self) {
-        self.inner.in_view.set(None);
+        ViewGuard(&self.inner.in_view)
     }
 
     pub fn is_in_view(&self) -> bool {
@@ -400,9 +424,16 @@ impl<T: 'static> Signal<T> {
         self.rt.mark_all(Dirty::VIEW);
     }
 
+    /// 禁止在 `view()` 内改状态。
+    ///
+    /// **always-on，不带 `debug_assertions` 门禁**（D8）。此前 release 下这条保护整个消失，
+    /// 用户在 `view()` 里误调 `Signal::set` 会变成"每帧 view → set → 再 view"的
+    /// **永久满帧自激**：100% CPU、不报错、没有日志。代价只是读一个 `Cell<Option<WindowId>>`，
+    /// 换来 release 下也能 fail-fast —— 设计 §四把它列为"违反会panic 或死循环"的硬纪律，
+    /// 就该无条件执行。
     #[track_caller]
     fn assert_not_in_view(&self) {
-        if cfg!(debug_assertions) && self.rt.is_in_view() {
+        if self.rt.is_in_view() {
             panic!(
                 "Signal::set/update 不能在 view() 内调用（会自我触发循环）：\
                  请把状态变更放到事件闭包或 on_tick/on_external 里"
@@ -611,17 +642,22 @@ mod tests {
         assert_eq!(rt.windows(), vec![w]);
     }
 
-    #[cfg(debug_assertions)]
+    /// 回归（D8 下半）：`assert_not_in_view` 必须 **always-on**。
+    ///
+    /// 这条测试此前带 `#[cfg(debug_assertions)]` —— **测试本身只在 debug 下存在**，
+    /// 这正是 D8 的证据：`assert_not_in_view` 被 `cfg!` 包着，release 下整条保护消失
+    /// ⇒ 用户在 `view()` 里 `set` 变成"每帧 view → set → 再 view"的**永久满帧自激**：
+    /// 100% CPU、不报错、无日志。
     #[test]
-    #[should_panic(expected = "view()")]
+    #[should_panic(expected = "不能在 view() 内调用")]
     fn set_inside_view_panics() {
         let rt = Runtime::new();
         let w = WindowId::new(1);
         rt.register_window(w);
         let s = Signal::new(&rt, 0);
 
-        rt.begin_view(w); // 模拟帧循环里的 view() 阶段
-        s.set(1); // 应当 panic
+        let _guard = rt.begin_view(w); // 模拟帧循环里的 view() 阶段
+        s.set(1); // 应当 panic（debug 与 release 都一样）
     }
 
     #[test]
@@ -631,12 +667,42 @@ mod tests {
         rt.register_window(w);
         let s = Signal::new(&rt, 7);
 
-        rt.begin_view(w);
+        let _guard = rt.begin_view(w);
         assert_eq!(s.get(), 7);
-        rt.end_view();
+        drop(_guard);
 
         // 只读不置脏
         assert!(rt.take_dirty(w).is_empty());
+    }
+
+    /// 回归（D8 上半）：`view()` 值守必须是 **RAII**。
+    ///
+    /// bug 表现：`begin_view()` / `end_view()` 是手写成对调用，而 `view()` 是**用户代码**，
+    /// 它 panic 时 `end_view()` 永远不会执行 ⇒ `in_view` 永久停在 `Some(..)`
+    /// ⇒ 此后该窗口所有 `Signal::set` 都被 `assert_not_in_view` 拦下，Runtime 被永久毒化。
+    #[test]
+    fn view_guard_recovers_after_panic() {
+        let rt = Runtime::new();
+        let w = WindowId::new(1);
+        rt.register_window(w);
+        let s = Signal::new(&rt, 1u32);
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // 静音预期的 panic 输出
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = rt.begin_view(w);
+            panic!("模拟用户 view() 里panic");
+        }));
+        std::panic::set_hook(prev);
+
+        assert!(panicked.is_err(), "应当确实panic 了");
+        assert!(
+            !rt.is_in_view(),
+            "panic 后 in_view 必须被守卫释放，否则 Runtime 被永久毒化"
+        );
+        // 关键：Runtime 仍可用
+        s.set(2);
+        assert_eq!(s.get(), 2);
     }
 
     #[test]
@@ -672,5 +738,49 @@ mod tests {
         let f = act1(&vm, Vm::pick, 42);
         f();
         assert_eq!(vm.last.get(), 42);
+    }
+    // ─────────────────── A7 回归（D59） ───────────────────
+
+    /// 回归（D59）：注销窗口必须清掉 `window_sizes` 里的尺寸记录。
+    ///
+    /// bug 表现：`set_window_size`（帧驱动每帧调用）只有 `push` / `find`，
+    /// **从无删除路径**，而 `unregister_window` 此前只删脏标志表
+    /// ⇒ **每次开关窗泄漏一条**（`WindowId` + `Size`）。
+    /// 长时间反复开关窗 ⇒ 稳步增长（且 `window_size()` 的线性查找越来越慢）。
+    #[test]
+    fn unregister_window_clears_the_recorded_size() {
+        let rt = Runtime::new();
+        let a = WindowId::new(1);
+        rt.register_window(a);
+        rt.set_window_size(a, lieui_geom::Size::new(200.0, 120.0));
+        assert_eq!(rt.window_size(a), Some(lieui_geom::Size::new(200.0, 120.0)));
+
+        rt.unregister_window(a);
+        assert!(
+            rt.window_size(a).is_none(),
+            "D59：注销窗口后尺寸记录必须清除，否则每次开关窗泄漏一条"
+        );
+        // 脏标志表也照旧清空（原有行为不能回退）
+        assert!(rt.windows().is_empty());
+    }
+
+    /// 反向：仍注册的窗口尺寸不受影响（确认上一条不是"清空全部"）。
+    #[test]
+    fn unregistering_one_window_keeps_the_other_size() {
+        let rt = Runtime::new();
+        let a = WindowId::new(1);
+        let b = WindowId::new(2);
+        rt.register_window(a);
+        rt.register_window(b);
+        rt.set_window_size(a, lieui_geom::Size::new(100.0, 50.0));
+        rt.set_window_size(b, lieui_geom::Size::new(300.0, 200.0));
+
+        rt.unregister_window(a);
+        assert!(rt.window_size(a).is_none());
+        assert_eq!(
+            rt.window_size(b),
+            Some(lieui_geom::Size::new(300.0, 200.0)),
+            "另一个窗口的尺寸不该被动到"
+        );
     }
 }

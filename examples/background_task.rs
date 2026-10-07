@@ -136,9 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let _id = app.window_erased(
-        WindowConfig::new()
-            .title("lieui · 后台任务")
-            .size(560.0, 360.0),
+        WindowConfig::new().title("lieui · 后台任务").size(560.0, 360.0),
         lieui::app::erased(Rc::clone(&vm)),
     );
 

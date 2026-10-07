@@ -12,9 +12,7 @@ use lieui_text::{TextEngine, TextSpec};
 use crate::cmd::CmdBuf;
 use crate::event::{Event, EventKind, EventView, KeyCode, NamedKey, PointerButton, Routing};
 use crate::render::scene::{Cull, Op, Scene, TextCache};
-use crate::track::{
-    FocusState, Kind, KindTag, Node, NodeId, ScrollDrag, Track, clamp_to_char_boundary,
-};
+use crate::track::{FocusState, Kind, KindTag, Node, NodeId, ScrollDrag, Track, clamp_to_char_boundary};
 use crate::transform::Affine;
 
 // ───────────────────────── 内置行为（M5）─────────────────────────
@@ -97,10 +95,7 @@ pub fn handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
 /// 不这样规定的话，"拖动一个未绑定的滑块"会得到一个**下次 view() 才回弹**的中间态，
 /// 它的可见性取决于"下一次 view() 何时发生"——不可预测，索性不允许。
 fn slider_handle(track: &mut Track, id: NodeId, ev: &EventView, cmd: &mut CmdBuf) {
-    let bound = track
-        .get(id)
-        .map(|n| n.bindings.value.is_some())
-        .unwrap_or(false);
+    let bound = track.get(id).map(|n| n.bindings.value.is_some()).unwrap_or(false);
     if !bound {
         return;
     }
@@ -123,9 +118,7 @@ fn slider_handle(track: &mut Track, id: NodeId, ev: &EventView, cmd: &mut CmdBuf
                 track.slider_drag_to(id, ev.pos.x);
             }
         }
-        EventKind::PointerReleased
-        | EventKind::PointerCaptureLost
-        | EventKind::PointerCanceled => {
+        EventKind::PointerReleased | EventKind::PointerCaptureLost | EventKind::PointerCanceled => {
             track.set_dragging(id, false);
             cmd.release(ev.pointer);
         }
@@ -138,10 +131,7 @@ fn checkbox_handle(track: &mut Track, id: NodeId, ev: &EventView) {
     if ev.kind != EventKind::Tapped {
         return;
     }
-    let bound = track
-        .get(id)
-        .map(|n| n.bindings.checked.is_some())
-        .unwrap_or(false);
+    let bound = track.get(id).map(|n| n.bindings.checked.is_some()).unwrap_or(false);
     if !bound {
         return; // 未绑定 ⇒ 交给用户处理器（模型说了算）
     }
@@ -153,10 +143,7 @@ fn switch_handle(track: &mut Track, id: NodeId, ev: &EventView) {
     if ev.kind != EventKind::Tapped {
         return;
     }
-    let bound = track
-        .get(id)
-        .map(|n| n.bindings.checked.is_some())
-        .unwrap_or(false);
+    let bound = track.get(id).map(|n| n.bindings.checked.is_some()).unwrap_or(false);
     if !bound {
         return;
     }
@@ -168,10 +155,7 @@ fn radio_handle(track: &mut Track, id: NodeId, ev: &EventView) {
     if ev.kind != EventKind::Tapped {
         return;
     }
-    let bound = track
-        .get(id)
-        .map(|n| n.bindings.text.is_some())
-        .unwrap_or(false);
+    let bound = track.get(id).map(|n| n.bindings.text.is_some()).unwrap_or(false);
     if !bound {
         return;
     }
@@ -185,10 +169,7 @@ fn radio_handle(track: &mut Track, id: NodeId, ev: &EventView) {
 /// **编辑只在有绑定时生效**（与滑块、复选框同一条规则）：没有绑定的输入框
 /// 是"只显示模型给出的文本"，否则编辑结果会在下次 `view()` 时被描述值覆盖。
 fn input_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
-    let bound = track
-        .get(id)
-        .map(|n| n.bindings.text.is_some())
-        .unwrap_or(false);
+    let bound = track.get(id).map(|n| n.bindings.text.is_some()).unwrap_or(false);
     let view = ev.summary();
 
     match view.kind {
@@ -230,9 +211,7 @@ fn input_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 return;
             }
             let text = match ev {
-                Event::Key {
-                    text: Some(t), ..
-                } => t.clone(),
+                Event::Key { text: Some(t), .. } => t.clone(),
                 _ => match view.key {
                     Some(KeyCode::Char(c)) => c.to_string(),
                     _ => return,
@@ -273,13 +252,7 @@ pub(crate) fn hscroll_parts(view: Rect, content: Size, offset: f32) -> Option<(R
     scroll_parts(view, content.width, offset, view.width, false)
 }
 
-fn scroll_parts(
-    view: Rect,
-    content_len: f32,
-    offset: f32,
-    view_len: f32,
-    vertical: bool,
-) -> Option<(Rect, Rect)> {
+fn scroll_parts(view: Rect, content_len: f32, offset: f32, view_len: f32, vertical: bool) -> Option<(Rect, Rect)> {
     // `partial_cmp != Some(Greater)` 覆盖两种"不画"：没溢出（`Less`/`Equal`），
     // 以及**任一尺寸是 NaN**（`partial_cmp` 返回 `None`）—— NaN 尺寸顺着布局流到几何
     // 计算里只会画出一条 NaN 长的轨道，不如不画。
@@ -287,9 +260,17 @@ fn scroll_parts(
         return None; // 没溢出就没滚动条
     }
     let (track_len, base, across) = if vertical {
-        (view.height - SCROLLBAR_INSET * 2.0, view.y + SCROLLBAR_INSET, view.right() - SCROLLBAR_WIDTH - SCROLLBAR_INSET)
+        (
+            view.height - SCROLLBAR_INSET * 2.0,
+            view.y + SCROLLBAR_INSET,
+            view.right() - SCROLLBAR_WIDTH - SCROLLBAR_INSET,
+        )
     } else {
-        (view.width - SCROLLBAR_INSET * 2.0, view.x + SCROLLBAR_INSET, view.bottom() - SCROLLBAR_WIDTH - SCROLLBAR_INSET)
+        (
+            view.width - SCROLLBAR_INSET * 2.0,
+            view.x + SCROLLBAR_INSET,
+            view.bottom() - SCROLLBAR_WIDTH - SCROLLBAR_INSET,
+        )
     };
     // 轨道长度必须为正。**窗口最小化时客户区是 0×0，布局会把容器高度算成负数**
     // （实测 -26px），那样下面 `clamp(MIN_THUMB_LEN, track_len)` 的下界就大于上界 ——
@@ -301,10 +282,15 @@ fn scroll_parts(
     let max_scroll = (content_len - view_len).max(0.0);
     // 上下界必须有序：轨道比"最小 thumb"还短时（矮容器），把下界收敛到轨道长度 ——
     // 于是 thumb 铺满整条轨道（仍是可见的"可滚动"提示，且 `travel = 0` 拖不动但不会崩）。
-    let thumb_len =
-        (track_len * view_len / content_len).clamp(MIN_THUMB_LEN.min(track_len), track_len);
+    let thumb_len = (track_len * view_len / content_len).clamp(MIN_THUMB_LEN.min(track_len), track_len);
     let travel = (track_len - thumb_len).max(0.0);
-    let pos = base + travel * if max_scroll > 0.0 { (offset / max_scroll).clamp(0.0, 1.0) } else { 0.0 };
+    let pos = base
+        + travel
+            * if max_scroll > 0.0 {
+                (offset / max_scroll).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
     let track_rect = if vertical {
         Rect::new(across, base, SCROLLBAR_WIDTH, track_len)
     } else {
@@ -322,8 +308,9 @@ fn scroll_parts(
 fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
     let view = ev.summary();
     // 一次性把需要的几何/状态拷出来（全是 Copy），避免与 get_mut 冲突
-    let Some((rect, content, drag, (ox, oy))) =
-        track.get(id).map(|n| (n.rect(), n.content_size, n.scroll_drag, n.scroll_offset))
+    let Some((rect, content, drag, (ox, oy))) = track
+        .get(id)
+        .map(|n| (n.rect(), n.content_size, n.scroll_drag, n.scroll_offset))
     else {
         return;
     };
@@ -340,8 +327,11 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 && view.pos.y >= thumb.y - SCROLLBAR_HIT_INFLATE
                 && view.pos.y <= thumb.bottom() + SCROLLBAR_HIT_INFLATE
             {
-                track.get_mut(id).unwrap().scroll_drag =
-                    Some(ScrollDrag { pointer: view.pointer, vertical: true, grab: view.pos.y - thumb.y });
+                track.get_mut(id).unwrap().scroll_drag = Some(ScrollDrag {
+                    pointer: view.pointer,
+                    vertical: true,
+                    grab: view.pos.y - thumb.y,
+                });
                 cmd.capture(view.pointer, id);
                 cmd.damage(id);
                 return;
@@ -352,8 +342,11 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 && view.pos.x >= thumb.x - SCROLLBAR_HIT_INFLATE
                 && view.pos.x <= thumb.right() + SCROLLBAR_HIT_INFLATE
             {
-                track.get_mut(id).unwrap().scroll_drag =
-                    Some(ScrollDrag { pointer: view.pointer, vertical: false, grab: view.pos.x - thumb.x });
+                track.get_mut(id).unwrap().scroll_drag = Some(ScrollDrag {
+                    pointer: view.pointer,
+                    vertical: false,
+                    grab: view.pos.x - thumb.x,
+                });
                 cmd.capture(view.pointer, id);
                 cmd.damage(id);
             }
@@ -364,14 +357,18 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 return;
             }
             if d.vertical {
-                let Some((track_r, thumb)) = vscroll_parts(rect, content, oy) else { return };
+                let Some((track_r, thumb)) = vscroll_parts(rect, content, oy) else {
+                    return;
+                };
                 let max_scroll = (content.height - rect.height).max(0.0);
                 let travel = (track_r.height - thumb.height).max(0.0);
                 let pos = (view.pos.y - d.grab - track_r.y).clamp(0.0, travel);
                 let ny = if travel > 0.0 { pos / travel * max_scroll } else { 0.0 };
                 track.set_scroll_offset(id, (ox, ny));
             } else {
-                let Some((track_r, thumb)) = hscroll_parts(rect, content, ox) else { return };
+                let Some((track_r, thumb)) = hscroll_parts(rect, content, ox) else {
+                    return;
+                };
                 let max_scroll = (content.width - rect.width).max(0.0);
                 let travel = (track_r.width - thumb.width).max(0.0);
                 let pos = (view.pos.x - d.grab - track_r.x).clamp(0.0, travel);
@@ -393,14 +390,7 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
 }
 
 /// 画滚动条（滚动容器专用；不溢出的轴不画）——由 [`draw_scrollbar_overlay`] 调用
-fn draw_scrollbars(
-    out: &mut Scene,
-    cull: &Cull,
-    n: &Node,
-    rect: Rect,
-    transform: Affine,
-    theme: &crate::theme::Theme,
-) {
+fn draw_scrollbars(out: &mut Scene, cull: &Cull, n: &Node, rect: Rect, transform: Affine, theme: &crate::theme::Theme) {
     if !n.layout.show_scrollbar {
         return;
     }
@@ -416,7 +406,12 @@ fn draw_scrollbars(
             cull,
             transform,
             thumb,
-            Op::Rect { rect: thumb, radius: SCROLLBAR_WIDTH * 0.5, color, transform },
+            Op::Rect {
+                rect: thumb,
+                radius: SCROLLBAR_WIDTH * 0.5,
+                color,
+                transform,
+            },
         );
     }
     if let Some((_, thumb)) = hscroll_parts(rect, n.content_size, n.scroll_offset.0) {
@@ -425,7 +420,12 @@ fn draw_scrollbars(
             cull,
             transform,
             thumb,
-            Op::Rect { rect: thumb, radius: SCROLLBAR_WIDTH * 0.5, color, transform },
+            Op::Rect {
+                rect: thumb,
+                radius: SCROLLBAR_WIDTH * 0.5,
+                color,
+                transform,
+            },
         );
     }
 }
@@ -588,9 +588,7 @@ fn push_input_text(
         color,
         transform,
     };
-    let bounds = op
-        .screen_bounds()
-        .unwrap_or(Rect::new(origin.x, origin.y, 1.0, 1.0));
+    let bounds = op.screen_bounds().unwrap_or(Rect::new(origin.x, origin.y, 1.0, 1.0));
     if cull.hit(&bounds) {
         out.push(op);
     } else {
@@ -618,13 +616,7 @@ pub(crate) fn draw(
 
     // ── ① 投影（kinds 之前，避免盖住自身内容）──
     if let Some(sh) = n.paint.shadow {
-        let r = Rect::new(
-            rect.x + sh.offset_x,
-            rect.y + sh.offset_y,
-            rect.width,
-            rect.height,
-        )
-        .inflate(sh.spread);
+        let r = Rect::new(rect.x + sh.offset_x, rect.y + sh.offset_y, rect.width, rect.height).inflate(sh.spread);
         push(
             out,
             cull,
@@ -641,11 +633,7 @@ pub(crate) fn draw(
     }
 
     // ── ② 背景（hover / pressed 配色在这里解析）──
-    let radius = n
-        .paint
-        .border_radius
-        .min(rect.width * 0.5)
-        .min(rect.height * 0.5);
+    let radius = n.paint.border_radius.min(rect.width * 0.5).min(rect.height * 0.5);
     if let Some(color) = resolve_background(n) {
         push(
             out,
@@ -800,12 +788,7 @@ pub(crate) fn draw(
             // 光标（键盘焦点 + 闪烁相位才画；相位由帧驱动翻转——聚焦才动，空闲帧零功耗）
             if n.interaction.focused && n.interaction.enabled && track.blink_on {
                 let cx = x0 + measure(&display, &n.text.spec, *caret);
-                let caret_rect = Rect::new(
-                    cx,
-                    rect.y + pad_top(n),
-                    1.5,
-                    (rect.height - pad_top(n) * 2.0).max(4.0),
-                );
+                let caret_rect = Rect::new(cx, rect.y + pad_top(n), 1.5, (rect.height - pad_top(n) * 2.0).max(4.0));
                 push(
                     out,
                     cull,
@@ -823,12 +806,7 @@ pub(crate) fn draw(
 
         Kind::Checkbox { checked } => {
             let box_size = rect.height.min(18.0);
-            let b = Rect::new(
-                rect.x,
-                rect.y + (rect.height - box_size) * 0.5,
-                box_size,
-                box_size,
-            );
+            let b = Rect::new(rect.x, rect.y + (rect.height - box_size) * 0.5, box_size, box_size);
             let border = n.paint.border_color.unwrap_or(text_color);
             push(
                 out,
@@ -860,16 +838,9 @@ pub(crate) fn draw(
             }
         }
 
-        Kind::Slider {
-            value, min, max, ..
-        } => {
+        Kind::Slider { value, min, max, .. } => {
             let track_h = 4.0;
-            let track = Rect::new(
-                rect.x,
-                rect.y + (rect.height - track_h) * 0.5,
-                rect.width,
-                track_h,
-            );
+            let track = Rect::new(rect.x, rect.y + (rect.height - track_h) * 0.5, rect.width, track_h);
             let accent = n.paint.background_color.unwrap_or(theme.accent);
             let knob = 12.0;
             // 归一化到 min..max（0..1 范围外也能画对；max <= min 时退化到 0）
@@ -904,12 +875,7 @@ pub(crate) fn draw(
                     transform,
                 },
             );
-            let k = Rect::new(
-                x,
-                rect.y + (rect.height - knob) * 0.5,
-                knob,
-                knob,
-            );
+            let k = Rect::new(x, rect.y + (rect.height - knob) * 0.5, knob, knob);
             push(
                 out,
                 cull,
@@ -940,33 +906,34 @@ pub(crate) fn draw(
                 cull,
                 transform,
                 t,
-                Op::Rect { rect: t, radius: track_h * 0.5, color: fill, transform },
+                Op::Rect {
+                    rect: t,
+                    radius: track_h * 0.5,
+                    color: fill,
+                    transform,
+                },
             );
             let r = track_h - 4.0;
-            let tx = if *on {
-                t.right() - r - 2.0
-            } else {
-                t.x + 2.0
-            };
+            let tx = if *on { t.right() - r - 2.0 } else { t.x + 2.0 };
             let thumb = Rect::new(tx, t.y + 2.0, r, r);
             push(
                 out,
                 cull,
                 transform,
                 thumb,
-                Op::Rect { rect: thumb, radius: r * 0.5, color: thumb_c, transform },
+                Op::Rect {
+                    rect: thumb,
+                    radius: r * 0.5,
+                    color: thumb_c,
+                    transform,
+                },
             );
         }
 
         // 单选：圆环 + 选中圆点（点 = accent）
         Kind::Radio { selected, .. } => {
             let d = rect.height.min(18.0);
-            let b = Rect::new(
-                rect.x,
-                rect.y + (rect.height - d) * 0.5,
-                d,
-                d,
-            );
+            let b = Rect::new(rect.x, rect.y + (rect.height - d) * 0.5, d, d);
             let border = n.paint.border_color.unwrap_or(theme.control_border);
             let accent = n.paint.background_color.unwrap_or(theme.accent);
             push(
@@ -1000,12 +967,7 @@ pub(crate) fn draw(
         }
 
         Kind::Progress { value } => {
-            let filled = Rect::new(
-                rect.x,
-                rect.y,
-                rect.width * value.clamp(0.0, 1.0),
-                rect.height,
-            );
+            let filled = Rect::new(rect.x, rect.y, rect.width * value.clamp(0.0, 1.0), rect.height);
             let accent = n.paint.background_color.unwrap_or(theme.accent);
             push(
                 out,
@@ -1215,11 +1177,7 @@ mod tests {
         layout(&mut t, Size::new(200.0, 200.0));
 
         let scene = build(&t);
-        let text_ops: Vec<_> = scene
-            .ops()
-            .iter()
-            .filter(|op| matches!(op, Op::Text { .. }))
-            .collect();
+        let text_ops: Vec<_> = scene.ops().iter().filter(|op| matches!(op, Op::Text { .. })).collect();
         assert_eq!(text_ops.len(), 1);
         match text_ops[0] {
             Op::Text { color, origin, .. } => {
@@ -1249,16 +1207,10 @@ mod tests {
         layout(&mut t, Size::new(200.0, 200.0));
 
         let rect = crate::layout::rect_of(&t, id);
-        let ink = lieui_text::TextEngine::ink_bounds("abc", &t.get(id).unwrap().text.spec)
-            .expect("abc 有墨迹");
+        let ink = lieui_text::TextEngine::ink_bounds("abc", &t.get(id).unwrap().text.spec).expect("abc 有墨迹");
 
         let scene = build(&t);
-        let Op::Text { origin, .. } = scene
-            .ops()
-            .iter()
-            .find(|op| matches!(op, Op::Text { .. }))
-            .unwrap()
-        else {
+        let Op::Text { origin, .. } = scene.ops().iter().find(|op| matches!(op, Op::Text { .. })).unwrap() else {
             unreachable!()
         };
         assert!(
@@ -1301,8 +1253,7 @@ mod tests {
         layout(&mut t, Size::new(200.0, 200.0));
 
         let rect = crate::layout::rect_of(&t, id);
-        let ink = lieui_text::TextEngine::ink_bounds("tooltip", &t.get(id).unwrap().text.spec)
-            .expect("tooltip 有墨迹");
+        let ink = lieui_text::TextEngine::ink_bounds("tooltip", &t.get(id).unwrap().text.spec).expect("tooltip 有墨迹");
         assert!(
             (rect.height - (ink.height() + 12.0)).abs() < 0.01,
             "盒高 = 墨迹高 + 上下 padding：{} vs {}",
@@ -1311,12 +1262,7 @@ mod tests {
         );
 
         let scene = build(&t);
-        let Op::Text { origin, .. } = scene
-            .ops()
-            .iter()
-            .find(|op| matches!(op, Op::Text { .. }))
-            .unwrap()
-        else {
+        let Op::Text { origin, .. } = scene.ops().iter().find(|op| matches!(op, Op::Text { .. })).unwrap() else {
             unreachable!()
         };
         let ink_top = origin.y + ink.top;
@@ -1366,11 +1312,7 @@ mod tests {
         layout(&mut t, Size::new(200.0, 200.0));
 
         let scene = build(&t);
-        let Op::Text { layout, origin, .. } = scene
-            .ops()
-            .iter()
-            .find(|op| matches!(op, Op::Text { .. }))
-            .unwrap()
+        let Op::Text { layout, origin, .. } = scene.ops().iter().find(|op| matches!(op, Op::Text { .. })).unwrap()
         else {
             unreachable!()
         };
@@ -1403,11 +1345,7 @@ mod tests {
         layout(&mut t, Size::new(200.0, 200.0));
 
         let scene = build(&t);
-        let Op::Text { layout, origin, .. } = scene
-            .ops()
-            .iter()
-            .find(|op| matches!(op, Op::Text { .. }))
-            .unwrap()
+        let Op::Text { layout, origin, .. } = scene.ops().iter().find(|op| matches!(op, Op::Text { .. })).unwrap()
         else {
             unreachable!()
         };
@@ -1515,7 +1453,10 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!((knob.x - (100.0 - 12.0) * 0.5).abs() < 0.01, "值 5/10 ⇒ 滑块在中点：{knob:?}");
+        assert!(
+            (knob.x - (100.0 - 12.0) * 0.5).abs() < 0.01,
+            "值 5/10 ⇒ 滑块在中点：{knob:?}"
+        );
     }
 
     #[test]
@@ -1523,12 +1464,7 @@ mod tests {
         let mut t = Track::new();
         let root = t.create(Kind::Box, None);
         t.add_root(Layer::Content, None, root);
-        let id = node(
-            &mut t,
-            Kind::Progress { value: 0.25 },
-            100.0,
-            8.0,
-        );
+        let id = node(&mut t, Kind::Progress { value: 0.25 }, 100.0, 8.0);
         t.get_mut(id).unwrap().paint = PaintStyle::new().background(green());
         t.append_child(root, id);
         layout(&mut t, Size::new(200.0, 200.0));
@@ -1679,9 +1615,7 @@ mod tests {
 
         let scene = build(&t);
         let sel = scene.ops().iter().find_map(|op| match op {
-            Op::Rect { rect, color, .. } if color.a > 0 && color.a < 200 && rect.width > 1.0 => {
-                Some(*rect)
-            }
+            Op::Rect { rect, color, .. } if color.a > 0 && color.a < 200 && rect.width > 1.0 => Some(*rect),
             _ => None,
         });
         let sel = sel.expect("有选区 ⇒ 画高亮");
@@ -1779,7 +1713,12 @@ mod tests {
         let travel = rect.height - 4.0 - thumb.height;
         let mid_y = rect.y + 2.0 + travel * 0.5;
         let mut cmds = CmdBuf::new();
-        handle(&mut t, sc, &pointer(EventKind::PointerMoved, Point::new(grab.x, mid_y + 4.0)), &mut cmds);
+        handle(
+            &mut t,
+            sc,
+            &pointer(EventKind::PointerMoved, Point::new(grab.x, mid_y + 4.0)),
+            &mut cmds,
+        );
         apply_cmds(&mut t, cmds.as_slice());
         let oy = t.scroll_offset(sc).1;
         let max_scroll = 200.0;
@@ -1787,7 +1726,12 @@ mod tests {
 
         // 松手：会话结束 + 捕获释放，offset 保留
         let mut cmds = CmdBuf::new();
-        handle(&mut t, sc, &pointer(EventKind::PointerReleased, Point::new(grab.x, mid_y)), &mut cmds);
+        handle(
+            &mut t,
+            sc,
+            &pointer(EventKind::PointerReleased, Point::new(grab.x, mid_y)),
+            &mut cmds,
+        );
         apply_cmds(&mut t, cmds.as_slice());
         assert!(t.get(sc).unwrap().scroll_drag.is_none());
         assert_eq!(t.captured_by(PointerId(0)), None);
@@ -1804,12 +1748,22 @@ mod tests {
         let (_, thumb) = vscroll_parts(rect, content, 100.0).unwrap();
 
         let mut cmds = CmdBuf::new();
-        handle(&mut t, sc, &pointer(EventKind::PointerPressed, Point::new(thumb.center().x, thumb.y + 0.5)), &mut cmds);
+        handle(
+            &mut t,
+            sc,
+            &pointer(EventKind::PointerPressed, Point::new(thumb.center().x, thumb.y + 0.5)),
+            &mut cmds,
+        );
         apply_cmds(&mut t, cmds.as_slice());
         let oy_before = t.scroll_offset(sc).1;
 
         // 只往下挪 1px ⇒ offset 只动一点点（≈ max_scroll / travel）
-        handle(&mut t, sc, &pointer(EventKind::PointerMoved, Point::new(thumb.center().x, thumb.y + 1.5)), &mut cmds);
+        handle(
+            &mut t,
+            sc,
+            &pointer(EventKind::PointerMoved, Point::new(thumb.center().x, thumb.y + 1.5)),
+            &mut cmds,
+        );
         apply_cmds(&mut t, cmds.as_slice());
         let oy = t.scroll_offset(sc).1;
         let step = 200.0 / (rect.height - 4.0 - thumb.height);
@@ -1825,10 +1779,11 @@ mod tests {
         let scene = build(&t);
         let rect = t.get(sc).unwrap().rect();
         let thumb_x_hit = scene.ops().iter().any(|op| match op {
-            Op::Rect { rect: r, color, .. } =>
+            Op::Rect { rect: r, color, .. } => {
                 *color == crate::theme::Theme::light().scrollbar_thumb
                     && r.width <= SCROLLBAR_WIDTH + 0.5
-                    && r.x + r.width <= rect.right() + 0.5,
+                    && r.x + r.width <= rect.right() + 0.5
+            }
             _ => false,
         });
         assert!(thumb_x_hit, "溢出 ⇒ 场景里有 thumb 矩形");
@@ -1894,10 +1849,7 @@ mod tests {
             .iter()
             .position(|op| matches!(op, Op::Rect { color, .. } if *color == Color::RED));
         let (thumb, item) = (thumb.expect("有 thumb"), item.expect("有内容底色"));
-        assert!(
-            thumb > item,
-            "滚动条（op #{thumb}）必须在内容（op #{item}）之后绘制"
-        );
+        assert!(thumb > item, "滚动条（op #{thumb}）必须在内容（op #{item}）之后绘制");
     }
 
     // ── 开关 / 单选 ──
@@ -1920,12 +1872,17 @@ mod tests {
             .ops()
             .iter()
             .filter_map(|op| match op {
-                Op::Rect { rect, color, radius, .. } if *radius >= 9.0 => Some((*rect, *color)),
+                Op::Rect {
+                    rect, color, radius, ..
+                } if *radius >= 9.0 => Some((*rect, *color)),
                 _ => None,
             })
             .collect();
         assert_eq!(tracks.len(), 2, "两个药丸轨道：{tracks:?}");
-        assert!(tracks.iter().any(|(r, c)| *c == accent && (r.width - 40.0).abs() < 0.5), "on ⇒ accent 轨道");
+        assert!(
+            tracks.iter().any(|(r, c)| *c == accent && (r.width - 40.0).abs() < 0.5),
+            "on ⇒ accent 轨道"
+        );
         assert!(
             tracks
                 .iter()
@@ -1939,16 +1896,34 @@ mod tests {
         let mut t = Track::new();
         let root = t.create(Kind::Box, None);
         t.add_root(Layer::Content, None, root);
-        let sel = node(&mut t, Kind::Radio { selected: true, value: "a".into() }, 18.0, 18.0);
-        let unsel = node(&mut t, Kind::Radio { selected: false, value: "b".into() }, 18.0, 18.0);
+        let sel = node(
+            &mut t,
+            Kind::Radio {
+                selected: true,
+                value: "a".into(),
+            },
+            18.0,
+            18.0,
+        );
+        let unsel = node(
+            &mut t,
+            Kind::Radio {
+                selected: false,
+                value: "b".into(),
+            },
+            18.0,
+            18.0,
+        );
         t.append_child(root, sel);
         t.append_child(root, unsel);
         layout(&mut t, Size::new(200.0, 100.0));
 
         let accent = crate::theme::Theme::light().accent;
         let scene = build(&t);
-        let dots = scene.ops().iter().filter(|op| matches!(op,
-            Op::Rect { color, .. } if *color == accent));
+        let dots = scene.ops().iter().filter(|op| {
+            matches!(op,
+            Op::Rect { color, .. } if *color == accent)
+        });
         assert_eq!(dots.count(), 1, "只有选中的那项画圆点");
     }
 
@@ -1980,10 +1955,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            borders.contains(&dark.focus_ring),
-            "焦点框用主题 token：{borders:?}"
-        );
+        assert!(borders.contains(&dark.focus_ring), "焦点框用主题 token：{borders:?}");
     }
 
     #[test]
@@ -2004,15 +1976,8 @@ mod tests {
 
         let scene = build(&t);
         let Op::Shadow {
-            rect,
-            std_dev,
-            color,
-            ..
-        } = scene
-            .ops()
-            .iter()
-            .find(|op| matches!(op, Op::Shadow { .. }))
-            .unwrap()
+            rect, std_dev, color, ..
+        } = scene.ops().iter().find(|op| matches!(op, Op::Shadow { .. })).unwrap()
         else {
             unreachable!()
         };

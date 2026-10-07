@@ -172,12 +172,7 @@ pub const K_AXIS_END: [CSSDirection; 4] = [
     CSSDirection::Top,
 ];
 
-pub const K_AXIS_DIM: [Dimension; 4] = [
-    Dimension::Width,
-    Dimension::Width,
-    Dimension::Height,
-    Dimension::Height,
-];
+pub const K_AXIS_DIM: [Dimension; 4] = [Dimension::Width, Dimension::Width, Dimension::Height, Dimension::Height];
 
 /// 判断是否为 Row 方向
 pub fn is_row_direction(dir: FlexDirection) -> bool {
@@ -191,14 +186,22 @@ pub fn is_column_direction(dir: FlexDirection) -> bool {
 
 /// 判断是否为 Reverse 方向
 pub fn is_reverse_direction(dir: FlexDirection) -> bool {
-    matches!(
-        dir,
-        FlexDirection::RowReverse | FlexDirection::ColumnReverse
-    )
+    matches!(dir, FlexDirection::RowReverse | FlexDirection::ColumnReverse)
 }
 
 /// NaN 作为"未定义"的值
 pub const VALUE_UNDEFINED: f32 = f32::NAN;
+
+/// ⚠️ **`VALUE_AUTO` 与 `VALUE_UNDEFINED` 是同一个值（都是 NaN）** —— 语义不同但**无法区分**。
+///
+/// 原因：`FlexStyle` 的所有长度字段都是裸`f32`，没有 `Option` 或单位标记。
+/// 引入单位标记（如 `enum Length { Px(f32), Percent(f32), Auto, Undefined }`）
+/// 是一次贯穿 `style_eq` / DSL / 写回的结构性改动，当前无真实用例支撑。
+///
+/// **因此两条硬规则**（由 `sentinels_are_distinguishable_only_by_is_nan` 钉住）：
+/// 1. 判定必须一律用 [`is_undefined`] / [`is_defined`]（即 `v.is_nan()`）；
+/// 2. **永远不要写 `v == VALUE_AUTO` 之类** —— `NaN != NaN` 恒为 `false`，
+///    这样的代码**编译通过、测试也可能通过，但语义是错的**。
 pub const VALUE_AUTO: f32 = f32::NAN;
 
 /// 判断值是否已定义（非 NaN）

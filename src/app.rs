@@ -28,13 +28,14 @@ use lieui_geom::Point;
 use crate::align::{AlignStats, align};
 use crate::cmd::{CmdBuf, apply_cmds};
 use crate::event::{Ctx, DispatchOutcome, Event, EventKind, EventView, PointerButton};
+use crate::event::{KeyCode, NamedKey};
 use crate::focus;
 use crate::hit;
 use crate::input::{self, InputEvent};
 use crate::layout::{self, LayoutStats};
 use crate::reactive::{Dirty, Runtime};
 use crate::render::{RenderStats, Renderer};
-use crate::track::{FocusState, NodeId, Track};
+use crate::track::{FocusState, Layer, NodeId, Track};
 use crate::view::ViewBuf;
 use crate::window::WindowId;
 
@@ -636,7 +637,9 @@ impl WindowCtx {
 
         // ① 响应式回路：任何 Signal 变更都只置 VIEW，这里统一消费一次（批处理免费）
         if dirty.contains(Dirty::VIEW) {
-            rt.begin_view(self.id);
+            // ★ 值守用 RAII 守卫（D8）：`view()` 是用户代码，panic 时手写的 `end_view()`
+            //   永远不会执行 ⇒ `in_view` 永久污染 ⇒ 此后所有 `Signal::set` 都被拦。
+            let _view_guard = rt.begin_view(self.id);
             // 主题快照先注入：DSL 在构造 widget 时把 token 烘焙进描述（设计 §3.10）
             self.view_buf.set_theme(rt.theme());
             self.view_buf.begin();
@@ -647,7 +650,7 @@ impl WindowCtx {
             // 打开着的右键菜单：同样**追加**一个弹层（声明式：会话结束就不追加，
             // 下一帧 align 的 stale 清理会把旧层删掉）
             self.push_context_menu_layer();
-            rt.end_view();
+            drop(_view_guard);
 
             st.view_ran = true;
             self.last_align = align(&mut self.track, &self.view_buf);
@@ -711,11 +714,7 @@ impl WindowCtx {
             self.track.mark_paint_dirty(card);
         }
 
-        let focused_input = self
-            .track
-            .focused
-            .filter(|f| self.track.input_is_active(*f))
-            .is_some();
+        let focused_input = self.track.focused.filter(|f| self.track.input_is_active(*f)).is_some();
 
         if !focused_input {
             if self.track.blink_on {
@@ -790,10 +789,7 @@ impl WindowCtx {
         // spinner 实例跨帧保留（主题 accent 变了才重建）
         let accent = rt.theme().accent;
         if self.sess.spinner.as_ref().map(|(c, _)| *c) != Some(accent) {
-            self.sess.spinner = Some((
-                accent,
-                crate::custom::cell(crate::overlay::Spinner::new(accent)),
-            ));
+            self.sess.spinner = Some((accent, crate::custom::cell(crate::overlay::Spinner::new(accent))));
         }
         let spinner = self.sess.spinner.as_ref().unwrap().1.clone();
         crate::overlay::push_busy_overlay(&mut self.view_buf, &items, spinner);
@@ -811,20 +807,26 @@ impl WindowCtx {
     ///
     /// `path` 是命中链（`path[0]` 最外层、`path.last()` 目标），M1 由调用方给出（测试/无头场景），
     /// M2 起由命中测试产出。
-    pub fn dispatch(
-        &mut self,
-        rt: &Runtime,
-        path: &[NodeId],
-        ev: &Event,
-    ) -> DispatchOutcome {
+    pub fn dispatch(&mut self, rt: &Runtime, path: &[NodeId], ev: &Event) -> DispatchOutcome {
         let mut cmds = CmdBuf::new();
 
-        // ① 框架内置行为（先于用户处理器；直接拿 `&mut Track`，不占处理器槽位）
-        //    传 `&Event` 而非摘要：IME 预编辑带字符串 payload
-        crate::widgets::handle_route(&mut self.track, path, ev, &mut cmds);
-
-        // ② 用户处理器（两段式：只读收集 → 调用；处理器只拿 `&mut Ctx`）
+        // ① 用户处理器（两段式：只读收集 → 调用；处理器只拿 `&mut Ctx`）
+        //
+        // ★ **用户先于内置**（D54）。此前是"内置先跑、用户后跑"，于是用户的
+        //   `cx.mark_handled()` 只能当马后炮：它既无法阻止**已跑完**的内置行为，
+        //   也无法阻止**后续**的内置行为 —— 语义上等于没有。
+        //   现在 `handled` 真正成为"事件已被消费"的开关：标记后内置行为不再执行，
+        //   与 WinUI / WPF 的 `Handled` 语义一致。
         let out = crate::event::dispatch(rt, self.id, &self.track, path, ev, &mut cmds);
+
+        // ② 框架内置行为（未 `handled` 时兜底；直接拿 `&mut Track`，不占处理器槽位）
+        //
+        //   传 `&Event` 而非摘要：IME 预编辑带字符串 payload。
+        //   放在用户之后是**语义要求**，不是性能考量 —— 控件的默认行为
+        //   （勾选切换、输入插入、拖拽跟踪）应当是"用户没接手时的兜底"。
+        if !out.handled {
+            crate::widgets::handle_route(&mut self.track, path, ev, &mut cmds);
+        }
 
         // ③ 落命令（借用释放后统一写树）
         if !cmds.is_empty() {
@@ -836,11 +838,7 @@ impl WindowCtx {
         if matches!(
             ev.kind(),
             EventKind::CharacterReceived | EventKind::KeyDown | EventKind::PointerPressed
-        ) && self
-            .track
-            .focused
-            .filter(|f| self.track.input_is_active(*f))
-            .is_some()
+        ) && self.track.focused.filter(|f| self.track.input_is_active(*f)).is_some()
         {
             self.track.blink_on = true;
             self.sess.next_blink = Some(Instant::now() + BLINK_PERIOD);
@@ -903,13 +901,10 @@ impl WindowCtx {
 
     /// 命中链里**最深**那个声明了右键菜单的节点（`DescRef::context_menu`）
     fn context_menu_target(&self, pos: Point) -> Option<(NodeId, crate::menu::ContextMenu)> {
-        self.hit(pos)
-            .into_iter()
-            .rev()
-            .find_map(|id| {
-                let n = self.track.get(id)?;
-                n.context_menu.clone().map(|menu| (id, menu))
-            })
+        self.hit(pos).into_iter().rev().find_map(|id| {
+            let n = self.track.get(id)?;
+            n.context_menu.clone().map(|menu| (id, menu))
+        })
     }
 
     /// 打开着的菜单弹层的层根节点（按 [`crate::menu::CTX_MENU_TAG`] 认领）
@@ -981,11 +976,9 @@ impl WindowCtx {
         {
             let path = hit::path_to(&self.track, tapped);
             if path.contains(&root)
-                && !path.iter().any(|id| {
-                    self.track
-                        .get(*id)
-                        .is_some_and(|n| !n.interaction.enabled)
-                })
+                && !path
+                    .iter()
+                    .any(|id| self.track.get(*id).is_some_and(|n| !n.interaction.enabled))
             {
                 close = true;
             }
@@ -1035,12 +1028,7 @@ impl WindowCtx {
 
     /// 把打开着的右键菜单**注入**进本帧的描述树（`frame()` 在 `align` 之前调）
     fn push_context_menu_layer(&mut self) {
-        let Some((at, builder)) = self
-            .sess
-            .ctx_menu
-            .as_ref()
-            .map(|s| (s.at, s.builder.clone()))
-        else {
+        let Some((at, builder)) = self.sess.ctx_menu.as_ref().map(|s| (s.at, s.builder.clone())) else {
             return;
         };
         self.view_buf.push_context_menu(at, &builder);
@@ -1090,8 +1078,7 @@ impl WindowCtx {
             return;
         };
         let changed = self.track.get(node).is_some_and(|n| {
-            n.paint.background_color != Some(theme.tooltip_background)
-                || n.text.color != theme.tooltip_text
+            n.paint.background_color != Some(theme.tooltip_background) || n.text.color != theme.tooltip_text
         });
         if !changed {
             return;
@@ -1104,17 +1091,14 @@ impl WindowCtx {
     }
 
     /// 每帧推进 tooltip 会话（到时浮出；目标失效/文本消失 ⇒ 收回）。
-    pub fn update_tooltip(&mut self, now: Instant) {
+    pub fn update_tooltip(&mut self, now: Instant) -> bool {
         self.sync_tooltip_theme();
         let theme = self.renderer.options().theme;
         let mut open: Option<(NodeId, String)> = None;
         let mut close: Option<crate::track::RootId> = None;
 
         if let Some(sess) = &mut self.sess.tooltip {
-            let alive = self
-                .track
-                .get(sess.target)
-                .is_some_and(|n| n.tooltip.is_some());
+            let alive = self.track.get(sess.target).is_some_and(|n| n.tooltip.is_some());
             if !alive {
                 if let Some(rid) = sess.layer.take() {
                     close = Some(rid);
@@ -1129,6 +1113,7 @@ impl WindowCtx {
             }
         }
 
+        let changed = open.is_some() || close.is_some();
         if let Some(rid) = close {
             self.track.remove_root(rid);
         }
@@ -1138,6 +1123,7 @@ impl WindowCtx {
                 sess.layer = Some(rid);
             }
         }
+        changed
     }
 
     /// 建 tooltip 层（锚到目标节点右侧，放不下自动翻到左侧/钳到视口）。
@@ -1179,6 +1165,30 @@ impl WindowCtx {
 
     /// 键盘事件：发给焦点节点的祖先链（无焦点时发给内容根，冒泡到根）
     pub fn key(&mut self, rt: &Runtime, ev: Event) -> DispatchOutcome {
+        // ★ Escape 关闭最上层的可关闭浮层（D15）。
+        //
+        // 为什么放在 `dispatch` **之前**：浮层关闭是**框架级**响应，
+        // 不该依赖"恰好有节点监听 KeyDown"。此前 `NamedKey::Escape` 只有枚举、
+        // 无任何消费点 —— 菜单 / 弹层一旦打开就**只能用鼠标点外面关掉**，
+        // 这是所有 GUI 框架的基线能力。
+        //
+        // 语义与 WinUI / WPF 一致：**只关最上面一个**。菜单开着子菜单时，
+        // 期望一次 Escape 只关子菜单，而不是把整串浮层一起关掉。
+        // 因此复用 `dismiss_on_outside_click` 这个既有的"可关闭"配置，
+        // 不另立一套开关。
+        //
+        // ★★ 必须同时校验 `code`：Escape 是 **`KeyCode::Named(NamedKey::Escape)`**
+        //   而不是 `EventKind` 的变体。只判`kind == KeyDown` 会让**任意按键**
+        //   都关闭弹层 —— 那是个很容易写出来、且很难在测试里发现的严重错误。
+        if ev.kind() == EventKind::KeyDown
+            && ev.summary().key == Some(KeyCode::Named(NamedKey::Escape))
+            && let Some(dismissed) = self.escape_dismiss_topmost()
+        {
+            let path = hit::path_to(&self.track, dismissed);
+            let out = self.dispatch(rt, &path, &Event::simple(EventKind::Dismissed));
+            return DispatchOutcome { handled: true, ..out };
+        }
+
         let path = match self.track.focused {
             Some(id) => hit::path_to(&self.track, id),
             None => match self.content_root() {
@@ -1192,6 +1202,18 @@ impl WindowCtx {
         self.dispatch(rt, &path, &ev)
     }
 
+    /// z序**最上面**那个可关闭浮层的层根节点（`Dismissed` 事件的收件人）。
+    ///
+    /// 与 `input::dismiss_outside_popups` 的区别：后者是"点击在**所有**弹层外"
+    /// ⇒ 一次性全关；本函数是"Escape" ⇒ **只关最上面一个**。
+    /// 用 `z_ordered_roots_top_down()` 保证与绘制顺序一致（D6 建立的同源遍历）。
+    fn escape_dismiss_topmost(&self) -> Option<NodeId> {
+        self.track.z_ordered_roots_top_down().into_iter().find_map(|r| {
+            let closable = matches!(r.layer, Layer::Popup | Layer::Tooltip) && r.opts.dismiss_on_outside_click;
+            closable.then_some(r.node)
+        })
+    }
+
     /// Tab / Shift+Tab 焦点迁移（框架默认行为），并派发 `LostFocus` / `GotFocus`
     pub fn tab(&mut self, rt: &Runtime, forward: bool) -> Option<NodeId> {
         let target = focus::next_tab(&self.track, self.track.focused, forward);
@@ -1202,10 +1224,7 @@ impl WindowCtx {
     /// 程序化聚焦（并派发 `LostFocus` / `GotFocus`）
     pub fn focus(&mut self, rt: &Runtime, target: Option<NodeId>, state: FocusState) {
         let change = focus::set_focus(&mut self.track, target, state);
-        for (id, kind) in [
-            (change.lost, EventKind::LostFocus),
-            (change.got, EventKind::GotFocus),
-        ] {
+        for (id, kind) in [(change.lost, EventKind::LostFocus), (change.got, EventKind::GotFocus)] {
             if let Some(id) = id {
                 let path = hit::path_to(&self.track, id);
                 self.dispatch(rt, &path, &Event::simple(kind));
@@ -1219,15 +1238,25 @@ impl WindowCtx {
     /// ① 到期定时器（回调在表外执行 ⇒ 回调里能安全地再建定时器）
     /// ② 若上一帧请求过动画帧 ⇒ `ViewModel::on_animation`（带 `dt`）
     /// ③ `ViewModel::on_tick`（框架既有钩子：光标闪烁相位等）
-    pub fn tick(&mut self, rt: &Runtime, now: Instant) {
+    ///
+    /// 返回**本轮是否真的做了事**（消费了定时器 / 动画帧 / 产生了命令）。
+    ///
+    /// ★ 这个返回值是帧调度收敛的关键（`refactor-plan` 主线 B）：
+    /// `RedrawRequested` 之外的唤醒点（`about_to_wait` / `user_event`）只**消费**定时器、
+    /// **不渲染**；它们靠这个返回值决定"要不要 `request_redraw`"。
+    /// 少了这一步 ⇒ 定时器回调改了状态却没有任何重绘请求 ⇒ **画面停在旧帧（停帧）**。
+    pub fn tick(&mut self, rt: &Runtime, now: Instant) -> bool {
         // tooltip 会话推进（到时浮出 / 目标失效收回）
-        self.update_tooltip(now);
+        let tooltip_ran = self.update_tooltip(now);
         let dt = now.saturating_duration_since(self.last_tick);
         self.last_tick = now;
         let mut cx = Ctx::new(rt, self.id, EventView::tick());
+        let mut did_work = tooltip_ran;
 
         // ① 定时器：取走到期的（表外执行，避免回调里借用到同一张表）
-        for mut timer in rt.take_due_timers(self.id, now) {
+        let due = rt.take_due_timers(self.id, now);
+        did_work |= !due.is_empty();
+        for mut timer in due {
             if let Some(mut cb) = timer.take_cb() {
                 cb(&mut cx);
                 timer.cb = Some(cb); // 周期定时器要还回去
@@ -1238,6 +1267,7 @@ impl WindowCtx {
         // ② 动画帧（经典 RAF 语义：回调里再 `cx.request_animation()` 才继续）
         if rt.take_animation_request(self.id) {
             self.view.on_animation(&mut cx, now, dt);
+            did_work = true;
         }
 
         // ③ 既有逐帧钩子
@@ -1247,7 +1277,9 @@ impl WindowCtx {
             let cmds = cx.take_cmds();
             let d = apply_cmds(&mut self.track, &cmds);
             rt.mark(self.id, d);
+            did_work = true;
         }
+        did_work
     }
 
     /// 外部数据（后台线程 → UI 线程）
@@ -1272,7 +1304,17 @@ impl WindowCtx {
     /// 关闭请求：`Cancel` 表示拦截
     pub fn close_requested(&mut self, rt: &Runtime) -> CloseAction {
         let mut cx = Ctx::new(rt, self.id, EventView::simple(EventKind::Unloaded));
-        self.view.on_close_request(&mut cx)
+        let action = self.view.on_close_request(&mut cx);
+        // ★ 命令缓冲必须落树（D4）。此前建了 `cx`、调了回调，却从不 `take_cmds()` ——
+        //   于是关闭回调里的 `cx.damage` / `cx.focus` / `cx.scroll_to` 全部静默失效，
+        //   且没有任何报错。和 `external` / `tick` 走同一套收尾。
+        // 无论用户是拦截(Cancel)还是确认关闭，落树都有意义：拦截时用户可能想改 UI。
+        if !cx.cmds().is_empty() {
+            let cmds = cx.take_cmds();
+            let d = apply_cmds(&mut self.track, &cmds);
+            rt.mark(self.id, d);
+        }
+        action
     }
 }
 
@@ -1343,8 +1385,12 @@ impl App {
     /// → frame）；返回每个窗口的 `FrameStats`。
     ///
     /// 顺带消费 [`Runtime::take_pending_external`]（本地投递队列）：**没有平台唤醒器**
-    /// 时（无头测试、自己驱动帧）这就是"事件循环"，后台任务/自定义事件的投递会自动落地；
-    /// 有平台时队列恒空 ⇒ 零开销。
+    /// 时（无头测试、自己驱动帧）这就是"事件循环"，后台任务/自定义事件的投递会自动落地。
+    ///
+    /// ⚠️ 这里**不能**再假设"有平台时队列恒空"（A6 修复前的注释正是这么写的，而它是错的）：
+    /// `TaskCtx` 持spawn 时的槽位快照，`run()` 之前 spawn 的任务会往`Local` 队列投递。
+    /// 现在 `platform::Runner::tick` 也 drain 这个队列，且 `set_waker` 会给旧队列
+    /// 装上转发器（见 [`crate::task`]），两边都 drain 之后该假设才成立。
     pub fn frame_all(&mut self) -> Vec<(WindowId, FrameStats)> {
         let rt = self.rt.clone();
         for (w, data) in rt.take_pending_external() {
@@ -1379,15 +1425,10 @@ impl App {
     }
 
     /// 立即以**已擦除句柄**开窗（`Ctx` 请求走 [`App::drain_requests`]）
-    pub fn open_window_erased(
-        &mut self,
-        cfg: WindowConfig,
-        view: Rc<dyn WindowView>,
-    ) -> WindowId {
+    pub fn open_window_erased(&mut self, cfg: WindowConfig, view: Rc<dyn WindowView>) -> WindowId {
         let id = WindowId::new(self.next_window);
         self.next_window += 1;
-        self.windows
-            .push(WindowCtx::new(id, cfg, view, &self.rt));
+        self.windows.push(WindowCtx::new(id, cfg, view, &self.rt));
         id
     }
 
@@ -1450,13 +1491,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{
-        Event, EventKind, KeyCode, Modifiers, NamedKey, PointerButton, PointerId,
-    };
+    use crate::event::{Event, EventKind, KeyCode, Modifiers, NamedKey, PointerButton, PointerId};
     use crate::reactive::{Signal, act1};
-    use std::time::Duration;
     use crate::theme::Theme;
     use crate::track::{Kind, Layer, Placement};
+    use std::time::Duration;
 
     // ── 一个 counter ViewModel（就是 §九 示例的形态，去掉 winit 部分）──
 
@@ -1511,10 +1550,7 @@ mod tests {
         let (_, st) = &stats[0];
 
         assert!(st.view_ran);
-        assert_eq!(
-            st.align.created, 5,
-            "column + 2 text + row + 1 button = 5 个节点"
-        );
+        assert_eq!(st.align.created, 5, "column + 2 text + row + 1 button = 5 个节点");
         assert!(st.damage_all, "首次挂载整窗脏");
 
         let w = app.window_ctx(id).unwrap();
@@ -1568,10 +1604,13 @@ mod tests {
         let button = w.track().children(row)[0];
         let path = vec![root, row, button];
 
-        let out = app
-            .window_ctx_mut(id)
-            .unwrap()
-            .dispatch(&rt, &path, &Event::Simple { kind: EventKind::Tapped });
+        let out = app.window_ctx_mut(id).unwrap().dispatch(
+            &rt,
+            &path,
+            &Event::Simple {
+                kind: EventKind::Tapped,
+            },
+        );
         assert_eq!(out.invoked, 1, "只有按钮注册了处理器");
         assert_eq!(vm.count.get(), 1, "闭包直接改了 Signal");
 
@@ -1599,7 +1638,12 @@ mod tests {
 
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
-        let id = app.window(WindowConfig::new(), Once { count: Signal::new(&rt, 0) });
+        let id = app.window(
+            WindowConfig::new(),
+            Once {
+                count: Signal::new(&rt, 0),
+            },
+        );
         app.frame_all();
 
         // 命中链：内容根 → 那个文本节点（处理器挂在文本节点上）
@@ -1611,9 +1655,13 @@ mod tests {
         let d0 = rt.peek_dirty(id);
         assert!(d0.is_empty(), "空闲窗口不该带脏标志");
 
-        app.window_ctx_mut(id)
-            .unwrap()
-            .dispatch(&rt, &path, &Event::Simple { kind: EventKind::Tapped });
+        app.window_ctx_mut(id).unwrap().dispatch(
+            &rt,
+            &path,
+            &Event::Simple {
+                kind: EventKind::Tapped,
+            },
+        );
 
         let stats = app.frame_all();
         let st = &stats[0].1;
@@ -1740,9 +1788,7 @@ mod tests {
         let id = app.window(WindowConfig::new(), Ext { got: got.clone() });
         app.frame_all();
 
-        app.window_ctx_mut(id)
-            .unwrap()
-            .external(&rt, ExternalData::new(42u32));
+        app.window_ctx_mut(id).unwrap().external(&rt, ExternalData::new(42u32));
         assert_eq!(got.get(), 42);
         assert!(app.frame_all()[0].1.paint_pending);
     }
@@ -1768,6 +1814,42 @@ mod tests {
         assert_eq!(
             app.window_ctx_mut(id).unwrap().close_requested(&rt),
             CloseAction::Cancel
+        );
+    }
+
+    /// 回归（D4）：`close_requested` 必须把 `Ctx` 的命令缓冲落树。
+    ///
+    /// bug 表现：此前建了 `cx`、调了回调，却从不 `take_cmds()` ——
+    /// 关闭回调里排队的 `damage` / `focus` / `scroll_to` **全部静默失效**，
+    /// 且没有任何报错（用户只在"关窗前想改一下 UI"这种场景才会撞上）。
+    #[test]
+    fn close_request_applies_queued_commands() {
+        struct Closer;
+        impl ViewModel for Closer {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text("g");
+                });
+            }
+            fn on_close_request(self: &Rc<Self>, cx: &mut Ctx) -> CloseAction {
+                cx.damage_all(); // 排队一条"整窗脏"，不需要 NodeId
+                CloseAction::Cancel
+            }
+        }
+
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let id = app.window(WindowConfig::new(), Closer);
+        app.frame_all();
+
+        let w = app.window_ctx_mut(id).unwrap();
+        let _ = w.track_mut().take_damage(); // 确保脏区是空的
+        assert_eq!(w.close_requested(&rt), CloseAction::Cancel);
+
+        let (damage, all) = w.track_mut().take_damage();
+        assert!(
+            all || !damage.is_empty(),
+            "关闭回调里的 cx.damage_all() 必须落树（修复前这里恒为空）"
         );
     }
 
@@ -1803,9 +1885,7 @@ mod tests {
         let (rt, mut app, _, id) = setup();
         app.frame_all();
 
-        app.window_ctx_mut(id)
-            .unwrap()
-            .set_size(&rt, Size::new(200.0, 150.0));
+        app.window_ctx_mut(id).unwrap().set_size(&rt, Size::new(200.0, 150.0));
         let st = app.frame_all()[0].1.clone();
         assert!(st.layout.ran);
         assert!(st.layout.moved > 0, "尺寸变化应移动节点");
@@ -1870,8 +1950,22 @@ mod tests {
         let away = Point::new(5.0, 290.0);
 
         let w = app.window_ctx_mut(id).unwrap();
-        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: start, button: PointerButton::Left });
-        let up = w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: away, button: PointerButton::Left });
+        w.pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: start,
+                button: PointerButton::Left,
+            },
+        );
+        let up = w.pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: away,
+                button: PointerButton::Left,
+            },
+        );
 
         assert_eq!(up.tapped, None);
         assert_eq!(vm.count.get(), 0);
@@ -1890,7 +1984,13 @@ mod tests {
         let pos = center(w.track(), button);
 
         let w = app.window_ctx_mut(id).unwrap();
-        let out = w.pointer(&rt, InputEvent::Move { pointer: PointerId(0), pos });
+        let out = w.pointer(
+            &rt,
+            InputEvent::Move {
+                pointer: PointerId(0),
+                pos,
+            },
+        );
         assert!(out.events > 0);
         assert!(w.track().state(button).pointer_over);
         assert!(w.track().state(root).pointer_over, "整条链都置 pointer_over");
@@ -1962,10 +2062,7 @@ mod tests {
 
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
-        let id = app.window(
-            WindowConfig::new().size(200.0, 100.0),
-            List { n: Signal::new(&rt, 0) },
-        );
+        let id = app.window(WindowConfig::new().size(200.0, 100.0), List { n: Signal::new(&rt, 0) });
         app.frame_all();
 
         // 手工把内容根变成滚动容器（M5 的 Scroll 组件会做这件事）
@@ -2098,8 +2195,7 @@ mod tests {
             let w = app.window_ctx_mut(id).unwrap();
             let root = w.content_root().unwrap();
             let block = w.track().children(root)[0];
-            w.track_mut().get_mut(block).unwrap().paint.background_color =
-                Some(lieui_geom::Color::GREEN);
+            w.track_mut().get_mut(block).unwrap().paint.background_color = Some(lieui_geom::Color::GREEN);
             w.track_mut().damage_rect(Rect::new(150.0, 90.0, 10.0, 10.0));
             rt.mark(id, Dirty::PAINT | Dirty::PRESENT);
         }
@@ -2135,10 +2231,7 @@ mod tests {
         let vm = Rc::new(Counter {
             count: Signal::new(&rt, 0),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(400.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
 
         let w = app.window_ctx(id).unwrap();
@@ -2149,8 +2242,22 @@ mod tests {
 
         {
             let w = app.window_ctx_mut(id).unwrap();
-            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos, button: PointerButton::Left });
-            w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos, button: PointerButton::Left });
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos,
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos,
+                    button: PointerButton::Left,
+                },
+            );
         }
         assert_eq!(vm.count.get(), 1);
 
@@ -2179,9 +2286,7 @@ mod tests {
             assert_eq!(ctx.pixmap().height(), 600);
         }
 
-        app.window_ctx_mut(id)
-            .unwrap()
-            .set_size(&rt, Size::new(320.0, 240.0));
+        app.window_ctx_mut(id).unwrap().set_size(&rt, Size::new(320.0, 240.0));
         let st = app.frame_all()[0].1.clone();
         assert!(st.damage_all);
         assert!(st.render.raster.rasterized);
@@ -2219,11 +2324,7 @@ mod tests {
             fn on_tick(self: &Rc<Self>, cx: &mut Ctx, _now: Instant) {
                 if self.open.get() {
                     self.open.set(false);
-                    crate::app::open_window(
-                        cx,
-                        WindowConfig::new().title("panel").size(120.0, 60.0),
-                        Panel,
-                    );
+                    crate::app::open_window(cx, WindowConfig::new().title("panel").size(120.0, 60.0), Panel);
                 }
             }
         }
@@ -2240,9 +2341,7 @@ mod tests {
 
         // 请求开窗（队列化，不立即建窗）
         vm.open.set(true);
-        app.window_ctx_mut(root_id)
-            .unwrap()
-            .tick(&rt, Instant::now());
+        app.window_ctx_mut(root_id).unwrap().tick(&rt, Instant::now());
         assert!(app.has_pending_requests());
 
         let (opened, closed) = app.drain_requests();
@@ -2284,9 +2383,7 @@ mod tests {
             },
         );
         app.frame_all();
-        app.window_ctx_mut(id)
-            .unwrap()
-            .tick(&rt, Instant::now());
+        app.window_ctx_mut(id).unwrap().tick(&rt, Instant::now());
 
         let (opened, closed) = app.drain_requests();
         assert!(opened.is_empty());
@@ -2305,9 +2402,7 @@ mod tests {
             assert_eq!(ctx.scale_factor(), 1.0);
         }
 
-        app.window_ctx_mut(id)
-            .unwrap()
-            .set_scale_factor(&rt, 2.0);
+        app.window_ctx_mut(id).unwrap().set_scale_factor(&rt, 2.0);
         let st = app.frame_all()[0].1.clone();
         assert!(!st.layout.ran, "DPI 变化不吃布局");
         assert!(st.paint_pending);
@@ -2317,7 +2412,7 @@ mod tests {
         assert_eq!(ctx.pixmap().height(), 1200);
         assert_eq!(ctx.size(), Size::new(800.0, 600.0), "逻辑尺寸不变");
         // 命中测试用逻辑坐标：内容根仍是 800×600 的逻辑矩形
-        assert_eq!(app.window_ctx(id).unwrap().hit_target(Point::new(10.0, 10.0)).is_some(), true);
+        assert!(app.window_ctx(id).unwrap().hit_target(Point::new(10.0, 10.0)).is_some());
     }
 
     /// DPI 变化要**告知应用**：`on_scale_changed` 收到新比例，`scale_epoch` 递增
@@ -2343,12 +2438,7 @@ mod tests {
         let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
-        let id = app.window(
-            WindowConfig::new().size(800.0, 600.0),
-            Vm {
-                seen: Rc::clone(&seen),
-            },
-        );
+        let id = app.window(WindowConfig::new().size(800.0, 600.0), Vm { seen: Rc::clone(&seen) });
         app.frame_all();
         assert!(seen.borrow().is_empty(), "没变过就不该通知");
         assert_eq!(app.window_ctx(id).unwrap().scale_epoch(), 0);
@@ -2356,11 +2446,7 @@ mod tests {
         let ctx = app.window_ctx_mut(id).unwrap();
         assert!(ctx.set_scale_factor(&rt, 2.0), "变了 ⇒ true");
         assert_eq!(ctx.scale_epoch(), 1);
-        assert_eq!(
-            ctx.physical_size(),
-            Size::new(1600.0, 1200.0),
-            "物理尺寸 = 逻辑 × 2"
-        );
+        assert_eq!(ctx.physical_size(), Size::new(1600.0, 1200.0), "物理尺寸 = 逻辑 × 2");
 
         // 同一个值 / 非法值：都不算"变化"
         assert!(!ctx.set_scale_factor(&rt, 2.0), "重复设同一个值 ⇒ false");
@@ -2370,10 +2456,7 @@ mod tests {
         assert_eq!(&*seen.borrow(), &[2.0], "只通知了那一次");
 
         // 再变一次 ⇒ 纪元 +1、再通知一次（应用据此重建缓存）
-        assert!(app
-            .window_ctx_mut(id)
-            .unwrap()
-            .set_scale_factor(&rt, 1.5));
+        assert!(app.window_ctx_mut(id).unwrap().set_scale_factor(&rt, 1.5));
         assert_eq!(app.window_ctx(id).unwrap().scale_epoch(), 2);
         assert_eq!(&*seen.borrow(), &[2.0, 1.5]);
     }
@@ -2419,23 +2502,15 @@ mod tests {
         app.frame_all();
 
         // 最小化：winit 就是这么发尺寸的（0×0）
-        app.window_ctx_mut(id)
-            .unwrap()
-            .set_size(&rt, Size::new(0.0, 0.0));
+        app.window_ctx_mut(id).unwrap().set_size(&rt, Size::new(0.0, 0.0));
         app.frame_all(); // ← 以前在这里 panic
 
         // 还原：布局与重绘都该恢复正常
-        app.window_ctx_mut(id)
-            .unwrap()
-            .set_size(&rt, Size::new(300.0, 200.0));
+        app.window_ctx_mut(id).unwrap().set_size(&rt, Size::new(300.0, 200.0));
         let st = app.frame_all()[0].1.clone();
         assert!(st.layout.ran, "还原后重排");
         assert!(st.paint_pending, "还原后重绘");
-        assert_eq!(
-            app.window_ctx(id).unwrap().pixmap().width(),
-            300,
-            "物理尺寸回到窗口宽"
-        );
+        assert_eq!(app.window_ctx(id).unwrap().pixmap().width(), 300, "物理尺寸回到窗口宽");
     }
 
     // ─────────────── M5：内置行为 + 双向绑定 ───────────────
@@ -2462,10 +2537,7 @@ mod tests {
             volume: Signal::new(&rt, 0.0),
             agree: Signal::new(&rt, false),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(200.0, 120.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(200.0, 120.0), erased(Rc::clone(&vm)));
         app.frame_all();
         let (slider, checkbox) = {
             let w = app.window_ctx(id).unwrap();
@@ -2536,8 +2608,22 @@ mod tests {
         let p = Point::new(rect.x + rect.width * 0.25, rect.y + 5.0);
 
         let w = app.window_ctx_mut(id).unwrap();
-        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
-        w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        w.pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        w.pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
         assert!((vm.volume.get() - 2.5).abs() < 0.01);
 
         // 立即写节点 + 写 signal ⇒ 下一帧 view() 产出的描述值与节点一致 ⇒ 零 patch
@@ -2591,16 +2677,44 @@ mod tests {
         let p = Point::new(rect.x + 5.0, rect.y + 5.0);
 
         let w = app.window_ctx_mut(id).unwrap();
-        let down = w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
-        let up = w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        let down = w.pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        let up = w.pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
         assert_eq!(down.tapped, None);
         assert_eq!(up.tapped, Some(checkbox));
         assert!(vm.agree.get(), "Tapped ⇒ 框架翻转绑定的 signal");
 
         // 再点一次翻回来
         let w = app.window_ctx_mut(id).unwrap();
-        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
-        w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        w.pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        w.pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
         assert!(!vm.agree.get());
     }
 
@@ -2636,13 +2750,30 @@ mod tests {
         let p = Point::new(rect.x + 5.0, rect.y + 5.0);
 
         let w = app.window_ctx_mut(id).unwrap();
-        w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: p, button: PointerButton::Left });
-        w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: p, button: PointerButton::Left });
+        w.pointer(
+            &rt,
+            InputEvent::Down {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
+        w.pointer(
+            &rt,
+            InputEvent::Up {
+                pointer: PointerId(0),
+                pos: p,
+                button: PointerButton::Left,
+            },
+        );
 
         assert_eq!(clicks.get(), 1, "用户处理器被调用");
         let w = app.window_ctx(id).unwrap();
         assert!(
-            matches!(w.track().get(cb).map(|n| &n.kind), Some(Kind::Checkbox { checked: false })),
+            matches!(
+                w.track().get(cb).map(|n| &n.kind),
+                Some(Kind::Checkbox { checked: false })
+            ),
             "未绑定 ⇒ 框架不改状态"
         );
     }
@@ -2667,10 +2798,7 @@ mod tests {
         let vm = Rc::new(Form {
             name: Signal::new(&rt, initial.to_string()),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(240.0, 80.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(240.0, 80.0), erased(Rc::clone(&vm)));
         app.frame_all();
         let input = {
             let w = app.window_ctx(id).unwrap();
@@ -2724,17 +2852,14 @@ mod tests {
 
     fn type_chars(app: &mut App, rt: &Runtime, id: WindowId, s: &str) {
         for ch in s.chars() {
-            app.window_ctx_mut(id)
-                .unwrap()
-                .key(rt, Event::char_received(ch));
+            app.window_ctx_mut(id).unwrap().key(rt, Event::char_received(ch));
         }
     }
 
     fn press_key(app: &mut App, rt: &Runtime, id: WindowId, code: KeyCode, mods: Modifiers) {
-        app.window_ctx_mut(id).unwrap().key(
-            rt,
-            Event::key_with(EventKind::KeyDown, code, mods),
-        );
+        app.window_ctx_mut(id)
+            .unwrap()
+            .key(rt, Event::key_with(EventKind::KeyDown, code, mods));
     }
 
     #[test]
@@ -2766,14 +2891,7 @@ mod tests {
             .text
             .spec
             .clone();
-        let pad = app
-            .window_ctx(id)
-            .unwrap()
-            .track()
-            .get(input)
-            .unwrap()
-            .layout
-            .padding[0];
+        let pad = app.window_ctx(id).unwrap().track().get(input).unwrap().layout.padding[0];
         let w_ab = lieui_text::TextEngine::measure_text("ab", &spec).0 as f32;
 
         click_input_at(&mut app, &rt, id, input, rect.x + pad + w_ab);
@@ -2826,13 +2944,7 @@ mod tests {
         let (rt, mut app, vm, id, input) = form("hello");
         click_input(&mut app, &rt, id, input);
 
-        press_key(
-            &mut app,
-            &rt,
-            id,
-            KeyCode::Char('a'),
-            Modifiers::CTRL,
-        );
+        press_key(&mut app, &rt, id, KeyCode::Char('a'), Modifiers::CTRL);
         let (_, caret, anchor, _) = input_state(&app, id, input);
         assert_eq!((caret, anchor), (5, 0), "全选");
 
@@ -3154,12 +3266,7 @@ mod tests {
 
     /// **A 档组合函数**（≈ 组件就是普通函数）：锚定按钮 + 轻关闭弹层。
     /// 不需要任何新机制——这正是"组合覆盖 ~90%"的验收。
-    fn combo(
-        vm: &Rc<Picker>,
-        v: &mut ViewBuf,
-        anchor_key: &str,
-        options: &[&str],
-    ) {
+    fn combo(vm: &Rc<Picker>, v: &mut ViewBuf, anchor_key: &str, options: &[&str]) {
         v.column(|c| {
             c.button("选择水果")
                 .key(anchor_key)
@@ -3173,13 +3280,10 @@ mod tests {
                 for opt in options {
                     let me = Rc::clone(vm);
                     let label = opt.to_string();
-                    p.text(opt.to_string())
-                        .padding(6.0)
-                        .width(80.0)
-                        .on_tap(move || {
-                            me.choice.set(label.clone());
-                            me.open.set(false);
-                        });
+                    p.text(opt.to_string()).padding(6.0).width(80.0).on_tap(move || {
+                        me.choice.set(label.clone());
+                        me.open.set(false);
+                    });
                 }
             });
         }
@@ -3198,10 +3302,7 @@ mod tests {
             open: Signal::new(&rt, false),
             choice: Signal::new(&rt, String::new()),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(200.0, 200.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(200.0, 200.0), erased(Rc::clone(&vm)));
         app.frame_all();
         (rt, app, vm, id)
     }
@@ -3238,11 +3339,7 @@ mod tests {
                 .into_iter()
                 .filter(|n| matches!(t.get(*n).unwrap().kind, Kind::Text(_)))
                 .collect();
-            (
-                crate::layout::rect_of(t, btn),
-                crate::layout::rect_of(t, popup),
-                items,
-            )
+            (crate::layout::rect_of(t, btn), crate::layout::rect_of(t, popup), items)
         };
         assert_eq!(pr.x, br.x, "Below 左对齐");
         assert!((pr.y - (br.bottom() + 4.0)).abs() < 0.5);
@@ -3251,7 +3348,7 @@ mod tests {
         // ② 点"香蕉" ⇒ 选中 + 弹层关闭（选项自己翻 open）
         tap_node(&mut app, &rt, id, items[1]);
         assert_eq!(vm.choice.get(), "香蕉");
-        assert_eq!(vm.open.get(), false);
+        assert!(!vm.open.get());
         app.frame_all();
         assert!(popup_root_of(&app, id).is_none(), "选择后弹层消失");
 
@@ -3278,13 +3375,13 @@ mod tests {
                 },
             );
         }
-        assert_eq!(vm.open.get(), false, "点外部 ⇒ Dismissed ⇒ 关闭");
+        assert!(!vm.open.get(), "点外部 ⇒ Dismissed ⇒ 关闭");
         app.frame_all();
         assert!(popup_root_of(&app, id).is_none());
 
         // ④ 锚点在关闭状态再点 ⇒ 重新展开（toggle 与 dismiss 不互相打架）
         tap_node(&mut app, &rt, id, btn);
-        assert_eq!(vm.open.get(), true);
+        assert!(vm.open.get());
     }
 
     #[test]
@@ -3302,7 +3399,7 @@ mod tests {
 
         // 弹层开着时再点锚点：Tapped(toggle→false) 先于 Dismissed(→false) ⇒ 关闭且保持关闭
         tap_node(&mut app, &rt, id, btn);
-        assert_eq!(vm.open.get(), false);
+        assert!(!vm.open.get());
         app.frame_all();
         assert!(popup_root_of(&app, id).is_none());
     }
@@ -3322,19 +3419,21 @@ mod tests {
             // ── 菜单条：一排锚点按钮（行固定高，按钮不被拉伸成整窗）──
             v.row(|r| {
                 r.height(28.0);
-                r.button("文件")
-                    .key("menu-文件")
-                    .on_tap(act1(self, |s, m: String| {
+                r.button("文件").key("menu-文件").on_tap(act1(
+                    self,
+                    |s, m: String| {
                         // toggle 自己（打开时再点 = 关闭）
-                        s.open_menu
-                            .set(if s.open_menu.get() == m { String::new() } else { m });
-                    }, "文件".to_string()));
-                r.button("编辑")
-                    .key("menu-编辑")
-                    .on_tap(act1(self, |s, m: String| {
-                        s.open_menu
-                            .set(if s.open_menu.get() == m { String::new() } else { m });
-                    }, "编辑".to_string()));
+                        s.open_menu.set(if s.open_menu.get() == m { String::new() } else { m });
+                    },
+                    "文件".to_string(),
+                ));
+                r.button("编辑").key("menu-编辑").on_tap(act1(
+                    self,
+                    |s, m: String| {
+                        s.open_menu.set(if s.open_menu.get() == m { String::new() } else { m });
+                    },
+                    "编辑".to_string(),
+                ));
             });
 
             // ── 弹层：声明式存在（open_menu 是唯一真相），锚定各自的按钮 ──
@@ -3350,13 +3449,10 @@ mod tests {
                     for item in ["新建", "打开"] {
                         let me = Rc::clone(self);
                         let label = item.to_string();
-                        p.text(item.to_string())
-                            .padding(6.0)
-                            .width(90.0)
-                            .on_tap(move || {
-                                me.last.set(label.clone());
-                                me.open_menu.set(String::new());
-                            });
+                        p.text(item.to_string()).padding(6.0).width(90.0).on_tap(move || {
+                            me.last.set(label.clone());
+                            me.open_menu.set(String::new());
+                        });
                     }
                 });
             }
@@ -3368,16 +3464,13 @@ mod tests {
                             me.open_menu.set(String::new());
                         }
                     });
-                    p.text("撤销")
-                        .padding(6.0)
-                        .width(90.0)
-                        .on_tap({
-                            let me = Rc::clone(self);
-                            move || {
-                                me.last.set("撤销".to_string());
-                                me.open_menu.set(String::new());
-                            }
-                        });
+                    p.text("撤销").padding(6.0).width(90.0).on_tap({
+                        let me = Rc::clone(self);
+                        move || {
+                            me.last.set("撤销".to_string());
+                            me.open_menu.set(String::new());
+                        }
+                    });
                     // 子菜单锚点：这一项本身是下级弹层的锚
                     p.text("查找 ▸")
                         .padding(6.0)
@@ -3390,14 +3483,11 @@ mod tests {
             if self.open_menu.get() == "编辑" && self.sub_open.get() {
                 v.popup_at("item-查找", Placement::RightOf, |p| {
                     let me = Rc::clone(self);
-                    p.text("查找内容")
-                        .padding(6.0)
-                        .width(90.0)
-                        .on_tap(move || {
-                            me.last.set("查找内容".to_string());
-                            me.open_menu.set(String::new());
-                            me.sub_open.set(false);
-                        });
+                    p.text("查找内容").padding(6.0).width(90.0).on_tap(move || {
+                        me.last.set("查找内容".to_string());
+                        me.open_menu.set(String::new());
+                        me.sub_open.set(false);
+                    });
                 });
             }
         }
@@ -3411,10 +3501,7 @@ mod tests {
             sub_open: Signal::new(&rt, false),
             last: Signal::new(&rt, String::new()),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(300.0, 220.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(300.0, 220.0), erased(Rc::clone(&vm)));
         app.frame_all();
         (rt, app, vm, id)
     }
@@ -3462,16 +3549,10 @@ mod tests {
             let w = app.window_ctx(id).unwrap();
             let t = w.track();
             let popup = t.roots_of(Layer::Popup).next().unwrap().node;
-            (
-                crate::layout::rect_of(t, btn_edit),
-                crate::layout::rect_of(t, popup),
-            )
+            (crate::layout::rect_of(t, btn_edit), crate::layout::rect_of(t, popup))
         };
         assert_eq!(pr.x, br.x, "x 对齐：br={br:?} pr={pr:?}");
-        assert!(
-            (pr.y - (br.bottom() + 4.0)).abs() < 0.5,
-            "y 锚定：br={br:?} pr={pr:?}"
-        );
+        assert!((pr.y - (br.bottom() + 4.0)).abs() < 0.5, "y 锚定：br={br:?} pr={pr:?}");
 
         // 再点"编辑"：关闭
         tap_node(&mut app, &rt, id, btn_edit);
@@ -3525,10 +3606,7 @@ mod tests {
             let mut roots = t.roots_of(Layer::Popup).map(|r| r.node);
             let _menu = roots.next().unwrap();
             let sub = roots.next().expect("子菜单弹层存在");
-            (
-                crate::layout::rect_of(t, find_item),
-                crate::layout::rect_of(t, sub),
-            )
+            (crate::layout::rect_of(t, find_item), crate::layout::rect_of(t, sub))
         };
         assert!(
             (sub_r.x - (item_r.right() + 4.0)).abs() < 0.5,
@@ -3551,7 +3629,7 @@ mod tests {
         tap_node(&mut app, &rt, id, sub_item);
         assert_eq!(vm.last.get(), "查找内容");
         assert_eq!(vm.open_menu.get(), "");
-        assert_eq!(vm.sub_open.get(), false);
+        assert!(!vm.sub_open.get());
         app.frame_all();
         assert!(popup_texts(&app, id).is_empty(), "全部弹层关闭");
     }
@@ -3604,12 +3682,19 @@ mod tests {
                 s.height(240.0);
                 s.width(140.0);
                 // 只物化可见窗口：窗口起点由 `vl` 记住，`ScrollChanged` 时自动回写
-                s.virtual_list(&self.vl, &self.items, |i| *i as u64, 24.0, 240.0, |v, i| {
-                    v.row(|r| {
-                        r.height(24.0);
-                        r.text(format!("Item {i}")).font_size(16.0);
-                    });
-                });
+                s.virtual_list(
+                    &self.vl,
+                    &self.items,
+                    |i| *i as u64,
+                    24.0,
+                    240.0,
+                    |v, i| {
+                        v.row(|r| {
+                            r.height(24.0);
+                            r.text(format!("Item {i}")).font_size(16.0);
+                        });
+                    },
+                );
             });
         }
     }
@@ -3621,10 +3706,7 @@ mod tests {
             vl: VirtualListState::new(&rt),
             items: (0..count).collect(),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(200.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(200.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
         (rt, app, vm, id)
     }
@@ -3683,7 +3765,14 @@ mod tests {
 
         // 内容尺寸是"虚拟"的完整高度 ⇒ 滚动条诚实
         assert!(
-            (app.window_ctx(id).unwrap().track().get(scroll).unwrap().content_size.height - 24000.0)
+            (app.window_ctx(id)
+                .unwrap()
+                .track()
+                .get(scroll)
+                .unwrap()
+                .content_size
+                .height
+                - 24000.0)
                 .abs()
                 < 0.5,
             "内容高 = 1000 × 24"
@@ -3709,16 +3798,7 @@ mod tests {
         assert_eq!(labels[10], "Item 20");
 
         // 滚动位置在保留树里（视图态）⇒ 与信号一致，不回弹
-        assert!(
-            (app.window_ctx(id)
-                .unwrap()
-                .track()
-                .scroll_offset(scroll)
-                .1
-                - 240.0)
-                .abs()
-                < 0.5
-        );
+        assert!((app.window_ctx(id).unwrap().track().scroll_offset(scroll).1 - 240.0).abs() < 0.5);
     }
 
     /// **key 复用**：滚动后仍然可见的行必须复用原节点（`NodeId` 不变）
@@ -3749,10 +3829,7 @@ mod tests {
                 .iter()
                 .find(|(i, _)| i == idx)
                 .unwrap_or_else(|| panic!("Item {idx} 应仍在窗口内"));
-            assert_eq!(
-                node, after_node,
-                "Item {idx} 的行节点应被 key 复用（而不是按下标重建）"
-            );
+            assert_eq!(node, after_node, "Item {idx} 的行节点应被 key 复用（而不是按下标重建）");
         }
         let _ = &rt;
     }
@@ -3764,7 +3841,14 @@ mod tests {
         assert!(visible_rows(&app, id).is_empty(), "空列表物化 0 行");
         let scroll = scroll_node(&app, id);
         assert!(
-            app.window_ctx(id).unwrap().track().get(scroll).unwrap().content_size.height < 0.5,
+            app.window_ctx(id)
+                .unwrap()
+                .track()
+                .get(scroll)
+                .unwrap()
+                .content_size
+                .height
+                < 0.5,
             "空列表内容高为 0"
         );
 
@@ -3837,10 +3921,7 @@ mod tests {
             vl: VirtualListState::new(&rt),
             items: (0..1000).collect(),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(200.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(200.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
 
         let scroll = scroll_node(&app, id);
@@ -3955,11 +4036,7 @@ mod tests {
 
         let after = { pixel(app.window_ctx(id).unwrap(), sx, sy) };
         let t = Theme::light();
-        assert_eq!(
-            before,
-            opaque(t.control.r, t.control.g, t.control.b),
-            "常态 = control"
-        );
+        assert_eq!(before, opaque(t.control.r, t.control.g, t.control.b), "常态 = control");
         assert_eq!(
             after,
             opaque(t.control_hover.r, t.control_hover.g, t.control_hover.b),
@@ -3995,10 +4072,7 @@ mod tests {
             on: Signal::new(&rt, false),
             color: Signal::new(&rt, "red".to_string()),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(200.0, 200.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(200.0, 200.0), erased(Rc::clone(&vm)));
         app.frame_all();
         let kids = app
             .window_ctx(id)
@@ -4034,17 +4108,17 @@ mod tests {
     fn switch_bound_toggles_the_signal_and_the_desc_follows() {
         let (rt, mut app, vm, id, kids) = toggles();
         tap_node(&mut app, &rt, id, kids[0]);
-        assert_eq!(vm.on.get(), true, "点击 ⇒ 写回 signal");
+        assert!(vm.on.get(), "点击 ⇒ 写回 signal");
 
         // 下一帧 desc 跟上（apply_to 判等 ⇒ 零补丁，不回弹）
         app.frame_all();
 
         tap_node(&mut app, &rt, id, kids[0]);
-        assert_eq!(vm.on.get(), false);
+        assert!(!vm.on.get());
 
         // 未绑定的只显示形态：点不变
         tap_node(&mut app, &rt, id, kids[3]);
-        assert_eq!(vm.on.get(), false);
+        assert!(!vm.on.get());
     }
 
     #[test]
@@ -4111,10 +4185,7 @@ mod tests {
         let vm = Rc::new(Worker {
             report: Signal::new(&rt, None),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(400.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
 
         // 无头环境没有平台唤醒器 ⇒ 投递走本地队列（测试正好用它当"事件循环"）
@@ -4178,10 +4249,7 @@ mod tests {
 
         // 结果落地 + 遮罩自动收起
         assert_eq!(vm.report.get(), Some(7), "任务返回值经 TaskEvent 落到 Signal");
-        assert!(
-            !rt.is_busy(id) && !rt.has_tasks(id),
-            "完成 ⇒ 任务表与忙碌项都清空"
-        );
+        assert!(!rt.is_busy(id) && !rt.has_tasks(id), "完成 ⇒ 任务表与忙碌项都清空");
         {
             let ctx = app.window_ctx(id).unwrap();
             assert!(
@@ -4321,10 +4389,7 @@ mod tests {
         app.frame_all();
         assert_eq!(vm.frames.get(), last, "不请求就不再跑");
         assert!(rt.next_deadline(id).is_none());
-        assert!(
-            app.window_ctx(id).unwrap().next_wakeup(&rt).is_none(),
-            "回到零唤醒"
-        );
+        assert!(app.window_ctx(id).unwrap().next_wakeup(&rt).is_none(), "回到零唤醒");
     }
 
     #[test]
@@ -4350,10 +4415,7 @@ mod tests {
         let vm = Rc::new(Bus {
             got: Signal::new(&rt, Vec::new()),
         });
-        let id = app.window_erased(
-            WindowConfig::new(),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new(), erased(Rc::clone(&vm)));
         app.frame_all();
 
         // UI 线程发事件
@@ -4386,13 +4448,8 @@ mod tests {
         // 普通模式：只改一个文本 ⇒ 只重画那一小块
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
-        let vm = Rc::new(Page {
-            n: Signal::new(&rt, 0),
-        });
-        let _id = app.window_erased(
-            WindowConfig::new().size(400.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let vm = Rc::new(Page { n: Signal::new(&rt, 0) });
+        let _id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
         vm.n.set(1);
         let st = app.frame_all();
@@ -4402,9 +4459,7 @@ mod tests {
         // 整窗重绘模式：同样只改一个文本，但整窗重画
         let rt = Runtime::new();
         let mut app = App::new(rt.clone());
-        let vm = Rc::new(Page {
-            n: Signal::new(&rt, 0),
-        });
+        let vm = Rc::new(Page { n: Signal::new(&rt, 0) });
         let _id = app.window_erased(
             WindowConfig::new().size(400.0, 300.0).full_repaint(true),
             erased(Rc::clone(&vm)),
@@ -4444,9 +4499,7 @@ mod tests {
         {
             let ctx = app.window_ctx(id).unwrap();
             assert!(
-                ctx.track()
-                    .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-                    .is_some(),
+                ctx.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_some(),
                 "最短可见期内遮罩要在"
             );
             assert!(ctx.next_wakeup(&rt).is_some(), "还要定时唤醒去收它");
@@ -4458,9 +4511,7 @@ mod tests {
         {
             let ctx = app.window_ctx(id).unwrap();
             assert!(
-                ctx.track()
-                    .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-                    .is_none(),
+                ctx.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_none(),
                 "到点 ⇒ 遮罩收起"
             );
             assert!(ctx.next_wakeup(&rt).is_none(), "遮罩收掉 ⇒ 回到零唤醒");
@@ -4532,10 +4583,7 @@ mod tests {
         let vm = Rc::new(Counter {
             count: Signal::new(&rt, 0),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(400.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
 
         // `Counter` 的 view 结构固定：内容根第 3 个子节点是个 row，里面第 1 个是「+1」按钮
@@ -4870,8 +4918,7 @@ mod tests {
         assert!(n.text.spec.optical_align, "tooltip 走墨迹盒对齐");
 
         let rect = crate::layout::rect_of(w.track(), tip_node);
-        let ink = lieui_text::TextEngine::ink_bounds("i am a tooltip", &n.text.spec)
-            .expect("tooltip 文本有墨迹");
+        let ink = lieui_text::TextEngine::ink_bounds("i am a tooltip", &n.text.spec).expect("tooltip 文本有墨迹");
         assert!(
             (rect.height - (ink.height() + 12.0)).abs() < 0.01,
             "tooltip 盒高 = 墨迹高 + 12：{} vs {}",
@@ -4884,14 +4931,8 @@ mod tests {
         let xs: Vec<u16> = ((rect.x + 8.0) as u16..=(rect.right() - 8.0) as u16).collect();
         let bg = pixel(w, xs[0], (rect.y + 2.0) as u16);
         let band_uniform = |y: u16| xs.iter().all(|x| pixel(w, *x, y) == bg);
-        assert!(
-            band_uniform((rect.y + 2.0) as u16),
-            "顶部 padding 带是纯底色"
-        );
-        assert!(
-            band_uniform((rect.bottom() - 2.0) as u16),
-            "底部 padding 带是纯底色"
-        );
+        assert!(band_uniform((rect.y + 2.0) as u16), "顶部 padding 带是纯底色");
+        assert!(band_uniform((rect.bottom() - 2.0) as u16), "底部 padding 带是纯底色");
 
         let mid: Vec<u16> = ((rect.y + 6.0) as u16..(rect.y + 6.0 + ink.height()) as u16).collect();
         let ink_px = mid
@@ -4917,17 +4958,15 @@ mod tests {
         let later = Instant::now() + BLINK_PERIOD + Duration::from_millis(50);
         assert!(app.window_ctx_mut(id).unwrap().animate(later));
         assert!(!app.window_ctx(id).unwrap().track().blink_on, "周期到 ⇒ 灭");
-        assert!(app
-            .window_ctx_mut(id)
-            .unwrap()
-            .animate(later + BLINK_PERIOD));
+        assert!(app.window_ctx_mut(id).unwrap().animate(later + BLINK_PERIOD));
         assert!(app.window_ctx(id).unwrap().track().blink_on, "再翻转为亮");
 
         // 未到周期：不动（这就是"聚焦才动，其余零功耗"的保证）
-        assert!(!app
-            .window_ctx_mut(id)
-            .unwrap()
-            .animate(later + BLINK_PERIOD + Duration::from_millis(100)));
+        assert!(
+            !app.window_ctx_mut(id)
+                .unwrap()
+                .animate(later + BLINK_PERIOD + Duration::from_millis(100))
+        );
     }
 
     #[test]
@@ -4985,12 +5024,11 @@ mod tests {
                     let me = Rc::clone(self);
                     list.container(|c| {
                         // 同一份标签出现两次：一次可左键点，一次带右键菜单
-                        c.text(&label).padding(6.0).on_tap(move || {
-                            me.hits.update(|v| v.push(format!("tap 行 {i}")))
-                        });
+                        c.text(&label)
+                            .padding(6.0)
+                            .on_tap(move || me.hits.update(|v| v.push(format!("tap 行 {i}"))));
                         if with_menu {
                             let me_menu = Rc::clone(self);
-                            let page = page;
                             c.text(&label).padding(6.0).context_menu(move |m| {
                                 let (a, b) = (Rc::clone(&me_menu), Rc::clone(&me_menu));
                                 m.item(format!("复制行 {i}")).on_tap(move || {
@@ -5016,10 +5054,7 @@ mod tests {
             page: Signal::new(&rt, 7),
             with_menu: Signal::new(&rt, true),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(400.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
         (rt, app, vm, id)
     }
@@ -5032,9 +5067,8 @@ mod tests {
             .descendants(w.content_root().unwrap())
             .into_iter()
             .find(|n| {
-                t.get(*n).is_some_and(|x| {
-                    x.context_menu.is_some() && matches!(&x.kind, Kind::Text(s) if s == label)
-                })
+                t.get(*n)
+                    .is_some_and(|x| x.context_menu.is_some() && matches!(&x.kind, Kind::Text(s) if s == label))
             })
             .unwrap_or_else(|| panic!("找不到带菜单的 {label:?}"));
         center(t, node)
@@ -5146,8 +5180,22 @@ mod tests {
         let item_pos = ctx_menu_item_center(&app, id, 0);
         {
             let w = app.window_ctx_mut(id).unwrap();
-            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
-            let up = w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: item_pos,
+                    button: PointerButton::Left,
+                },
+            );
+            let up = w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos: item_pos,
+                    button: PointerButton::Left,
+                },
+            );
             assert!(up.tapped.is_some(), "点到了菜单项");
         }
         app.frame_all();
@@ -5166,8 +5214,22 @@ mod tests {
         let item_pos = ctx_menu_item_center(&app, id, 1);
         {
             let w = app.window_ctx_mut(id).unwrap();
-            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
-            w.pointer(&rt, InputEvent::Up { pointer: PointerId(0), pos: item_pos, button: PointerButton::Left });
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: item_pos,
+                    button: PointerButton::Left,
+                },
+            );
+            w.pointer(
+                &rt,
+                InputEvent::Up {
+                    pointer: PointerId(0),
+                    pos: item_pos,
+                    button: PointerButton::Left,
+                },
+            );
         }
         app.frame_all();
 
@@ -5185,7 +5247,14 @@ mod tests {
         let away = Point::new(390.0, 5.0);
         {
             let w = app.window_ctx_mut(id).unwrap();
-            w.pointer(&rt, InputEvent::Down { pointer: PointerId(0), pos: away, button: PointerButton::Left });
+            w.pointer(
+                &rt,
+                InputEvent::Down {
+                    pointer: PointerId(0),
+                    pos: away,
+                    button: PointerButton::Left,
+                },
+            );
         }
         app.frame_all();
         assert!(ctx_menu_root(&app, id).is_none(), "点外面 ⇒ 轻关闭");
@@ -5273,10 +5342,7 @@ mod tests {
         let vm = Rc::new(Holder {
             vol: Signal::new(&rt, 0.0),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(400.0, 300.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
         app.frame_all();
 
         let scroll = app.window_ctx(id).unwrap().content_root().unwrap();
@@ -5323,10 +5389,7 @@ mod tests {
         let vm = Rc::new(Off {
             volume: Signal::new(&rt, 1.0),
         });
-        let id = app.window_erased(
-            WindowConfig::new().size(200.0, 120.0),
-            erased(Rc::clone(&vm)),
-        );
+        let id = app.window_erased(WindowConfig::new().size(200.0, 120.0), erased(Rc::clone(&vm)));
         app.frame_all();
         let slider = {
             let w = app.window_ctx(id).unwrap();
@@ -5343,10 +5406,7 @@ mod tests {
             },
         );
         assert_eq!(vm.volume.get(), 1.0, "禁用 ⇒ 内置行为不执行");
-        assert_eq!(
-            app.window_ctx(id).unwrap().track().captured_by(PointerId(0)),
-            None
-        );
+        assert_eq!(app.window_ctx(id).unwrap().track().captured_by(PointerId(0)), None);
     }
 
     #[test]
@@ -5372,14 +5432,385 @@ mod tests {
             .get_mut(button)
             .unwrap()
             .tab_stop = true;
-        app.window_ctx_mut(id)
-            .unwrap()
-            .tab(&rt, true)
-            .expect("有可聚焦节点");
+        app.window_ctx_mut(id).unwrap().tab(&rt, true).expect("有可聚焦节点");
 
         let st = app.frame_all()[0].1.clone();
         assert!(!st.view_ran, "焦点变化不重跑 view()");
         assert!(st.paint_pending);
         assert!(st.render.scene.ops > 0);
+    }
+
+    // ─────────────────── 主线 B：帧调度闭环 ───────────────────
+
+    /// 回归（主线 B）：`WindowCtx::tick` 必须在**真的做了事**时返回 `true`。
+    ///
+    /// 这是帧调度收敛到单一入口的**闭环依据**：`about_to_wait` / `user_event`
+    /// 改成只 [`Self::pump`]（消费定时器、**不渲染**）之后，
+    /// 它们靠这个返回值决定"要不要 `request_redraw`"。
+    ///
+    /// 若它恒返回 `false`，后果是**停帧**：定时器回调改了状态，
+    /// 但没有任何人请求重绘 ⇒ 画面一直停在旧帧，而回调确实在跑。
+    /// 这是"把 `frame` 收敛到单一入口"最容易踩的坑（`refactor-plan` 主线 B 的
+    /// 关键补充：改法正确但漏掉闭环 ⇒ 把"帧跑 3 次"换成"定时器和动画停帧"）。
+    #[test]
+    fn tick_reports_true_when_a_timer_fires() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all(); // 首帧：把初始脏消费掉
+
+        // ① 没有定时器 ⇒ 没事做
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            assert!(!w.tick(&rt, Instant::now()), "无定时器/动画时 tick 应返回 false");
+        }
+
+        // ② 定时器到期 ⇒ 必须返回 true（闭环的依据）
+        rt.set_timeout(id, std::time::Duration::ZERO, |_| {});
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            assert!(
+                w.tick(&rt, Instant::now()),
+                "定时器到期时 tick 必须返回 true，否则 pump 后没人 request_redraw ⇒ 停帧"
+            );
+        }
+
+        // ③ 一次性定时器消费后 ⇒ 回到 false
+        {
+            let w = app.window_ctx_mut(id).unwrap();
+            assert!(!w.tick(&rt, Instant::now()), "一次性定时器已消费，tick 应回到 false");
+        }
+    }
+
+    /// 配套：定时器回调**改了状态**时，`tick` 返回 true 且该窗口被标脏
+    /// —— 后半句才是"画面会更新"的直接保证。
+    #[test]
+    fn timer_callback_that_writes_state_marks_the_window_dirty() {
+        let (rt, mut app, _, id) = setup();
+        app.frame_all();
+        let _ = app.frame_all()[0].1.clone(); // 基线：空闲
+
+        // 定时器里写一个 signal ⇒ 应当置脏
+        let sig = Signal::new(&rt, 0i32);
+        struct T(Signal<i32>);
+        impl ViewModel for T {
+            fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+                v.column(|c| {
+                    c.text(format!("{}", self.0.get()));
+                });
+            }
+        }
+        let id2 = app.window(WindowConfig::new(), T(sig.clone()));
+        app.frame_all();
+        let _ = app.frame_all(); // 吃干净
+
+        rt.set_timeout(id2, std::time::Duration::ZERO, move |cx| {
+            cx.damage_all();
+        });
+        let w = app.window_ctx_mut(id2).unwrap();
+        assert!(w.tick(&rt, Instant::now()), "定时器到期 ⇒ tick 返回 true");
+
+        // 该窗口应当有待呈现的脏（PRESENT），否则 pump 之后画面不会更新
+        let d = rt.peek_dirty(id2);
+        assert!(
+            !d.is_empty(),
+            "定时器回调 damage 之后窗口应被标脏（实际 dirty = {d:?}）"
+        );
+        let _ = id;
+    }
+}
+
+/// **`handled` 语义**（D54 / S4 · E1）—— 用户处理器优先于框架内置行为。
+///
+/// ## 修复前的问题
+///
+/// `WindowCtx::dispatch` 原来是「内置行为先跑、用户 handler 后跑」：
+///
+///   ① `widgets::handle_route(...)` ← 内置行为全部跑完（CheckBox 已切换 checked）
+///   ② `event::dispatch(...)`      ← 用户的 `cx.mark_handled()` 到这里才有机会执行
+///
+/// 于是 `mark_handled()` 只能当**马后炮**：既不能阻止**已经跑完**的内置行为，
+/// 也不能阻止**后续**的内置行为 —— 语义上等于不存在。用户无法表达
+/// "这个 CheckBox 的勾选由我自己处理"。
+#[cfg(test)]
+mod handled_semantics {
+    use super::*;
+    use crate::reactive::Signal;
+    use crate::track::Kind;
+    use std::rc::Rc;
+
+    struct Vm {
+        /// true 时在 tap 里立刻 `mark_handled()`
+        intercept: bool,
+        /// ★ 必须用 `checkbox_bound`：**无绑定的 CheckBox 内置行为不切换**
+        ///   （`checkbox_handle` 里`if !bound { return; }` —— "未绑定就不改模型"）。
+        ///   所以要观察内置行为，就必须给它一个绑定。
+        bound: Signal<bool>,
+        taps: Signal<usize>,
+    }
+
+    impl ViewModel for Vm {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.text("选项");
+                c.checkbox_bound(&self.bound).on_tap_with({
+                    let me = self.clone();
+                    move |cx: &mut Ctx| {
+                        if me.intercept {
+                            // ★ 用户选择"我自己处理" ⇒ 内置行为应当让位
+                            cx.mark_handled();
+                            me.bound.set(!me.bound.get());
+                        }
+                        me.taps.set(me.taps.get() + 1);
+                    }
+                });
+            });
+        }
+    }
+
+    fn setup(intercept: bool) -> (Runtime, App, Rc<Vm>, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Vm {
+            intercept,
+            bound: Signal::new(&rt, false),
+            taps: Signal::new(&rt, 0),
+        });
+        let id = app.window_erased(WindowConfig::new(), erased(vm.clone()));
+        app.frame_all();
+        (rt, app, vm, id)
+    }
+
+    /// checkbox 在树里的位置。
+    ///
+    /// 注意 `column` **不产生节点** —— 它的子节点直接挂在内容根下
+    /// （与 `button_closure_changes_state_and_next_frame_renders_it` 里
+    /// `children(root)[2]` 的取法一致），所以这里不需要多取一层。
+    fn checkbox_path(app: &App, id: WindowId) -> Vec<NodeId> {
+        let w = app.window_ctx(id).unwrap();
+        let root = w.content_root().unwrap();
+        let cb = w.track().children(root)[1];
+        vec![root, cb]
+    }
+
+    fn tap(app: &mut App, rt: &Runtime, id: WindowId, path: &[NodeId]) -> DispatchOutcome {
+        app.window_ctx_mut(id).unwrap().dispatch(
+            rt,
+            path,
+            &Event::Simple {
+                kind: EventKind::Tapped,
+            },
+        )
+    }
+
+    /// **节点上**的 `checked`（即 `toggle_checked` 直接改的那个字段）。
+    ///
+    /// ★ 刻意看 `kind.checked` 而**不是**绑定的 Signal：
+    /// 内置行为 `toggle_checked` **立即**改节点；Signal 绑定则要等**下一帧**
+    /// `view()` 重建时才反映出来。两者时序不同，正好用来区分"谁改的"。
+    fn node_checked(app: &App, id: WindowId) -> bool {
+        let w = app.window_ctx(id).unwrap();
+        let cb = *checkbox_path(app, id).last().unwrap();
+        matches!(
+            w.track().get(cb).map(|n| &n.kind),
+            Some(Kind::Checkbox { checked: true })
+        )
+    }
+
+    /// ★ 核心回归：用户 `mark_handled()` 后，**内置的勾选切换不得发生**。
+    ///
+    /// 修复前内置行为先跑，`toggle_checked` 已经把节点翻转 ⇒ 这条断言会失败。
+    #[test]
+    fn marking_handled_suppresses_the_builtin_toggle() {
+        let (rt, mut app, vm, id) = setup(true);
+        let path = checkbox_path(&app, id);
+
+        let out = tap(&mut app, &rt, id, &path);
+        assert!(out.handled, "处理器标记了 handled");
+        assert_eq!(out.invoked, 1, "处理器被调用了一次");
+        assert_eq!(vm.taps.get(), 1, "处理器确实执行了");
+        assert!(
+            !node_checked(&app, id),
+            "★ `mark_handled()` 之后内置的勾选切换必须被抑制（修复前这里会变成 true）"
+        );
+        // 顺带确认：下一帧后 Signal 绑定会把用户自己的修改反映到节点上
+        app.frame_all();
+        assert!(node_checked(&app, id), "用户自己改的 Signal 应在下一帧生效");
+    }
+
+    /// 反方向：**未标记 `handled` 时内置行为照常执行**。
+    /// 只测上一条不够 —— 万一 `handled` 让内置行为永远不跑，这条会挂。
+    #[test]
+    fn without_handled_the_builtin_toggle_still_runs() {
+        let (rt, mut app, vm, id) = setup(false);
+        let path = checkbox_path(&app, id);
+
+        let out = tap(&mut app, &rt, id, &path);
+        assert!(!out.handled, "处理器没有标记 handled");
+        assert_eq!(vm.taps.get(), 1);
+        assert!(
+            node_checked(&app, id),
+            "未标记 handled ⇒ 内置行为应当**立即**翻转节点（不等下一帧）"
+        );
+
+        // 再点一次 ⇒ 应当切回 false（证明状态可变，不是一次性效果）
+        tap(&mut app, &rt, id, &path);
+        assert!(!node_checked(&app, id), "第二次点击应切回未勾选");
+    }
+}
+
+/// **Escape 关闭浮层**（D15 / S4 · E2-5）—— 弹层与菜单的基线能力。
+///
+/// ## 修复前
+///
+/// `NamedKey::Escape` 只有枚举定义、**无任何消费点**。菜单 / 弹层一旦打开，
+/// 就只能用鼠标点外面关掉 —— 键盘用户无法退出，任何 GUI 框架的基线能力缺失。
+///
+/// ## 语义（与 WinUI / WPF 一致）
+///
+/// **只关最上面一个**。菜单开着子菜单时，一次 Escape 期望只关子菜单，
+/// 而不是把整串浮层一起关掉。
+/// "可关闭"沿用既有的 `LayerOpts::dismiss_on_outside_click` 配置，不另立开关。
+///
+/// ## 为什么自带一个 ViewModel
+///
+/// 本模块**刻意不复用** `app.rs` 内 `mod tests` 里的 `picker()` / `tap_node()`：
+/// 那两个是 `mod tests` 的**私有** helper，而本模块位于顶层，
+/// `use super::*` 只能看到 `app.rs` 顶层可见的项。
+/// 依赖跨模块的私有测试helper 是本项目反复踩坑的来源（见操作日志），
+/// 这里选择"多写 20 行、换零耦合"。
+#[cfg(test)]
+mod escape_dismiss {
+    use super::*;
+    use crate::event::{KeyCode, Modifiers, NamedKey};
+    use crate::reactive::Signal;
+    use crate::track::{Layer, Placement};
+    use std::rc::Rc;
+
+    struct Vm {
+        open: Signal<bool>,
+    }
+
+    impl ViewModel for Vm {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                let me = self.clone();
+                c.button("打开").on_tap(move || me.open.set(true));
+            });
+            if self.open.get() {
+                v.popup_at("打开", Placement::Below, |p| {
+                    let me = self.clone();
+                    // 轻关闭：点击弹层之外 ⇒ 层根收到 Dismissed
+                    p.on(EventKind::Dismissed, move |_| me.open.set(false));
+                    p.text("项��");
+                });
+            }
+        }
+    }
+
+    fn setup() -> (Runtime, App, WindowId) {
+        let rt = Runtime::new();
+        let mut app = App::new(rt.clone());
+        let vm = Rc::new(Vm {
+            open: Signal::new(&rt, false),
+        });
+        let id = app.window_erased(WindowConfig::new(), erased(vm));
+        app.frame_all();
+        (rt, app, id)
+    }
+
+    /// z 序最上层的 Popup 层根
+    fn popup_of(app: &App, id: WindowId) -> Option<NodeId> {
+        let w = app.window_ctx(id).unwrap();
+        w.track()
+            .roots()
+            .iter()
+            .filter(|r| r.layer == Layer::Popup)
+            .map(|r| r.node)
+            .next_back()
+    }
+
+    /// 点开弹层（直接改状态 + 走一帧，让 `view()` 声明弹层）
+    fn open_popup(app: &mut App, rt: &Runtime, id: WindowId) {
+        assert!(popup_of(app, id).is_none(), "展开前没有弹层");
+        let btn = app
+            .window_ctx(id)
+            .unwrap()
+            .track()
+            .children(app.window_ctx(id).unwrap().content_root().unwrap())[0];
+        // 直接派发 Tapped 给按钮
+        let path = {
+            let w = app.window_ctx(id).unwrap();
+            let root = w.content_root().unwrap();
+            let mut p = crate::hit::path_to(w.track(), root);
+            p.push(btn);
+            p
+        };
+        app.window_ctx_mut(id).unwrap().dispatch(
+            rt,
+            &path,
+            &Event::Simple {
+                kind: EventKind::Tapped,
+            },
+        );
+        app.frame_all();
+        assert!(popup_of(app, id).is_some(), "弹层已打开");
+    }
+
+    fn press(app: &mut App, rt: &Runtime, id: WindowId, code: KeyCode) -> DispatchOutcome {
+        app.window_ctx_mut(id)
+            .unwrap()
+            .key(rt, Event::key_with(EventKind::KeyDown, code, Modifiers::EMPTY))
+    }
+
+    /// ★ 核心：弹层打开时，Escape 关闭它。
+    #[test]
+    fn escape_closes_an_open_popup() {
+        let (rt, mut app, id) = setup();
+        open_popup(&mut app, &rt, id);
+
+        let out = press(&mut app, &rt, id, KeyCode::Named(NamedKey::Escape));
+        assert!(out.handled, "Escape 被当作已处理");
+        app.frame_all();
+        assert!(
+            popup_of(&app, id).is_none(),
+            "★ Escape 应当关闭弹层（修复前这里仍然是 Some）"
+        );
+    }
+
+    /// ★★ **反向陷阱**：**其它按键不得关闭弹层**。
+    ///
+    /// 这条测试是为一个**真实踩过的坑**写的：Escape 是
+    /// `KeyCode::Named(NamedKey::Escape)`，**不是** `EventKind` 的变体。
+    /// 第一版实现只判`ev.kind() == KeyDown`，于是**按任意键都关弹层** ——
+    /// 而"Escape 能关弹层"那条测试**照样通过**，缺陷完全隐形。
+    ///
+    /// 这就是"只测正向不测反向"的典型后果。
+    #[test]
+    fn other_keys_do_not_close_the_popup() {
+        let (rt, mut app, id) = setup();
+        open_popup(&mut app, &rt, id);
+
+        for code in [
+            KeyCode::Named(NamedKey::Enter),
+            KeyCode::Named(NamedKey::Tab),
+            KeyCode::Char('a'),
+            KeyCode::Named(NamedKey::Delete),
+        ] {
+            press(&mut app, &rt, id, code);
+            app.frame_all();
+            assert!(
+                popup_of(&app, id).is_some(),
+                "按键 {code:?} 不得关闭弹层（Escape 才是关闭键）"
+            );
+        }
+    }
+
+    /// 没有弹层时 Escape 不产生任何关闭动作。
+    #[test]
+    fn escape_without_popup_is_inert() {
+        let (rt, mut app, id) = setup();
+        assert!(popup_of(&app, id).is_none());
+        press(&mut app, &rt, id, KeyCode::Named(NamedKey::Escape));
+        app.frame_all();
+        assert!(popup_of(&app, id).is_none());
     }
 }

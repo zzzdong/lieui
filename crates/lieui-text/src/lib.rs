@@ -23,7 +23,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use parley::{
-    Alignment, AlignmentOptions, FontContext, LayoutContext, editing::PlainEditor,
+    Alignment, AlignmentOptions, FontContext, LayoutContext,
+    editing::PlainEditor,
     style::{FontFamily, FontFamilyName, FontWeight as ParleyFontWeight, LineHeight, StyleProperty},
 };
 
@@ -69,9 +70,7 @@ thread_local! {
 }
 
 /// 同时访问字体和布局上下文
-pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<Color>) -> R>(
-    f: F,
-) -> R {
+pub fn with_text_contexts<R, F: FnOnce(&mut FontContext, &mut LayoutContext<Color>) -> R>(f: F) -> R {
     FONT_CONTEXT.with(|fc| LAYOUT_CONTEXT.with(|lc| f(&mut fc.borrow_mut(), &mut lc.borrow_mut())))
 }
 
@@ -87,9 +86,7 @@ fn parley_weight(w: &FontWeight) -> ParleyFontWeight {
 /// 解析 CSS `font-family` 列表（如 `"Segoe UI, sans-serif"`）为 parley 字体族；
 /// 不是合法列表时退化为单一命名族（与旧行为一致）。
 fn font_family_prop(raw: &str) -> FontFamily<'_> {
-    let families: Vec<FontFamilyName> = FontFamilyName::parse_css_list(raw)
-        .filter_map(Result::ok)
-        .collect();
+    let families: Vec<FontFamilyName> = FontFamilyName::parse_css_list(raw).filter_map(Result::ok).collect();
     if families.is_empty() {
         FontFamily::named(raw)
     } else {
@@ -103,20 +100,13 @@ fn parley_line_height(lh: f64, font_size: f64) -> LineHeight {
     LineHeight::FontSizeRelative(factor)
 }
 
-fn apply_text_style(
-    builder: &mut parley::RangedBuilder<Color>,
-    spec: &TextSpec,
-    color: Color,
-) {
+fn apply_text_style(builder: &mut parley::RangedBuilder<Color>, spec: &TextSpec, color: Color) {
     builder.push_default(StyleProperty::FontSize(spec.font_size as f32));
     builder.push_default(StyleProperty::Brush(color));
     builder.push_default(StyleProperty::FontFamily(font_family_prop(&spec.font_family)));
     builder.push_default(StyleProperty::FontWeight(parley_weight(&spec.font_weight)));
     if let Some(lh) = spec.line_height {
-        builder.push_default(StyleProperty::LineHeight(parley_line_height(
-            lh,
-            spec.font_size,
-        )));
+        builder.push_default(StyleProperty::LineHeight(parley_line_height(lh, spec.font_size)));
     }
 }
 
@@ -248,10 +238,7 @@ pub fn apply_plain_editor_style(editor: &mut PlainTextEditor, spec: &TextSpec, c
     styles.insert(StyleProperty::FontFamily(static_font_family(&spec.font_family)));
     styles.insert(StyleProperty::FontWeight(parley_weight(&spec.font_weight)));
     if let Some(lh) = spec.line_height {
-        styles.insert(StyleProperty::LineHeight(parley_line_height(
-            lh,
-            spec.font_size,
-        )));
+        styles.insert(StyleProperty::LineHeight(parley_line_height(lh, spec.font_size)));
     }
 }
 
@@ -290,11 +277,7 @@ pub fn editor_cursor_geometry(
 }
 
 /// 配置编辑器宽度、对齐方式并刷新布局，返回布局宽高。
-pub fn editor_layout_size(
-    editor: &mut PlainTextEditor,
-    spec: &TextSpec,
-    width: Option<f32>,
-) -> (f32, f32) {
+pub fn editor_layout_size(editor: &mut PlainTextEditor, spec: &TextSpec, width: Option<f32>) -> (f32, f32) {
     with_text_contexts(|font_cx, layout_cx| {
         editor.set_width(width);
         editor.set_alignment(map_text_align(spec.text_align));
@@ -327,8 +310,7 @@ pub fn register_font_source(
 ) -> Result<Vec<String>, String> {
     let blob = match source {
         FontSource::Path(path) => {
-            let bytes =
-                std::fs::read(&path).map_err(|e| format!("读取字体失败 {path:?}: {e}"))?;
+            let bytes = std::fs::read(&path).map_err(|e| format!("读取字体失败 {path:?}: {e}"))?;
             parley::fontique::Blob::new(std::sync::Arc::new(bytes))
         }
         FontSource::Memory(bytes) => parley::fontique::Blob::new(std::sync::Arc::new(bytes)),
@@ -338,9 +320,7 @@ pub fn register_font_source(
         ..Default::default()
     });
 
-    let mut collection = global_font_collection()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut collection = global_font_collection().lock().unwrap_or_else(|e| e.into_inner());
     let registered: Vec<_> = collection.register_fonts(blob, override_info);
     let names: Vec<String> = registered
         .iter()
@@ -461,14 +441,9 @@ mod tests {
         // 图标字体（Material Icons：行盒 = 字号见方，墨迹居中）
         let bytes = include_bytes!("../../../src/assets/MaterialIcons-Regular.ttf");
         let names = register_font_bytes(bytes.to_vec());
-        let family = names
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Material Icons".into());
+        let family = names.first().cloned().unwrap_or_else(|| "Material Icons".into());
         for size in [16.0f32, 20.0, 24.0, 28.0] {
-            let spec = TextSpec::new(f64::from(size))
-                .font_family(family.clone())
-                .wrap(false);
+            let spec = TextSpec::new(f64::from(size)).font_family(family.clone()).wrap(false);
             let (w, h) = TextEngine::measure_text("\u{e5cd}", &spec);
             let (w, h) = (w as f32, h as f32);
             let ink = TextEngine::ink_bounds("\u{e5cd}", &spec).unwrap();
@@ -563,9 +538,7 @@ mod tests {
         );
 
         // 覆盖名可直接用于排版（图标字形 1em 见方 ⇒ 宽度≈字号）
-        let spec = TextSpec::new(20.0)
-            .font_family("LieTestIcons")
-            .wrap(false);
+        let spec = TextSpec::new(20.0).font_family("LieTestIcons").wrap(false);
         let (w, _) = TextEngine::measure_text("\u{e5cd}", &spec);
         assert!(w > 0.0, "按覆盖名测度图标字形：{w}");
         assert!((w - 20.0).abs() < 2.0, "图标字形 advance≈字号：{w}");

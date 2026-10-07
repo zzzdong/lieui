@@ -14,9 +14,7 @@
 //!
 //! 层根的匹配键 = `(layer, owner, 同组序号)`；父层消失 ⇒ 嵌套子层整棵销毁。
 
-use crate::track::{
-    Flags, Key, Kind, KindDesc, KindTag, Layer, NodeId, RootId, Track,
-};
+use crate::track::{Flags, Key, Kind, KindDesc, KindTag, Layer, NodeId, RootId, Track};
 use crate::view::{DescNode, ViewBuf};
 
 /// 一次对齐的统计（测试与调试用；也可用于判断"这一帧有没有干活"）
@@ -93,7 +91,9 @@ pub fn align(track: &mut Track, view: &ViewBuf) -> AlignStats {
                     r.opts = dr.opts.clone();
                 }
                 // 层根标签：布局后可按标签找回这个层（框架的 loading 遮罩靠它定位）
-                if dr.tag.is_some() && let Some(r) = track.root_mut(rid) {
+                if dr.tag.is_some()
+                    && let Some(r) = track.root_mut(rid)
+                {
                     r.tag = dr.tag;
                 }
                 out.roots_created += 1;
@@ -160,10 +160,7 @@ fn write_all(track: &mut Track, d: &DescNode, id: NodeId) {
 
 /// 该位置上的组件类型是否与描述不同（不同 ⇒ 调用方走"重建"路径）
 fn tag_mismatch(track: &Track, id: NodeId, d: &DescNode) -> bool {
-    track
-        .get(id)
-        .map(|n| n.kind.tag() != d.kind.tag())
-        .unwrap_or(true)
+    track.get(id).map(|n| n.kind.tag() != d.kind.tag()).unwrap_or(true)
 }
 
 /// 对齐单个节点（**调用方已保证类型一致**）；
@@ -172,10 +169,7 @@ fn tag_mismatch(track: &Track, id: NodeId, d: &DescNode) -> bool {
 /// 该节点在父节点 `children` 里的位置，只有调用方手里有。
 fn align_node(track: &mut Track, view: &ViewBuf, d_idx: u32, id: NodeId, out: &mut AlignStats) {
     let d = view.node(d_idx);
-    debug_assert!(
-        !tag_mismatch(track, id, d),
-        "align_node 只处理类型一致的节点"
-    );
+    debug_assert!(!tag_mismatch(track, id, d), "align_node 只处理类型一致的节点");
 
     let mut size_changed = false;
     let mut layout_changed = false;
@@ -246,9 +240,9 @@ fn align_node(track: &mut Track, view: &ViewBuf, d_idx: u32, id: NodeId, out: &m
         }
 
         // ④ handlers / bindings：整体替换（闭包每次 view() 都是新的），**不置脏**
-            n.handlers = d.handlers.clone();
-            n.context_menu = d.context_menu.clone();
-            n.bindings = d.bindings.clone();
+        n.handlers = d.handlers.clone();
+        n.context_menu = d.context_menu.clone();
+        n.bindings = d.bindings.clone();
     }
 
     if size_changed || layout_changed {
@@ -276,13 +270,7 @@ fn align_node(track: &mut Track, view: &ViewBuf, d_idx: u32, id: NodeId, out: &m
     }
 }
 
-fn align_positional_children(
-    track: &mut Track,
-    view: &ViewBuf,
-    d: &DescNode,
-    id: NodeId,
-    out: &mut AlignStats,
-) {
+fn align_positional_children(track: &mut Track, view: &ViewBuf, d: &DescNode, id: NodeId, out: &mut AlignStats) {
     let existing: Vec<NodeId> = track.children(id).to_vec();
     let n = d.children.len().max(existing.len());
     for i in 0..n {
@@ -310,13 +298,7 @@ fn align_positional_children(
     }
 }
 
-fn align_keyed_children(
-    track: &mut Track,
-    view: &ViewBuf,
-    d: &DescNode,
-    id: NodeId,
-    out: &mut AlignStats,
-) {
+fn align_keyed_children(track: &mut Track, view: &ViewBuf, d: &DescNode, id: NodeId, out: &mut AlignStats) {
     // 现有子节点按 key 建池
     let mut pool: Vec<(Option<Key>, NodeId)> = track
         .children(id)
@@ -368,9 +350,7 @@ fn align_keyed_children(
 pub fn needs_layout(track: &Track, id: NodeId) -> bool {
     track
         .get(id)
-        .map(|n| {
-            n.flags.contains(Flags::MEASURE_DIRTY) || n.flags.contains(Flags::ARRANGE_DIRTY)
-        })
+        .map(|n| n.flags.contains(Flags::MEASURE_DIRTY) || n.flags.contains(Flags::ARRANGE_DIRTY))
         .unwrap_or(false)
 }
 
@@ -392,13 +372,13 @@ pub fn root_count(track: &Track, layer: Layer) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-   use crate::track::{LayerOpts, Placement, Visibility};
+    use crate::track::{LayerOpts, Placement, Visibility};
     use crate::view::ViewBuf;
     use lieui_geom::{Color, Rect};
 
     /// 造一个 counter 风格的描述
     fn counter_view(text: &str) -> ViewBuf {
-       let mut v = ViewBuf::new();
+        let mut v = ViewBuf::new();
         v.begin();
         v.column(|c| {
             c.gap(12.0);
@@ -414,9 +394,10 @@ mod tests {
     }
 
     fn find_text(track: &Track, id: NodeId, needle: &str) -> Option<NodeId> {
-        track.descendants(id).into_iter().find(|n| {
-            matches!(track.get(*n).map(|x| &x.kind), Some(Kind::Text(s)) if s == needle)
-        })
+        track
+            .descendants(id)
+            .into_iter()
+            .find(|n| matches!(track.get(*n).map(|x| &x.kind), Some(Kind::Text(s)) if s == needle))
     }
 
     fn content_node(track: &Track) -> NodeId {
@@ -425,7 +406,7 @@ mod tests {
 
     #[test]
     fn first_align_builds_the_whole_tree() {
-       let v = counter_view("0");
+        let v = counter_view("0");
         let mut t = Track::new();
 
         let st = align(&mut t, &v);
@@ -444,7 +425,7 @@ mod tests {
 
     #[test]
     fn identical_desc_is_a_no_op() {
-       let v = counter_view("0");
+        let v = counter_view("0");
         let mut t = Track::new();
         align(&mut t, &v);
         let _ = t.take_damage();
@@ -462,7 +443,7 @@ mod tests {
 
     #[test]
     fn text_change_patches_one_node_and_keeps_ids() {
-       let mut t = Track::new();
+        let mut t = Track::new();
         let v1 = counter_view("0");
         align(&mut t, &v1);
         let _ = t.take_damage();
@@ -492,7 +473,7 @@ mod tests {
 
     #[test]
     fn slider_value_update_preserves_dragging_state() {
-       let mut t = Track::new();
+        let mut t = Track::new();
 
         let mut v1 = ViewBuf::new();
         v1.begin();
@@ -528,7 +509,7 @@ mod tests {
 
     #[test]
     fn tag_change_rebuilds_that_position() {
-       let mut t = Track::new();
+        let mut t = Track::new();
 
         let mut v1 = ViewBuf::new();
         v1.begin();
@@ -556,16 +537,20 @@ mod tests {
 
     #[test]
     fn keyed_list_reuses_nodes_on_reorder_and_destroys_missing() {
-       let mut t = Track::new();
+        let mut t = Track::new();
 
         let build = |ids: &[u64]| {
             let mut v = ViewBuf::new();
             v.begin();
             let items: Vec<u64> = ids.to_vec();
             v.column(|c| {
-                c.keyed_list(items, |id| *id, |v, id| {
-                    v.text(format!("row {id}"));
-                });
+                c.keyed_list(
+                    items,
+                    |id| *id,
+                    |v, id| {
+                        v.text(format!("row {id}"));
+                    },
+                );
             });
             v
         };
@@ -596,21 +581,27 @@ mod tests {
 
     #[test]
     fn layers_appear_and_disappear_and_nesting_cascades() {
-       let mut t = Track::new();
+        let mut t = Track::new();
 
         let mut v1 = ViewBuf::new();
         v1.begin();
-        v1.column(|c| { c.text("body"); });
+        v1.column(|c| {
+            c.text("body");
+        });
         align(&mut t, &v1);
         assert_eq!(root_count(&t, Layer::Modal), 0);
 
         // 打开 modal，并在其内部声明 popup
         let mut v2 = ViewBuf::new();
         v2.begin();
-        v2.column(|c| { c.text("body"); });
+        v2.column(|c| {
+            c.text("body");
+        });
         v2.modal(|m| {
             m.text("确认？");
-            m.popup_at("more", Placement::RightOf, |p| { p.text("sub"); });
+            m.popup_at("more", Placement::RightOf, |p| {
+                p.text("sub");
+            });
         });
         let st = align(&mut t, &v2);
         assert_eq!(st.roots_created, 2);
@@ -627,17 +618,23 @@ mod tests {
 
     #[test]
     fn modal_appearance_marks_whole_window_dirty() {
-       let mut t = Track::new();
+        let mut t = Track::new();
         let mut v1 = ViewBuf::new();
         v1.begin();
-        v1.column(|c| { c.text("body"); });
+        v1.column(|c| {
+            c.text("body");
+        });
         align(&mut t, &v1);
         let _ = t.take_damage();
 
         let mut v2 = ViewBuf::new();
         v2.begin();
-        v2.column(|c| { c.text("body"); });
-        v2.modal(|m| { m.text("确认？"); });
+        v2.column(|c| {
+            c.text("body");
+        });
+        v2.modal(|m| {
+            m.text("确认？");
+        });
         align(&mut t, &v2);
 
         let (_, all) = t.take_damage();
@@ -646,11 +643,15 @@ mod tests {
 
     #[test]
     fn overlay_is_hit_test_transparent_by_default() {
-       let mut t = Track::new();
+        let mut t = Track::new();
         let mut v = ViewBuf::new();
         v.begin();
-        v.column(|c| { c.text("body"); });
-        v.overlay(|o| { o.text("WATERMARK"); });
+        v.column(|c| {
+            c.text("body");
+        });
+        v.overlay(|o| {
+            o.text("WATERMARK");
+        });
         align(&mut t, &v);
 
         let ov = t.roots_of(Layer::Overlay).next().unwrap();
@@ -660,18 +661,26 @@ mod tests {
 
     #[test]
     fn layer_opts_change_marks_whole_window_dirty() {
-       let mut t = Track::new();
+        let mut t = Track::new();
         let mut v1 = ViewBuf::new();
         v1.begin();
-        v1.column(|c| { c.text("body"); });
-        v1.popup_at("k", Placement::Below, |p| { p.text("menu"); });
+        v1.column(|c| {
+            c.text("body");
+        });
+        v1.popup_at("k", Placement::Below, |p| {
+            p.text("menu");
+        });
         align(&mut t, &v1);
 
         // 同一 popup 换锚点方位
         let mut v2 = ViewBuf::new();
         v2.begin();
-        v2.column(|c| { c.text("body"); });
-        v2.popup_at("k", Placement::Above, |p| { p.text("menu"); });
+        v2.column(|c| {
+            c.text("body");
+        });
+        v2.popup_at("k", Placement::Above, |p| {
+            p.text("menu");
+        });
         align(&mut t, &v2);
 
         let (_, all) = t.take_damage();
@@ -680,7 +689,7 @@ mod tests {
 
     #[test]
     fn visibility_change_marks_layout_and_paint() {
-       let mut t = Track::new();
+        let mut t = Track::new();
 
         let mut v1 = ViewBuf::new();
         v1.begin();
@@ -707,26 +716,32 @@ mod tests {
 
     #[test]
     fn damage_uses_old_rect_of_patched_node() {
-       let mut t = Track::new();
+        let mut t = Track::new();
         let mut v1 = ViewBuf::new();
         v1.begin();
-        v1.column(|c| { c.text("0"); });
+        v1.column(|c| {
+            c.text("0");
+        });
         align(&mut t, &v1);
         let root = content_node(&t);
         let id = t.children(root)[0];
 
         // 手工给一个"上一帧"的布局结果
-        let mut cl = lieui_layout::ComputedLayout::default();
-        cl.x = 5.0;
-        cl.y = 6.0;
-        cl.width = 7.0;
-        cl.height = 8.0;
+        let cl = lieui_layout::ComputedLayout {
+            x: 5.0,
+            y: 6.0,
+            width: 7.0,
+            height: 8.0,
+            ..Default::default()
+        };
         t.get_mut(id).unwrap().computed = cl;
         let _ = t.take_damage();
 
         let mut v2 = ViewBuf::new();
         v2.begin();
-        v2.column(|c| { c.text("1"); });
+        v2.column(|c| {
+            c.text("1");
+        });
         align(&mut t, &v2);
 
         let (rects, all) = t.take_damage();
@@ -737,12 +752,20 @@ mod tests {
     #[test]
     fn desc_and_track_tags_are_comparable() {
         assert_eq!(desc_tag(&KindDesc::Box), KindTag::Box);
-        assert_eq!(Kind::from_desc(&KindDesc::Slider { value: 1.0, min: 0.0, max: 1.0 }).tag(), KindTag::Slider);
+        assert_eq!(
+            Kind::from_desc(&KindDesc::Slider {
+                value: 1.0,
+                min: 0.0,
+                max: 1.0
+            })
+            .tag(),
+            KindTag::Slider
+        );
     }
 
     #[test]
     fn needs_layout_reflects_flags() {
-       let mut t = Track::new();
+        let mut t = Track::new();
         let v = counter_view("0");
         align(&mut t, &v);
         let root = content_node(&t);

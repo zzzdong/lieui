@@ -43,18 +43,27 @@
 //!
 //! ## 后台任务与 loading 遮罩（速览）
 //!
-//! ```ignore
+//! 下面这段是**可编译的** doc test（`no_run`：需要真实窗口环境才能跑通）。
+//! 它同时承担示例与"API 形状守卫"两职——签名变了这里会编译失败。
+//!
+//! ```no_run
+//! # use lieui::prelude::*;
+//! # fn demo(cx: &mut Ctx, n: usize) {
 //! // 事件处理器里：起任务 + 遮罩（进度 / 取消都自动接好）
-//! cx.spawn_task_busy("正在导出…", |ctx| {
+//! cx.spawn_task_busy("正在导出…", move |ctx| {
 //!     for i in 0..n {
-//!         if ctx.is_cancelled() { return Err("已取消"); }
+//!         if ctx.is_cancelled() {
+//!             return Err("已取消");
+//!         }
 //!         ctx.progress(i, n);
-//!         work(i);
+//!         // ……实际工作……
 //!     }
-//!     Ok(summary)
+//!     Ok("完成")
 //! });
-//! // 结果在 on_external 里取：data.downcast::<TaskEvent>() -> ev.payload.downcast::<Result<..>>()
+//! # }
 //! ```
+//!
+//! 结果在 `on_external` 里取：`data.downcast::<TaskEvent>()` → `ev.payload.downcast::<Result<..>>()`。
 //!
 //! ## 待补（里程碑）
 //!
@@ -91,13 +100,13 @@ pub mod window;
 
 pub use align::{AlignStats, align};
 pub use app::{
-    App, CloseAction, ExternalData, FrameStats, PointerOutcome, ViewModel, WindowConfig, WindowCtx,
-    WindowView, erased,
+    App, CloseAction, ExternalData, FrameStats, PointerOutcome, ViewModel, WindowConfig, WindowCtx, WindowView, erased,
 };
 pub use cmd::{Cmd, CmdBuf, apply_cmds};
+pub use event::Emitter;
 pub use event::{
-    Ctx, DispatchOutcome, Event, EventKind, EventView, Handler, HandlerSlot, KeyCode, NamedKey,
-    PointerButton, PointerId, RoutePlan, Routing, collect_route, dispatch,
+    Ctx, DispatchOutcome, Event, EventKind, EventView, Handler, HandlerSlot, KeyCode, NamedKey, PointerButton,
+    PointerId, RoutePlan, Routing, collect_route, dispatch,
 };
 pub use focus::FocusChange;
 pub use input::{InputEvent, InputStep};
@@ -105,18 +114,17 @@ pub use layout::LayoutStats;
 pub use menu::{ITEM_HEIGHT, MENU_MIN_WIDTH, MenuItemRef, MenuRef};
 pub use reactive::{Dirty, Runtime, Signal, act, act1};
 pub use render::{
-    Op, RasterStats, Rasterizer, RenderStats, Renderer, Scene, SceneBuilder, SceneOptions,
-    SceneStats, TextCache, damage_batches,
+    Op, RasterStats, Rasterizer, RenderStats, Renderer, Scene, SceneBuilder, SceneOptions, SceneStats, TextCache,
+    damage_batches,
 };
-pub use transform::Affine;
 pub use style::{ImageFit, ImageStyle, PaintStyle, ShadowSpec, TextStyle};
-pub use event::Emitter;
 pub use task::{BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker};
 pub use timer::{FRAME_PERIOD, TimerHandle};
 pub use track::{
-    Anchor, Axis, Flags, FocusPolicy, FocusState, ImageData, InteractionState, Key, Kind, KindDesc,
-    KindTag, Layer, LayerOpts, Node, NodeId, Placement, Root, RootId, Track, Transform, Visibility,
+    Anchor, Axis, Flags, FocusPolicy, FocusState, ImageData, InteractionState, Key, Kind, KindDesc, KindTag, Layer,
+    LayerOpts, Node, NodeId, Placement, PressState, Root, RootId, Track, Transform, Visibility,
 };
+pub use transform::Affine;
 pub use view::{DescRef, ViewBuf, VirtualListState};
 pub use window::WindowId;
 
@@ -136,17 +144,13 @@ pub mod prelude {
     pub use crate::input::InputEvent;
     pub use crate::menu::{MenuItemRef, MenuRef};
     pub use crate::reactive::{Runtime, Signal, act, act1};
+    pub use crate::render::scene::Scene;
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
-    pub use crate::task::{
-        BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker,
-    };
+    pub use crate::task::{BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker};
     pub use crate::theme::{Theme, ThemeMode};
     pub use crate::timer::{FRAME_PERIOD, TimerHandle};
-    pub use crate::track::{
-        AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility,
-    };
+    pub use crate::track::{AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility};
+    pub use crate::transform::Affine;
     pub use crate::view::{DescRef, ViewBuf, VirtualListState};
     pub use lieui_geom::{Color, Point, Rect, Size};
-    pub use crate::render::scene::Scene;
-    pub use crate::transform::Affine;
 }

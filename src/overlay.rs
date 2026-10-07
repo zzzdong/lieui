@@ -63,11 +63,7 @@ pub(crate) fn push_busy_overlay(v: &mut ViewBuf, items: &[BusyItem], spinner: Cu
         .detail
         .clone()
         .or_else(|| top.progress.map(|(d, t)| format!("{d} / {t}")));
-    let cancel = if top.is_cancellable() {
-        top.cancel.clone()
-    } else {
-        None
-    };
+    let cancel = if top.is_cancellable() { top.cancel.clone() } else { None };
 
     v.modal_tagged(BUSY_OVERLAY_TAG, |m| {
         m.center(); // 层根撑满窗口 ⇒ 卡片居中
@@ -86,10 +82,7 @@ pub(crate) fn push_busy_overlay(v: &mut ViewBuf, items: &[BusyItem], spinner: Cu
                     head.custom(&spinner).width(18.0).height(18.0);
                     // 墨迹盒对齐：spinner 的视觉中心是**矩形中心**，文本若按行盒居中
                     // 会差 ~1px（ascent/descent 不对称）⇒ 两者视觉中心对不齐。
-                    head.text(label)
-                        .font_size(14.0)
-                        .color(theme.text)
-                        .optical_align(true);
+                    head.text(label).font_size(14.0).color(theme.text).optical_align(true);
                 });
                 if let Some(p) = ratio {
                     col.progress(p).width(260.0);
@@ -115,13 +108,22 @@ pub(crate) fn push_busy_overlay(v: &mut ViewBuf, items: &[BusyItem], spinner: Cu
 /// 三点脉冲 spinner（自绘；相位读挂钟 ⇒ 动画帧只需重绘）
 pub(crate) struct Spinner {
     color: Color,
+    /// 起始时刻（**单调时钟**，D62）。
+    ///
+    /// 此前相位取自 `SystemTime::now()`（挂钟）—— **挂钟会因 NTP 校时回拨**，
+    /// 于是 `% (CYCLE_MS * N)` 的结果会突然倒退，spinner 表现为**倒转 / 跳帧**。
+    /// `Instant` 是单调的，只有差值有意义，不受系统时间调整影响。
+    started: std::time::Instant,
 }
 
 impl Spinner {
     pub(crate) const SIZE: f32 = 18.0;
 
     pub(crate) fn new(color: Color) -> Self {
-        Self { color }
+        Self {
+            color,
+            started: std::time::Instant::now(),
+        }
     }
 }
 
@@ -142,12 +144,9 @@ impl CustomNode for Spinner {
         let total = N as f32 * dot + (N as f32 - 1.0) * gap;
         let x0 = rect.x + (rect.width - total) * 0.5;
         let y = rect.y + (rect.height - dot) * 0.5;
-        // 相位读**挂钟**（`Instant` 没有绝对毫秒；这里只要"会随时间走"）
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let phase = (now_ms % (CYCLE_MS * N as u128)) as f32 / CYCLE_MS as f32;
+        // 相位用**单调时钟的 elapsed**（D62）。挂钟会被 NTP 校时回拨 ⇒ 取模结果倒退 ⇒ spinner 倒转/跳帧。
+        let elapsed_ms = self.started.elapsed().as_millis();
+        let phase = (elapsed_ms % (CYCLE_MS * N as u128)) as f32 / CYCLE_MS as f32;
 
         for i in 0..N {
             // 距离当前相位的"落后量"：0 = 刚亮起 ⇒ 最亮
@@ -274,7 +273,10 @@ mod tests {
             .expect("卡片是层根的第一个子节点");
         assert_eq!(track.get(card).unwrap().kind.tag(), crate::track::KindTag::Box);
         let card_rect = rect_of(&track, card);
-        assert!(card_rect.width > 200.0 && card_rect.height > 40.0, "卡片有实际尺寸：{card_rect:?}");
+        assert!(
+            card_rect.width > 200.0 && card_rect.height > 40.0,
+            "卡片有实际尺寸：{card_rect:?}"
+        );
         // 层根撑满窗口（居中容器）
         let root_rect = rect_of(&track, root.node);
         assert!((root_rect.width - 400.0).abs() < 1.0, "层根撑满窗口");
@@ -325,8 +327,7 @@ mod tests {
 
         let n = track.get(label_node).unwrap();
         assert!(n.text.spec.optical_align, "标题走墨迹盒");
-        let ink = lieui_text::TextEngine::ink_bounds("正在打开 3 个文件…", &n.text.spec)
-            .expect("标题有墨迹");
+        let ink = lieui_text::TextEngine::ink_bounds("正在打开 3 个文件…", &n.text.spec).expect("标题有墨迹");
         assert!(
             (lr.height - ink.height()).abs() < 0.01,
             "标题盒高 = 墨迹高（⇒ 墨迹中心就是盒中心）：{} vs {}",
@@ -397,7 +398,10 @@ mod tests {
         let mut v = ViewBuf::new();
         v.begin();
         push_busy_overlay(&mut v, &items, cell(Spinner::new(Color::WHITE)));
-        let has_button = v.nodes.iter().any(|n| matches!(n.kind, crate::track::KindDesc::Button { .. }));
+        let has_button = v
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, crate::track::KindDesc::Button { .. }));
         assert!(has_button, "可取消的遮罩里应有按钮");
     }
 }

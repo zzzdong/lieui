@@ -67,10 +67,32 @@ pub trait Waker: Send + Sync + 'static {
 #[derive(Default)]
 pub(crate) struct LocalQueue {
     items: Mutex<VecDeque<(WindowId, ExternalData)>>,
+    /// 平台 waker 的转发目标（[`Runtime::set_waker`] 注入）。
+    ///
+    /// ## 为什么需要它（A6）
+    ///
+    /// `TaskCtx` 持有的是 **spawn 时**的 `WakerSlot` **快照**，而平台 waker 是
+    /// 在 `run()` 里才注入的 ⇒ **在 `run()` 之前 spawn 的任务**（典型：ViewModel
+    /// 构造期起预加载 / 预热）永远持有 `Local` 槽位。
+    ///
+    /// 光靠"平台 tick 里 drain 本地队列"只能保证消息**不丢**，但它**唤不醒**事件循环
+    /// （`Local` 的 `wake()` 是 no-op）⇒ 任务完成后要等到下一次真实输入才被处理。
+    ///
+    /// 所以 `set_waker` 会把平台 waker **装进这个已被共享出去的队列**里，
+    /// 于是这些"拿着旧快照的任务"也能把消息**与唤醒**转发给平台。
+    forward: Mutex<Option<Arc<dyn Waker>>>,
 }
 
 impl LocalQueue {
     fn push(&self, window: WindowId, data: ExternalData) {
+        // 有平台 waker 就直接交给它（顺带由它唤醒 UI）。
+        // `post` 消耗 `data`，所以不能"失败后退回本地队列"—— 而 `post` 返回 `false`
+        // 的语义本来就是"事件循环已退出，调用方尽快收敛"，丢弃是正确行为。
+        let fwd = self.forward.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(w) = fwd {
+            let _ = w.post(window, data);
+            return;
+        }
         self.items
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -78,11 +100,25 @@ impl LocalQueue {
     }
 
     fn take(&self) -> Vec<(WindowId, ExternalData)> {
-        self.items
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .collect()
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
+    }
+
+    /// 装上平台 waker 并**转走**已积压的消息（否则它们永远留在队列里）。
+    ///
+    /// 返回 `true` 表示成功转交（这些消息已由平台接管，不需要 UI 再消费）。
+    fn attach_platform(&self, waker: Arc<dyn Waker>) -> bool {
+        let pending = {
+            let mut slot = self.forward.lock().unwrap_or_else(|e| e.into_inner());
+            *slot = Some(Arc::clone(&waker));
+            self.take()
+        };
+        if pending.is_empty() {
+            return false;
+        }
+        for (win, data) in pending {
+            waker.post(win, data);
+        }
+        true
     }
 }
 
@@ -262,12 +298,7 @@ impl TaskHandle {
 
     /// 该任务是否还挂在运行时（完成后由框架移除）
     pub fn is_running(&self) -> bool {
-        self.rt
-            .inner
-            .tasks
-            .borrow()
-            .iter()
-            .any(|t| t.id == self.id)
+        self.rt.inner.tasks.borrow().iter().any(|t| t.id == self.id)
     }
 }
 
@@ -384,8 +415,13 @@ impl Clone for BusyItem {
 impl BusyItem {
     /// 进度比例（`None` = 不确定进度 ⇒ 画动画）
     pub fn ratio(&self) -> Option<f32> {
-        self.progress
-            .map(|(d, t)| if t == 0 { 0.0 } else { (d as f32 / t as f32).clamp(0.0, 1.0) })
+        self.progress.map(|(d, t)| {
+            if t == 0 {
+                0.0
+            } else {
+                (d as f32 / t as f32).clamp(0.0, 1.0)
+            }
+        })
     }
 
     pub fn is_cancellable(&self) -> bool {
@@ -412,8 +448,21 @@ impl Runtime {
     // ── 唤醒器 ──
 
     /// 注入平台唤醒器（`platform::run` 在进入事件循环时调用；此后所有投递走平台）。
+    ///
+    /// ★ 同时把平台 waker **装进旧的本地队列**（A6）：`TaskCtx` 持有的是 spawn 时的
+    /// `WakerSlot` **快照**，所以在 `run()` **之前** spawn 的任务（典型：ViewModel 构造期
+    /// 起预加载）手里的槽位永远是 `Local`。不给它装转发器的话，这些任务完成后
+    /// 既不会唤醒事件循环、消息也只在无人 drain 的队列里堆积 ⇒ **界面毫无反应且零报错**。
+    ///
+    /// 装转发器时顺带把**已积压**的消息转交给平台（否则它们留在队列里没人要）。
     pub fn set_waker(&self, waker: Arc<dyn Waker>) {
-        *self.inner.waker.borrow_mut() = WakerSlot::Platform(waker);
+        let old = std::mem::replace(
+            &mut *self.inner.waker.borrow_mut(),
+            WakerSlot::Platform(Arc::clone(&waker)),
+        );
+        if let WakerSlot::Local(q) = old {
+            q.attach_platform(waker);
+        }
     }
 
     /// 当前平台唤醒器（无头 / 未进入事件循环时是 `None`）
@@ -473,12 +522,7 @@ impl Runtime {
     /// 任务完成时遮罩自动收起（无需手动 `BusyToken`）。
     ///
     /// 任务里用 [`TaskCtx::progress`] 上报进度即可驱动遮罩上的进度条。
-    pub fn spawn_task_busy<T, F>(
-        &self,
-        window: WindowId,
-        label: impl Into<String>,
-        work: F,
-    ) -> TaskHandle
+    pub fn spawn_task_busy<T, F>(&self, window: WindowId, label: impl Into<String>, work: F) -> TaskHandle
     where
         T: Send + 'static,
         F: FnOnce(TaskCtx) -> T + Send + 'static,
@@ -486,12 +530,7 @@ impl Runtime {
         self.spawn_task_inner(window, Some(label.into()), work)
     }
 
-    fn spawn_task_inner<T, F>(
-        &self,
-        window: WindowId,
-        busy_label: Option<String>,
-        work: F,
-    ) -> TaskHandle
+    fn spawn_task_inner<T, F>(&self, window: WindowId, busy_label: Option<String>, work: F) -> TaskHandle
     where
         T: Send + 'static,
         F: FnOnce(TaskCtx) -> T + Send + 'static,
@@ -926,6 +965,67 @@ mod tests {
         assert!(rt.take_pending_external().is_empty(), "平台模式不落本地队列");
     }
 
+    /// 回归（A6）：**在 `set_waker` 之前** spawn 的任务也必须能把消息与唤醒交给平台。
+    ///
+    /// bug 表现：`TaskCtx` 持有 spawn 时的 `WakerSlot` **快照**，而平台 waker 是
+    /// `run()` 里才注入的 ⇒ 构造期起的预加载任务永远持 `Local` 槽位，`post()`
+    /// 落进 `LocalQueue`。而 `LocalQueue` 只被 `App::frame_all` 消费，**平台层从不调它**
+    /// ⇒ 消息积压、无人消费、**任务永不回调、界面毫无反应且零报错**。
+    ///
+    /// 修复分两半，本测试覆盖"转发"那一半（另一半是平台 tick 里的 drain）。
+    #[test]
+    fn task_spawned_before_set_waker_still_reaches_the_platform() {
+        let rt = Runtime::new();
+
+        // ① 在平台 waker 注入**之前**取一个槽位快照 —— 这模拟"run() 之前 spawn 的任务"
+        let early = rt.inner.waker.borrow().clone();
+
+        // ② 平台启动：注入 waker（会给旧本地队列装上转发器）
+        let tw = Arc::new(TestWaker::default());
+        rt.set_waker(tw.clone());
+
+        // ③ 那个"早期任务"完成并投递 —— 消息必须到达平台，而不是躺在本地队列里
+        assert!(early.post(win(), ExternalData::new("early")), "旧快照的 post 应成功");
+        assert_eq!(
+            tw.take().len(),
+            1,
+            "A6：set_waker 之前 spawn 的任务，其消息必须转发给平台（否则永久丢失）"
+        );
+        assert!(
+            rt.take_pending_external().is_empty(),
+            "消息已转交平台，不应滞留在本地队列"
+        );
+    }
+
+    /// 回归（A6 另一半）：`set_waker` 时**已积压**在本地队列里的消息要被转交平台。
+    ///
+    /// 否则它们会永远留在队列里：平台模式不再 drain 本地队列（`take_pending_external`
+    /// 在 `Platform` 分支返回空），而这些消息又已经不该由 UI 再消费一次。
+    #[test]
+    fn set_waker_forwards_already_queued_messages() {
+        let rt = Runtime::new();
+
+        // 平台启动前先投两条（模拟 ViewModel 构造期的同步投递）。
+        // ⚠️ **不要在这里 drain**：`take_pending_external` 是"取走"，会把要验证的消息清掉
+        // —— 那样断言就变成"队列本来就是空的"，测试失去意义。
+        {
+            let slot = rt.inner.waker.borrow().clone();
+            slot.post(win(), ExternalData::new("a"));
+            slot.post(win(), ExternalData::new("b"));
+        }
+
+        // 注入平台 waker ⇒ 积压消息应被转交
+        let tw = Arc::new(TestWaker::default());
+        rt.set_waker(tw.clone());
+
+        assert_eq!(
+            tw.take().len(),
+            2,
+            "A6：set_waker 必须把已积压的消息转交平台，否则它们永远滞留"
+        );
+        assert!(rt.take_pending_external().is_empty(), "转交后本地队列应为空");
+    }
+
     #[test]
     fn spawn_task_delivers_a_task_event_with_the_payload() {
         let rt = Runtime::new();
@@ -1039,10 +1139,7 @@ mod tests {
             if d.downcast_ref::<TaskProgress>().is_some() {
                 on_task_message(&rt, win(), &d);
                 let item = rt.busy_items(win()).into_iter().next().expect("遮罩项在");
-                seen.push((
-                    item.ratio().map(|r| (r * 100.0).round() as i32),
-                    item.detail.clone(),
-                ));
+                seen.push((item.ratio().map(|r| (r * 100.0).round() as i32), item.detail.clone()));
             }
         }
         assert_eq!(
@@ -1150,9 +1247,7 @@ mod tests {
         rt.set_waker(tw.clone());
         rt.register_window(win());
 
-        let handle = rt.spawn_task_busy(win(), "正在解析…", |_ctx| -> u32 {
-            panic!("任务体崩了")
-        });
+        let handle = rt.spawn_task_busy(win(), "正在解析…", |_ctx| -> u32 { panic!("任务体崩了") });
         assert!(rt.is_busy(win()));
 
         let deadline = Instant::now() + Duration::from_secs(5);

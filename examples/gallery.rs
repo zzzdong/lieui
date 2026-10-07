@@ -107,23 +107,21 @@ impl Gallery {
                     return format!("已取消（处理到 {i}/{TOTAL}）");
                 }
             }
-            format!(
-                "完成 {TOTAL} 个分片，耗时 {} ms",
-                started.elapsed().as_millis()
-            )
+            format!("完成 {TOTAL} 个分片，耗时 {} ms", started.elapsed().as_millis())
         });
     }
 
     /// 菜单条按钮（`open_menu` 声明式互斥：只有一个菜单是打开的）
     fn menu_anchor(me: &Rc<Self>, v: &mut ViewBuf, name: &str) {
         let m = name.to_string();
-        v.button(name)
-            .key(format!("menu-{name}"))
-            .on_tap(act1(me, |s, m: String| {
+        v.button(name).key(format!("menu-{name}")).on_tap(act1(
+            me,
+            |s, m: String| {
                 s.sub_open.set(false); // 切换/关闭菜单 ⇒ 子菜单一并收起
-                s.open_menu
-                    .set(if s.open_menu.get() == m { String::new() } else { m });
-            }, m));
+                s.open_menu.set(if s.open_menu.get() == m { String::new() } else { m });
+            },
+            m,
+        ));
     }
 
     fn menu_popup(me: &Rc<Self>, v: &mut ViewBuf, name: &str, items: &[&str]) {
@@ -270,35 +268,37 @@ impl ViewModel for Gallery {
                 s.expand(true);
                 s.align_items(FlexAlign::Center);
                 s.column(|s| {
-                s.width(360.0);
-                s.gap(16.0);
+                    s.width(360.0);
+                    s.gap(16.0);
 
-            // ── 标题 + 主题切换 ──
-            s.text("组件陈列馆").font_size(22.0);
-            s.row(|r| {
-                r.gap(10.0);
-                r.align_items(FlexAlign::Center);
-                r.button("切换深色主题").on_tap(act(self, |s| {
-                    s.follow_system.set(false); // 手动切换 ⇒ 退出「跟随系统」
-                    if s.rt.theme() == Theme::dark() {
-                        s.rt.set_theme(Theme::light());
-                    } else {
-                        s.rt.set_theme(Theme::dark());
-                    }
-                }));
-                // 跟随系统：勾选 ⇒ ThemeMode::System（OS 深浅色切换时自动换主题）
-                r.checkbox_bound(&self.follow_system).on(EventKind::Tapped, {
-                    let me = Rc::clone(self);
-                    move |_| {
-                        me.rt.set_theme_mode(if me.follow_system.get() {
-                            ThemeMode::System
-                        } else {
-                            ThemeMode::Light
+                    // ── 标题 + 主题切换 ──
+                    s.text("组件陈列馆").font_size(22.0);
+                    s.row(|r| {
+                        r.gap(10.0);
+                        r.align_items(FlexAlign::Center);
+                        r.button("切换深色主题").on_tap(act(self, |s| {
+                            s.follow_system.set(false); // 手动切换 ⇒ 退出「跟随系统」
+                            if s.rt.theme() == Theme::dark() {
+                                s.rt.set_theme(Theme::light());
+                            } else {
+                                s.rt.set_theme(Theme::dark());
+                            }
+                        }));
+                        // 跟随系统：勾选 ⇒ ThemeMode::System（OS 深浅色切换时自动换主题）
+                        r.checkbox_bound(&self.follow_system).on(EventKind::Tapped, {
+                            let me = Rc::clone(self);
+                            move |_| {
+                                me.rt.set_theme_mode(if me.follow_system.get() {
+                                    ThemeMode::System
+                                } else {
+                                    ThemeMode::Light
+                                });
+                            }
                         });
-                    }
-                });
-                r.text("跟随系统主题").font_size(13.0).color(self.rt.theme().text_secondary);
-                r.text("或悬停这里看 tooltip（悬停 0.6s 浮出，点我试试）")
+                        r.text("跟随系统主题")
+                            .font_size(13.0)
+                            .color(self.rt.theme().text_secondary);
+                        r.text("或悬停这里看 tooltip（悬停 0.6s 浮出，点我试试）")
                     .font_size(13.0)
                     .color(self.rt.theme().text_secondary)
                     .hover_color(self.rt.theme().accent)
@@ -306,179 +306,182 @@ impl ViewModel for Gallery {
                     .on_tap(act(self, |s| {
                         s.last_action.set("看到 hover 变色和 tooltip 了吗？".into());
                     }));
-            });
+                    });
 
-            // ── 按钮 ──
-            self.divider(s);
-            s.text("按钮").font_size(16.0);
-            s.row(|r| {
-                r.gap(10.0);
-                r.button(&format!("点了我 {} 次", self.clicks.get()))
-                    .on_tap(act(self, |s| s.clicks.update(|v| *v += 1)));
-                r.button("归零").on_tap(act(self, |s| s.clicks.set(0)));
-            });
+                    // ── 按钮 ──
+                    self.divider(s);
+                    s.text("按钮").font_size(16.0);
+                    s.row(|r| {
+                        r.gap(10.0);
+                        r.button(&format!("点了我 {} 次", self.clicks.get()))
+                            .on_tap(act(self, |s| s.clicks.update(|v| *v += 1)));
+                        r.button("归零").on_tap(act(self, |s| s.clicks.set(0)));
+                    });
 
-            // ── 滑块 + 进度条 ──
-            self.divider(s);
-            s.text(format!("音量 {:.1} / 10（拖我）", self.volume.get())).font_size(16.0);
-            s.slider_bound(&self.volume, 0.0, 10.0);
-            s.progress(self.volume.get() / 10.0);
+                    // ── 滑块 + 进度条 ──
+                    self.divider(s);
+                    s.text(format!("音量 {:.1} / 10（拖我）", self.volume.get()))
+                        .font_size(16.0);
+                    s.slider_bound(&self.volume, 0.0, 10.0);
+                    s.progress(self.volume.get() / 10.0);
 
-            // ── 复选框 / 开关 / 单选（共享模型）──
-            self.divider(s);
-            s.text("选择控件（复选框与开关共享同一个值）").font_size(16.0);
-            s.row(|r| {
-                r.gap(10.0);
-                r.checkbox_bound(&self.agree);
-                r.switch_bound(&self.agree);
-                r.text(if self.agree.get() { "已启用" } else { "已禁用" }).font_size(14.0);
-            });
-            s.row(|r| {
-                r.gap(10.0);
-                r.radio_bound(&self.flavor, "apple");
-                r.text("苹果").font_size(14.0);
-                r.radio_bound(&self.flavor, "banana");
-                r.text("香蕉").font_size(14.0);
-                r.radio_bound(&self.flavor, "cherry");
-                r.text("樱桃").font_size(14.0);
-            });
+                    // ── 复选框 / 开关 / 单选（共享模型）──
+                    self.divider(s);
+                    s.text("选择控件（复选框与开关共享同一个值）").font_size(16.0);
+                    s.row(|r| {
+                        r.gap(10.0);
+                        r.checkbox_bound(&self.agree);
+                        r.switch_bound(&self.agree);
+                        r.text(if self.agree.get() { "已启用" } else { "已禁用" })
+                            .font_size(14.0);
+                    });
+                    s.row(|r| {
+                        r.gap(10.0);
+                        r.radio_bound(&self.flavor, "apple");
+                        r.text("苹果").font_size(14.0);
+                        r.radio_bound(&self.flavor, "banana");
+                        r.text("香蕉").font_size(14.0);
+                        r.radio_bound(&self.flavor, "cherry");
+                        r.text("樱桃").font_size(14.0);
+                    });
 
-            // ── 下拉选择 ──
-            self.divider(s);
-            s.text("下拉选择").font_size(16.0);
-            Gallery::combo_anchor(self, s);
+                    // ── 下拉选择 ──
+                    self.divider(s);
+                    s.text("下拉选择").font_size(16.0);
+                    Gallery::combo_anchor(self, s);
 
-            // ── 后台任务 + loading 遮罩（框架级跨线程支持）──
-            self.divider(s);
-            s.text("后台任务（loading 遮罩 / 进度 / 取消）").font_size(16.0);
-            s.text("任务跑在工作线程，UI 不卡；遮罩上的「取消」会中断它")
-                .font_size(12.0)
-                .color(self.rt.theme().text_secondary);
-            s.row(|r| {
-                r.gap(10.0);
-                r.align_items(FlexAlign::Center);
-                r.button("跑 3 秒后台任务").on_tap_with({
-                    let me = Rc::clone(self);
-                    move |cx| me.start_background_demo(cx)
-                });
-                r.text(self.bg_result.get())
-                    .font_size(12.0)
-                    .color(self.rt.theme().text_secondary);
-            });
-
-            // ── 图标（Material Icons 字体，名称即 codepoints 表里的名字）──
-            // 垂直对齐说明：图标的行盒 = 字号见方的正方形（该字体行高系数 1.0），
-            // 行上 `align_items(Center)` 按行盒交叉轴居中 ⇒ 不同字号混排天然对齐；
-            // icon_button 内部把字形行盒双轴居中绘制 ⇒ 字形在按钮里也是居中的。
-            self.divider(s);
-            s.text("图标（icon / icon_button）").font_size(16.0);
-            s.row(|r| {
-                r.gap(6.0);
-                r.align_items(FlexAlign::Center);
-                for name in ["home", "search", "settings", "add", "delete", "close", "refresh"] {
-                    r.icon_button(name)
-                        .on_tap(act1(self, |s, n: String| s.last_action.set(format!("图标 {n}")), name.to_string()));
-                }
-            });
-            s.row(|r| {
-                r.gap(16.0);
-                r.align_items(FlexAlign::Center);
-                r.icon("favorite").color(self.rt.theme().accent).font_size(28.0);
-                r.icon("star").font_size(24.0);
-                r.icon("info").font_size(20.0);
-                r.icon("menu").font_size(16.0);
-                // `.optical_align(true)`：按**墨迹盒**参与尺寸与居中。
-                // 图标字体墨迹精确居中于行盒（Δ=0），普通字体不居中（13px 拉丁偏上 1.05px、
-                // CJK 偏下 0.39px）⇒ 混排时按墨迹对齐，视觉中心才严格重合。
-                // `.wrap(false)`：演示行里保持单行（换行会把行撑高、失去"居中对比"的意义）。
-                r.text("不同字号，可 .color 变色")
-                    .font_size(13.0)
-                    .color(self.rt.theme().text_secondary)
-                    .wrap(false)
-                    .optical_align(true);
-            });
-
-            // ── 虚拟列表（只物化可见行；10000 项也丝滑）──
-            self.divider(s);
-            s.text("虚拟列表（10000 项，只物化可见行）").font_size(16.0);
-            s.text("点一行标记它；滚走再滚回来，标记与滚动位置都在")
-                .font_size(12.0)
-                .color(self.rt.theme().text_secondary);
-            s.row(|r| {
-                r.gap(10.0);
-                r.align_items(FlexAlign::Center);
-                r.text(format!("已标记 {} 行", self.vl_picked.get().len()))
-                    .font_size(12.0)
-                    .color(self.rt.theme().text_secondary);
-                r.button("清空标记")
-                    .on_tap(act(self, |s: &Gallery| s.vl_picked.set(HashSet::new())));
-            });
-            s.scroll(|sc| {
-                sc.height(220.0);
-                sc.width(360.0);
-                sc.background(self.rt.theme().input_background);
-                sc.border(1.0, self.rt.theme().control_border);
-                sc.radius(6.0);
-                sc.virtual_list(
-                    &self.vl,
-                    &self.vl_items,
-                    |i| *i as u64,
-                    26.0,
-                    220.0,
-                    |v, i| {
-                        let idx = *i;
-                        let picked = self.vl_picked.get().contains(&idx);
-                        let me = Rc::clone(self);
-                        v.row(|row| {
-                            row.height(26.0);
-                            row.padding(6.0);
-                            row.on(EventKind::Tapped, move |_| {
-                                let mut set = me.vl_picked.get();
-                                if !set.remove(&idx) {
-                                    set.insert(idx);
-                                }
-                                me.vl_picked.set(set);
-                            });
-                            row.text(format!(
-                                "Item {idx}{}",
-                                if picked { "    ✓ 已标记" } else { "" }
-                            ))
-                            .font_size(13.0);
+                    // ── 后台任务 + loading 遮罩（框架级跨线程支持）──
+                    self.divider(s);
+                    s.text("后台任务（loading 遮罩 / 进度 / 取消）").font_size(16.0);
+                    s.text("任务跑在工作线程，UI 不卡；遮罩上的「取消」会中断它")
+                        .font_size(12.0)
+                        .color(self.rt.theme().text_secondary);
+                    s.row(|r| {
+                        r.gap(10.0);
+                        r.align_items(FlexAlign::Center);
+                        r.button("跑 3 秒后台任务").on_tap_with({
+                            let me = Rc::clone(self);
+                            move |cx| me.start_background_demo(cx)
                         });
-                    },
-                );
-            });
+                        r.text(self.bg_result.get())
+                            .font_size(12.0)
+                            .color(self.rt.theme().text_secondary);
+                    });
 
-            // ── 输入框 ──
-            self.divider(s);
-            s.text("输入框（中文 IME / Ctrl+A·C·V / 方向键选区）").font_size(16.0);
-            s.input_bound(&self.name).placeholder("在这里输入…");
-            s.text(format!("正在输入：{}", self.name.get())).font_size(14.0);
+                    // ── 图标（Material Icons 字体，名称即 codepoints 表里的名字）──
+                    // 垂直对齐说明：图标的行盒 = 字号见方的正方形（该字体行高系数 1.0），
+                    // 行上 `align_items(Center)` 按行盒交叉轴居中 ⇒ 不同字号混排天然对齐；
+                    // icon_button 内部把字形行盒双轴居中绘制 ⇒ 字形在按钮里也是居中的。
+                    self.divider(s);
+                    s.text("图标（icon / icon_button）").font_size(16.0);
+                    s.row(|r| {
+                        r.gap(6.0);
+                        r.align_items(FlexAlign::Center);
+                        for name in ["home", "search", "settings", "add", "delete", "close", "refresh"] {
+                            r.icon_button(name).on_tap(act1(
+                                self,
+                                |s, n: String| s.last_action.set(format!("图标 {n}")),
+                                name.to_string(),
+                            ));
+                        }
+                    });
+                    s.row(|r| {
+                        r.gap(16.0);
+                        r.align_items(FlexAlign::Center);
+                        r.icon("favorite").color(self.rt.theme().accent).font_size(28.0);
+                        r.icon("star").font_size(24.0);
+                        r.icon("info").font_size(20.0);
+                        r.icon("menu").font_size(16.0);
+                        // `.optical_align(true)`：按**墨迹盒**参与尺寸与居中。
+                        // 图标字体墨迹精确居中于行盒（Δ=0），普通字体不居中（13px 拉丁偏上 1.05px、
+                        // CJK 偏下 0.39px）⇒ 混排时按墨迹对齐，视觉中心才严格重合。
+                        // `.wrap(false)`：演示行里保持单行（换行会把行撑高、失去"居中对比"的意义）。
+                        r.text("不同字号，可 .color 变色")
+                            .font_size(13.0)
+                            .color(self.rt.theme().text_secondary)
+                            .wrap(false)
+                            .optical_align(true);
+                    });
 
-            // ── 图片 ──
-            self.divider(s);
-            s.text("图片（程序生成，contain 缩放）").font_size(16.0);
-            s.image(self.photo.clone()).width(240.0).height(120.0);
+                    // ── 虚拟列表（只物化可见行；10000 项也丝滑）──
+                    self.divider(s);
+                    s.text("虚拟列表（10000 项，只物化可见行）").font_size(16.0);
+                    s.text("点一行标记它；滚走再滚回来，标记与滚动位置都在")
+                        .font_size(12.0)
+                        .color(self.rt.theme().text_secondary);
+                    s.row(|r| {
+                        r.gap(10.0);
+                        r.align_items(FlexAlign::Center);
+                        r.text(format!("已标记 {} 行", self.vl_picked.get().len()))
+                            .font_size(12.0)
+                            .color(self.rt.theme().text_secondary);
+                        r.button("清空标记")
+                            .on_tap(act(self, |s: &Gallery| s.vl_picked.set(HashSet::new())));
+                    });
+                    s.scroll(|sc| {
+                        sc.height(220.0);
+                        sc.width(360.0);
+                        sc.background(self.rt.theme().input_background);
+                        sc.border(1.0, self.rt.theme().control_border);
+                        sc.radius(6.0);
+                        sc.virtual_list(
+                            &self.vl,
+                            &self.vl_items,
+                            |i| *i as u64,
+                            26.0,
+                            220.0,
+                            |v, i| {
+                                let idx = *i;
+                                let picked = self.vl_picked.get().contains(&idx);
+                                let me = Rc::clone(self);
+                                v.row(|row| {
+                                    row.height(26.0);
+                                    row.padding(6.0);
+                                    row.on(EventKind::Tapped, move |_| {
+                                        let mut set = me.vl_picked.get();
+                                        if !set.remove(&idx) {
+                                            set.insert(idx);
+                                        }
+                                        me.vl_picked.set(set);
+                                    });
+                                    row.text(format!("Item {idx}{}", if picked { "    ✓ 已标记" } else { "" }))
+                                        .font_size(13.0);
+                                });
+                            },
+                        );
+                    });
 
-            // ── 自绘波形 ──
-            self.divider(s);
-            s.text("自绘波形（CustomNode，点它）").font_size(16.0);
-            s.custom(&self.wave);
+                    // ── 输入框 ──
+                    self.divider(s);
+                    s.text("输入框（中文 IME / Ctrl+A·C·V / 方向键选区）").font_size(16.0);
+                    s.input_bound(&self.name).placeholder("在这里输入…");
+                    s.text(format!("正在输入：{}", self.name.get())).font_size(14.0);
 
-            // ── 滚动区（嵌套滚动）──
-            self.divider(s);
-            s.text("嵌套滚动区").font_size(16.0);
-            s.scroll(|inner| {
-                inner.width(320.0);
-                inner.height(140.0);
-                inner.gap(6.0);
-                inner.align_items(FlexAlign::Start);
-                for i in 1..=16 {
-                    inner.text(format!("内滚内容第 {i} 行 —— 滚轮或拖右侧滚动条"));
-                }
-            });
+                    // ── 图片 ──
+                    self.divider(s);
+                    s.text("图片（程序生成，contain 缩放）").font_size(16.0);
+                    s.image(self.photo.clone()).width(240.0).height(120.0);
 
-            s.text("Tab 可在按钮 / 滑块 / 复选框 / 开关 / 单选 / 输入框之间移动焦点").font_size(13.0);
+                    // ── 自绘波形 ──
+                    self.divider(s);
+                    s.text("自绘波形（CustomNode，点它）").font_size(16.0);
+                    s.custom(&self.wave);
+
+                    // ── 滚动区（嵌套滚动）──
+                    self.divider(s);
+                    s.text("嵌套滚动区").font_size(16.0);
+                    s.scroll(|inner| {
+                        inner.width(320.0);
+                        inner.height(140.0);
+                        inner.gap(6.0);
+                        inner.align_items(FlexAlign::Start);
+                        for i in 1..=16 {
+                            inner.text(format!("内滚内容第 {i} 行 —— 滚轮或拖右侧滚动条"));
+                        }
+                    });
+
+                    s.text("Tab 可在按钮 / 滑块 / 复选框 / 开关 / 单选 / 输入框之间移动焦点")
+                        .font_size(13.0);
                 });
             });
         });
@@ -507,7 +510,11 @@ fn demo_image() -> ImageData {
             rgba.push(255);
         }
     }
-    ImageData { width: w, height: h, rgba }
+    ImageData {
+        width: w,
+        height: h,
+        rgba,
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

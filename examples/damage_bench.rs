@@ -85,10 +85,7 @@ fn main() {
         let mut full_px = 0u64;
         let t0 = Instant::now();
         for _ in 0..ITERS {
-            app.window_ctx_mut(id)
-                .unwrap()
-                .track_mut()
-                .damage_whole_window();
+            app.window_ctx_mut(id).unwrap().track_mut().damage_whole_window();
             rt.mark(id, Dirty::PAINT | Dirty::PRESENT);
             let st = app.frame_all();
             full_px = st[0].1.render.raster.pixels;
@@ -100,10 +97,7 @@ fn main() {
         let mut batches = 0usize;
         let t1 = Instant::now();
         for _ in 0..ITERS {
-            app.window_ctx_mut(id)
-                .unwrap()
-                .track_mut()
-                .mark_paint_dirty(target);
+            app.window_ctx_mut(id).unwrap().track_mut().mark_paint_dirty(target);
             let st = app.frame_all();
             part_px = st[0].1.render.raster.pixels;
             batches = st[0].1.render.raster.batches;
@@ -133,8 +127,7 @@ fn main() {
 /// （包含现实现里"每个批次都把整个场景重放一遍"的固定开销）
 fn rasterize_strategies() {
     use lieui::render::{
-        Rasterizer, SceneBuilder, SceneOptions, damage_batches, damage_batches_bands,
-        damage_batches_union,
+        Rasterizer, SceneBuilder, SceneOptions, damage_batches, damage_batches_bands, damage_batches_union,
     };
 
     const W: f32 = 1280.0;
@@ -147,9 +140,7 @@ fn rasterize_strategies() {
     app.frame_all();
 
     // 滚动 16 行（每行整宽 20px）——列表滚动的典型脏区形状
-    let damage: Vec<Rect> = (0..16)
-        .map(|i| Rect::new(0.0, i as f32 * 44.0, W, 20.0))
-        .collect();
+    let damage: Vec<Rect> = (0..16).map(|i| Rect::new(0.0, i as f32 * 44.0, W, 20.0)).collect();
 
     let (scene, ops) = {
         let track = app.window_ctx(id).unwrap().track();
@@ -203,10 +194,7 @@ fn rasterize_strategies() {
                 raster.rasterize_batches(&scene, &batches);
             }
             let d = t.elapsed() / ITERS;
-            println!(
-                "   {name:<16} {:>3} 批 / {px:>8.0} px | {d:>10.3?}",
-                batches.len()
-            );
+            println!("   {name:<16} {:>3} 批 / {px:>8.0} px | {d:>10.3?}", batches.len());
         }
     }
 }
@@ -259,9 +247,6 @@ fn strategies() {
             let px: f32 = b.iter().map(|r| r.width * r.height).sum();
             row.push(format!("{} 批 / {:.0} px", b.len(), px));
         }
-        println!(
-            "{:<26} {:>14} {:>16} {:>16}",
-            name, row[0], row[1], row[2]
-        );
+        println!("{:<26} {:>14} {:>16} {:>16}", name, row[0], row[1], row[2]);
     }
 }

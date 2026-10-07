@@ -42,10 +42,7 @@ pub struct Size {
 }
 impl Size {
     pub const fn new(w: f32, h: f32) -> Self {
-        Self {
-            width: w,
-            height: h,
-        }
+        Self { width: w, height: h }
     }
     pub const fn zero() -> Self {
         Self {
@@ -131,12 +128,7 @@ impl Rect {
 
     /// 水平外扩 `x`、垂直外扩 `y`（可为负）
     pub fn inflate_xy(&self, x: f32, y: f32) -> Rect {
-        Rect::new(
-            self.x - x,
-            self.y - y,
-            self.width + x * 2.0,
-            self.height + y * 2.0,
-        )
+        Rect::new(self.x - x, self.y - y, self.width + x * 2.0, self.height + y * 2.0)
     }
 
     /// 平移（不改变尺寸）。
@@ -211,7 +203,12 @@ impl Color {
     /// 线性插值（`t=0` ⇒ self，`t=1` ⇒ other；通道各自插值后四舍五入，不钳制 t）。
     pub fn lerp(&self, other: &Color, t: f32) -> Color {
         let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
-        Color::rgba(mix(self.r, other.r), mix(self.g, other.g), mix(self.b, other.b), mix(self.a, other.a))
+        Color::rgba(
+            mix(self.r, other.r),
+            mix(self.g, other.g),
+            mix(self.b, other.b),
+            mix(self.a, other.a),
+        )
     }
     pub const BLACK: Color = Color {
         r: 0,
@@ -249,12 +246,7 @@ impl Color {
         b: 0,
         a: 255,
     };
-    pub const TRANSPARENT: Color = Color {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: 0,
-    };
+    pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, a: 0 };
 }
 impl Default for Color {
     fn default() -> Self {

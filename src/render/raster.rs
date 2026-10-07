@@ -16,13 +16,9 @@
 //! 本模块只负责"把场景画进持久 pixmap"。
 
 use lieui_geom::{Color, Rect, Size};
-use vello_cpu::kurbo::{
-    Affine as KAffine, BezPath, Rect as KRect, RoundedRect, Shape as _, Stroke as KStroke,
-};
+use vello_cpu::kurbo::{Affine as KAffine, BezPath, Rect as KRect, RoundedRect, Shape as _, Stroke as KStroke};
 use vello_cpu::peniko::color::{AlphaColor, Srgb};
-use vello_cpu::{
-    Pixmap, PixmapMut, RasterizerSettings, RenderContext, Resources, TargetInit,
-};
+use vello_cpu::{Pixmap, PixmapMut, RasterizerSettings, RenderContext, Resources, TargetInit};
 
 use crate::render::scene::{Op, Scene};
 use crate::transform::Affine;
@@ -45,15 +41,11 @@ fn physical_of(logical: Size, scale: f32) -> (u16, u16) {
 
 fn kaffine(a: Affine) -> KAffine {
     let [a1, b1, c1, d1, e1, f1] = a.m;
-    KAffine::new([
-        a1 as f64, b1 as f64, c1 as f64, d1 as f64, e1 as f64, f1 as f64,
-    ])
+    KAffine::new([a1 as f64, b1 as f64, c1 as f64, d1 as f64, e1 as f64, f1 as f64])
 }
 
 fn rounded_path(r: Rect, radius: f32) -> BezPath {
-    let rr = radius
-        .max(0.0)
-        .min((r.width.min(r.height) * 0.5).max(0.0));
+    let rr = radius.max(0.0).min((r.width.min(r.height) * 0.5).max(0.0));
     RoundedRect::from_rect(krect(r), rr as f64).to_path(0.05)
 }
 
@@ -90,7 +82,6 @@ pub fn damage_batches(size: Size, damage: &[Rect], damage_all: bool) -> Vec<Rect
     }
 
     let mut out: Vec<Rect> = Vec::new();
-    let mut area = 0.0f64;
     for d in damage {
         let Some(c) = d.intersect(&full) else { continue };
         let x0 = c.x.floor().max(0.0);
@@ -104,18 +95,75 @@ pub fn damage_batches(size: Size, damage: &[Rect], damage_all: bool) -> Vec<Rect
         if out.contains(&r) {
             continue;
         }
-        area += f64::from(r.width) * f64::from(r.height);
         out.push(r);
     }
     if out.is_empty() {
         return Vec::new();
     }
 
+    // ★ C2：判定退化**之前**先合并（D21）。
+    //
+    //   实测（`tests/perf_regression.rs` 基线）：**一次滚动产生 302 个碎片**，
+    //   "标脏 30 个节点"也有 30 个 —— 而阈值是 8 块⇒ **几乎任何 ≥9 节点变化
+    //   都退化为整窗光栅 + 全树 Scene 重建**。也就是说局部渲染在"单控件交互"
+    //   之外的所有场景下**都拿不到收益**（这不是"滚动场景的优化"，是普遍失效）。
+    //
+    //   而这些碎片高度重叠（列表滚动登记的是每个移动行的"旧 ∪ 新"两条带），
+    //   先合并即可把块数压到个位数。
+    let out = merge_rects(out);
+
+    let area: f64 = out.iter().map(|r| f64::from(r.width) * f64::from(r.height)).sum();
     let total = f64::from(size.width) * f64::from(size.height);
-    if area > total * 0.45 || out.len() > 8 {
+    if area > total * AREA_FALLBACK_RATIO || out.len() > MAX_BATCHES {
         return vec![full];
     }
     out
+}
+
+/// 退化阈值：块数上限（C2：合并后仍超过它就整窗重画）
+const MAX_BATCHES: usize = 32;
+/// 退化阈值：合并后面积占比上限
+const AREA_FALLBACK_RATIO: f64 = 0.45;
+/// 合并间距（px）：两个矩形间隙 ≤ 此值就并起来。
+///
+/// 取值 > 0 是必要的：滚动碎片的旧位置与新位置之间**有间隙**（不重合），
+/// 只合并"真正相交"的压不动。该值由 `tests/perf_regression.rs` 的基线测试调定。
+const MERGE_GAP: f32 = 2.0;
+
+/// 把相交（或间距 ≤ [`MERGE_GAP`]）的脏矩形求并，显著减少块数。
+///
+/// **只做相交/近邻合并，不做"全部并成一个"** —— 后者会让"分散的 4 个小更新"
+/// 退化成接近整窗（那正是 [`damage_batches_union`] 的问题）。
+///
+/// 面积**只会因合并而变大**（并集 ⊇ 原来），所以仍然保守：
+/// 重画面积 ⊇ 真正需要重画的区域，绝不会漏画。
+///
+/// 复杂度 O(n²)，n 是单帧脏区数（实测滚动一次 302）；合并后块数收敛到个位数，
+/// 第二阶段的 `out.contains` 去重也随之变快。
+pub fn merge_rects(rects: Vec<Rect>) -> Vec<Rect> {
+    if rects.len() <= 1 {
+        return rects;
+    }
+    let mut cur: Vec<Rect> = Vec::with_capacity(rects.len());
+    for r in rects {
+        let mut acc = r;
+        let mut i = 0;
+        while i < cur.len() {
+            let c = cur[i];
+            let near = c.x <= acc.right() + MERGE_GAP
+                && acc.x <= c.right() + MERGE_GAP
+                && c.y <= acc.bottom() + MERGE_GAP
+                && acc.y <= c.bottom() + MERGE_GAP;
+            if near {
+                acc = acc.union(&c);
+                cur.remove(i); // n 小，且合并后迅速收敛
+            } else {
+                i += 1;
+            }
+        }
+        cur.push(acc);
+    }
+    cur
 }
 
 /// 脏区 → **单个包围盒**批次（最简策略）。
@@ -220,9 +268,8 @@ pub fn damage_batches_bands(size: Size, damage: &[Rect], damage_all: bool) -> Ve
     let mut merged: Vec<Rect> = Vec::with_capacity(out.len());
     for r in out {
         match merged.last_mut() {
-            Some(p) if (p.x - r.x).abs() < 0.01
-                && (p.width - r.width).abs() < 0.01
-                && (p.bottom() - r.y).abs() < 0.01 =>
+            Some(p)
+                if (p.x - r.x).abs() < 0.01 && (p.width - r.width).abs() < 0.01 && (p.bottom() - r.y).abs() < 0.01 =>
             {
                 p.height = r.bottom() - p.y;
             }
@@ -238,12 +285,7 @@ fn pixel_snap(c: Rect, size: Size) -> Rect {
     let y0 = c.y.floor().max(0.0);
     let x1 = c.right().ceil().min(size.width);
     let y1 = c.bottom().ceil().min(size.height);
-    Rect::new(
-        x0,
-        y0,
-        (x1 - x0).max(0.0),
-        (y1 - y0).max(0.0),
-    )
+    Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
 /// 光栅器：持有持久 pixmap、复用 scratch 与 vello 上下文。
@@ -273,11 +315,7 @@ impl Rasterizer {
     }
 
     pub fn with_scale(logical: Size, scale: f32) -> Self {
-        let scale = if scale.is_finite() && scale > 0.0 {
-            scale
-        } else {
-            1.0
-        };
+        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
         let logical = Size::new(logical.width.max(1.0), logical.height.max(1.0));
         let (w, h) = physical_of(logical, scale);
         Self {
@@ -384,8 +422,7 @@ impl Rasterizer {
 
             // 批次画布（复用容量）；场景坐标先按 DPI 放大，再平移到批次原点
             self.ctx.reset_and_resize(bw, bh);
-            let shift = KAffine::translate((-(batch.x as f64), -(batch.y as f64)))
-                * KAffine::scale(f64::from(scale));
+            let shift = KAffine::translate((-(batch.x as f64), -(batch.y as f64))) * KAffine::scale(f64::from(scale));
             if self.scratch.width() != bw || self.scratch.height() != bh {
                 self.scratch.resize(bw, bh);
             }
@@ -394,14 +431,21 @@ impl Rasterizer {
             // 把之前累积的原语渲染掉，否则同批次内的图片会被画到所有原语之上 ——
             // 表现为"后画的浮层/遮罩被图片盖住"（PDF 预览盖住 loading 遮罩就是这个）。
             let mut pending = false;
+            // ★ C3：软件裁剪栈（批次坐标系）。
+            //
+            //   vello 原语走 `PushClip`/`PopClip` 的原生裁剪栈，但**图片是手动 blit**
+            //   （`Op::Image` 在 `submit` 里被跳过），所以它此前**完全不受裁剪约束**
+            //   ⇒ 滚动容器 / 圆角裁剪里的图片会**溢出到裁剪区外**（可见渲染错误）。
+            //
+            //   这里在 op 循环里并行维护一份裁剪栈（同样按 DPI 缩放 + 批次原点平移），
+            //   `blit_image` 拿它对目标矩形求交。
+            let batch_bounds = Rect::new(0.0, 0.0, f32::from(bw), f32::from(bh));
+            let mut clip_stack: Vec<Rect> = Vec::new();
+
             for op in scene.ops() {
                 match op {
-                    Op::Image {
-                        image,
-                        rect,
-                        transform,
-                    } => {
-                        self.flush_segment(&mut pending, bw, bh);
+                    Op::Image { image, rect, transform } => {
+                        self.flush_segment(&mut pending, bw, bh, &clip_stack);
                         // 逻辑 rect → 批次内物理坐标
                         let tb = transform.bounding_box(*rect);
                         let dst = Rect::new(
@@ -410,7 +454,34 @@ impl Rasterizer {
                             tb.width * scale,
                             tb.height * scale,
                         );
-                        self.blit_image(image, dst);
+                        // 与当前裁剪求交（栈空 ⇒ 用批次边界，即"不额外裁剪"）
+                        let clip = clip_stack.last().copied().unwrap_or(batch_bounds);
+                        // 整块被裁掉 ⇒ 无事可做（也省掉一次采样循环）
+                        if let Some(clipped) = clip.intersect(&dst) {
+                            self.blit_image(image, clipped);
+                        }
+                    }
+                    Op::PushClip { rect, transform } => {
+                        let tb = transform.bounding_box(*rect);
+                        let r = Rect::new(
+                            (tb.x * scale) - batch.x,
+                            (tb.y * scale) - batch.y,
+                            tb.width * scale,
+                            tb.height * scale,
+                        );
+                        // 嵌套裁剪取**交集**（与 vello 裁剪栈语义一致）
+                        let clipped = match clip_stack.last() {
+                            Some(prev) => prev.intersect(&r).unwrap_or(r),
+                            None => r,
+                        };
+                        clip_stack.push(clipped);
+                        self.submit(op, shift);
+                        pending = true;
+                    }
+                    Op::PopClip => {
+                        clip_stack.pop();
+                        self.submit(op, shift);
+                        pending = true;
                     }
                     other => {
                         self.submit(other, shift);
@@ -418,7 +489,7 @@ impl Rasterizer {
                     }
                 }
             }
-            self.flush_segment(&mut pending, bw, bh);
+            self.flush_segment(&mut pending, bw, bh, &clip_stack);
 
             // 拷回持久 pixmap（逐行；两侧都是 `PremulRgba8`，无需 unsafe）
             let pw = usize::from(self.pixmap.width());
@@ -449,7 +520,13 @@ impl Rasterizer {
     ///
     /// 只在**图片边界**与**批次结尾**调用：这样图片与原语严格按 op 顺序合成。
     /// 没有待渲染原语时是 no-op（连续多张图片不会白跑一遍）。
-    fn flush_segment(&mut self, pending: &mut bool, bw: u16, bh: u16) {
+    ///
+    /// ★ `clip_stack` 参数是**必需的**（C3）：`ctx.reset()` 会**清空 vello 的裁剪栈**，
+    /// 而 `PopClip` 按 op 顺序到来 ⇒ reset 之后再遇到 `PopClip` 就会
+    /// **"clip stack underflowed" panic**。这个坑只在"裁剪区内有图片"时
+    /// 才会触发（只有图片会调用本函数），所以它此前一直潜伏着。
+    /// 修法：reset 之后按软件栈**重建**一层裁剪（栈顶已是各层交集，一层就够）。
+    fn flush_segment(&mut self, pending: &mut bool, bw: u16, bh: u16, clip_stack: &[Rect]) {
         if !*pending {
             return;
         }
@@ -472,6 +549,12 @@ impl Rasterizer {
             }
         }
         self.ctx.reset();
+        // ★ 重建裁剪栈（`reset` 清空过）：栈顶已是各层交集，推一层即可恢复约束。
+        //   不重建的话，后面到来的 `PopClip` 会让 vello "clip stack underflowed" panic。
+        if let Some(c) = clip_stack.last() {
+            let path = krect(*c).to_path(0.01);
+            self.ctx.push_clip_path(&path);
+        }
     }
 
     /// 手动 blit：把 RGBA8（**直通 alpha**）图片按 contain 方式缩放进 `dst`
@@ -761,10 +844,7 @@ mod tests {
             let bands = damage_batches_bands(size(), &damage, false);
             for (i, a) in bands.iter().enumerate() {
                 for b in bands.iter().skip(i + 1) {
-                    assert!(
-                        !a.intersects(b),
-                        "行带不应重叠：{a:?} 与 {b:?} 相交"
-                    );
+                    assert!(!a.intersects(b), "行带不应重叠：{a:?} 与 {b:?} 相交");
                 }
             }
         }
@@ -773,10 +853,7 @@ mod tests {
     /// 行带按 y 聚合：上下分离的两块 ⇒ 两个带，而**不是**整窗（对比单包围盒）
     #[test]
     fn bands_stay_local_where_union_covers_everything() {
-        let damage = vec![
-            Rect::new(10.0, 5.0, 20.0, 10.0),
-            Rect::new(10.0, 65.0, 20.0, 10.0),
-        ];
+        let damage = vec![Rect::new(10.0, 5.0, 20.0, 10.0), Rect::new(10.0, 65.0, 20.0, 10.0)];
         let bands = damage_batches_bands(size(), &damage, false);
         assert_eq!(bands.len(), 2, "上下两块 ⇒ 两个带：{bands:?}");
         let px: f32 = bands.iter().map(|r| r.width * r.height).sum();
@@ -980,10 +1057,7 @@ mod tests {
         let s = full(vec![]);
         let stats = r.rasterize(
             &s,
-            &[
-                Rect::new(0.0, 0.0, 10.0, 10.0),
-                Rect::new(0.0, 60.0, 10.0, 10.0),
-            ],
+            &[Rect::new(0.0, 0.0, 10.0, 10.0), Rect::new(0.0, 60.0, 10.0, 10.0)],
             false,
         );
         assert_eq!(stats.batches, 2);
@@ -1035,7 +1109,7 @@ mod tests {
             color: RED,
             transform: Affine::translate(50.0, 30.0),
         }]);
-        expect(px(&r, 10, 10), BG, );
+        expect(px(&r, 10, 10), BG);
         expect(px(&r, 60, 40), RED);
     }
 
@@ -1095,19 +1169,22 @@ mod tests {
     // ── 纯函数：行带计算 ──
 
     #[test]
-    fn batches_dedupe_and_clamp() {
+    fn batches_dedupe_and_merge_adjacent() {
         let b = damage_batches(
             size(),
             &[
                 Rect::new(10.0, 10.0, 5.0, 5.0),
-                Rect::new(10.0, 10.0, 5.0, 5.0), // 完全重复 ⇒ 丢弃
+                Rect::new(10.0, 10.0, 5.0, 5.0),     // 完全重复 ⇒ 丢弃
                 Rect::new(-20.0, -20.0, 30.0, 30.0), // 裁到窗口内 ⇒ (0,0,10,10)
             ],
             false,
         );
-        assert_eq!(b.len(), 2, "只丢掉完全重复的那个：{b:?}");
-        assert_eq!(b[0], Rect::new(10.0, 10.0, 5.0, 5.0));
-        assert_eq!(b[1], Rect::new(0.0, 0.0, 10.0, 10.0));
+        // ⚠️ C2 之后语义变了：**相邻/接触的矩形也会被合并**（原断言是"只去重完全相同的"）。
+        // 这里裁剪后得到 (0,0,10,10) 与 (10,10,5,5) —— 它们正好**接触**于 (10,10)
+        // ⇒ 合并成一块。这正是 C2 想要的（把碎片压到个位数）；
+        // 旧断言记录的"2 块"在新行为下不再成立，故一并更新。
+        assert_eq!(b.len(), 1, "接触的矩形应合并：{b:?}");
+        assert_eq!(b[0], Rect::new(0.0, 0.0, 15.0, 15.0));
     }
 
     #[test]
@@ -1124,15 +1201,10 @@ mod tests {
             vec![Rect::new(0.0, 0.0, W, H)],
             "面积过半 ⇒ 整窗"
         );
-        assert_eq!(
-            damage_batches(size(), &[], true),
-            vec![Rect::new(0.0, 0.0, W, H)]
-        );
+        assert_eq!(damage_batches(size(), &[], true), vec![Rect::new(0.0, 0.0, W, H)]);
 
         // 碎片过多（> 8）⇒ 整窗（免去多次上下文重建）
-        let many: Vec<Rect> = (0..9)
-            .map(|i| Rect::new(i as f32, i as f32, 1.0, 1.0))
-            .collect();
+        let many: Vec<Rect> = (0..9).map(|i| Rect::new(i as f32, i as f32, 1.0, 1.0)).collect();
         assert_eq!(damage_batches(size(), &many, false).len(), 1);
     }
 
@@ -1166,5 +1238,118 @@ mod tests {
         assert!(!stats.rasterized || stats.pixels > 0);
         // 不 panic 即可（内部按 1×1 兜底）
         assert!(r.pixmap().width() >= 1);
+    }
+
+    // ─────────────────── C2：脏区合并（D21） ───────────────────
+    #[test]
+    fn merge_rects_unions_overlapping_rects() {
+        let a = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let b = Rect::new(90.0, 10.0, 100.0, 20.0); // 与 a 重叠
+        let out = merge_rects(vec![a, b]);
+        assert_eq!(out.len(), 1, "相交的矩形应合并成一块");
+        assert_eq!(out[0], Rect::new(0.0, 0.0, 190.0, 30.0));
+    }
+
+    #[test]
+    fn merge_rects_unions_nearby_rects_within_gap() {
+        // 间隙 2px ≤ MERGE_GAP ⇒ 合并（滚动碎片的旧位置/新位置就是这种关系）
+        let a = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let b = Rect::new(0.0, 22.0, 100.0, 20.0);
+        let out = merge_rects(vec![a, b]);
+        assert_eq!(out.len(), 1, "间隙 ≤ GAP 的应合并");
+        assert_eq!(out[0].height, 42.0);
+    }
+
+    #[test]
+    fn merge_rects_keeps_distant_rects_apart() {
+        // 垂直间隔 200px ≫ GAP ⇒ 不合并（这是"分散小更新"必须保持的性质，
+        // 否则全部并成包围盒就退化成 damage_batches_union 的问题）
+        let a = Rect::new(0.0, 0.0, 50.0, 20.0);
+        let b = Rect::new(0.0, 200.0, 50.0, 20.0);
+        let out = merge_rects(vec![a, b]);
+        assert_eq!(out.len(), 2, "远离的矩形不该被合并");
+    }
+
+    #[test]
+    fn merge_rects_never_shrinks_total_area() {
+        // ★ 关键安全性质：合并只会让**重画面积变大或不变**（并集 ⊇ 各部分），
+        //所以"少画"这个风险不存在 —— 绝不会漏画。
+        let rects = vec![
+            Rect::new(0.0, 0.0, 100.0, 20.0),
+            Rect::new(90.0, 10.0, 100.0, 20.0),
+            Rect::new(300.0, 300.0, 40.0, 40.0),
+        ];
+        let before: f64 = rects.iter().map(|r| f64::from(r.width * r.height)).sum();
+        let after: f64 = merge_rects(rects.clone())
+            .iter()
+            .map(|r| f64::from(r.width * r.height))
+            .sum();
+        assert!(
+            after >= before,
+            "合并后面积必须 ⊇ 合并前（before={before}, after={after}）"
+        );
+    }
+
+    #[test]
+    fn merge_rects_is_idempotent() {
+        let rects = vec![
+            Rect::new(0.0, 0.0, 100.0, 20.0),
+            Rect::new(90.0, 10.0, 100.0, 20.0),
+            Rect::new(0.0, 22.0, 100.0, 20.0),
+        ];
+        let once = merge_rects(rects.clone());
+        let twice = merge_rects(once.clone());
+        assert_eq!(once, twice, "合并应当幂等");
+    }
+
+    #[test]
+    fn merge_rects_transitively_merges_a_chain() {
+        // a~b 相交、b~c 相交 ⇒ 三者应全部并成一块（贪心必须传递闭包）
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let b = Rect::new(8.0, 0.0, 10.0, 10.0);
+        let c = Rect::new(16.0, 0.0, 10.0, 10.0);
+        let out = merge_rects(vec![a, b, c]);
+        assert_eq!(out.len(), 1, "链式相接应合并成一块");
+        assert_eq!(out[0].width, 26.0);
+    }
+
+    #[test]
+    fn merge_rects_handles_empty_and_single() {
+        assert!(merge_rects(Vec::new()).is_empty());
+        let one = Rect::new(1.0, 2.0, 3.0, 4.0);
+        assert_eq!(merge_rects(vec![one]), vec![one]);
+    }
+
+    /// C2 的判据：**面积**主导，而非碎片数。
+    ///
+    /// 旧判据 `out.len() > 8` ⇒ **任何 ≥9 个分散更新都退化成整窗**，
+    /// 即使它们的总��积只有窗口的 1.6%（实测 10 个分散按钮 = 7546 / 921600像素）。
+    /// 那时局部分批反而比整窗便宜得多，退化是纯浪费。
+    #[test]
+    fn many_small_scattered_rects_stay_local() {
+        let size = Size::new(1280.0, 720.0);
+        // 20 个分散的小矩形（每个 40×20，垂直间隔 30px ⇒ 互不相邻）
+        let rects: Vec<Rect> = (0..20)
+            .map(|i| Rect::new(100.0, 10.0 + i as f32 * 30.0, 40.0, 20.0))
+            .collect();
+        let total_pixels: f64 = rects.iter().map(|r| f64::from(r.width * r.height)).sum();
+
+        let batches = damage_batches(size, &rects, false);
+
+        // 20 > 旧的 8 ⇒ 旧实现会整窗；现在应保持局部
+        assert!(
+            batches.len() > 1 || batches[0] != Rect::new(0.0, 0.0, size.width, size.height),
+            "20 个分散小矩形不该退化成整窗"
+        );
+        let covered: f64 = batches.iter().map(|r| f64::from(r.width * r.height)).sum();
+        assert!(
+            covered < f64::from(size.width * size.height) * 0.2,
+            "重画面积应远小于整窗（实际 {covered} / {}）",
+            f64::from(size.width * size.height)
+        );
+        assert!(
+            covered >= total_pixels,
+            "覆盖面积必须 ⊇ 原始脏区（{covered} < {total_pixels}）"
+        );
     }
 }

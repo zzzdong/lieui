@@ -29,9 +29,7 @@ impl ViewModel for Counter {
             c.center();
             c.gap(12.0);
             c.text("Counter").font_size(48.0);
-            c.text(self.count.get().to_string())
-                .font_size(72.0)
-                .color(Color::RED);
+            c.text(self.count.get().to_string()).font_size(72.0).color(Color::RED);
             c.row(|r| {
                 r.gap(12.0);
                 r.button("+1").on_tap(act(self, Self::inc));
@@ -47,19 +45,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         count: Signal::new(&rt, 0),
     });
     let id = app.window_erased(
-        WindowConfig::new()
-            .title("Counter")
-            .size(400.0, 300.0),
+        WindowConfig::new().title("Counter").size(400.0, 300.0),
         lieui::app::erased(Rc::clone(&vm)),
     );
 
     // ① 首帧：view() → 对齐 → 布局 → 展开 → 光栅化（整窗）
     let first = app.frame_all();
     println!("首帧       : {:?}", first[0].1);
-    let (ops, pixels) = (
-        first[0].1.render.ops,
-        first[0].1.rasterized_pixels(),
-    );
+    let (ops, pixels) = (first[0].1.render.ops, first[0].1.rasterized_pixels());
     println!("展开 op    : {ops}，光栅化像素 {pixels}");
 
     // ② 直接改状态（等价于点了一次按钮），只置脏

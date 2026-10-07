@@ -14,7 +14,7 @@ use lieui_geom::{Color, Point, Rect, Size};
 use lieui_layout::{ComputedLayout, FlexStyle};
 use lieui_text::TextEngine;
 
-use crate::event::{HandlerSlot, PointerId};
+use crate::event::{HandlerSlot, PointerButton, PointerId};
 use crate::style::{ImageStyle, PaintStyle, TextStyle};
 
 // ───────────────────────── 句柄与位标志 ─────────────────────────
@@ -176,9 +176,7 @@ impl Default for Transform {
 
 impl Transform {
     pub fn is_identity(&self) -> bool {
-        self.translate == (0.0, 0.0)
-            && self.scale == (1.0, 1.0)
-            && self.rotation_deg == 0.0
+        self.translate == (0.0, 0.0) && self.scale == (1.0, 1.0) && self.rotation_deg == 0.0
     }
 }
 
@@ -257,18 +255,36 @@ pub enum KindDesc {
     Box,
     Text(String),
     Image(Arc<ImageData>),
-    Button { label: String },
-    Checkbox { checked: bool },
+    Button {
+        label: String,
+    },
+    Checkbox {
+        checked: bool,
+    },
     /// `min`/`max` 属于**数据**（决定拖拽映射），`dragging` 属于视图态
-    Slider { value: f32, min: f32, max: f32 },
-    Progress { value: f32 },
+    Slider {
+        value: f32,
+        min: f32,
+        max: f32,
+    },
+    Progress {
+        value: f32,
+    },
     /// 文本输入：`text` 是模型给出的值（编辑后经绑定写回），`placeholder` 是空文本提示
-    Input { text: String, placeholder: String },
+    Input {
+        text: String,
+        placeholder: String,
+    },
     /// 开关（视觉与交互都不同 的复选框）：`on` 是模型给出的值
-    Switch { on: bool },
+    Switch {
+        on: bool,
+    },
     /// 单选：`selected` 是模型给出的值；`value` 是本项在组里的取值（点击后经
     /// `Signal<String>` 绑定写回，同组其它项由 view() 重跑自然更新——声明式免机制）
-    Radio { selected: bool, value: String },
+    Radio {
+        selected: bool,
+        value: String,
+    },
     /// 用户自绘/自定义行为（`CustomCell` 按指针判等：同一个 cell = 实例跨帧保留）
     Custom(crate::custom::CustomCell),
 }
@@ -447,9 +463,14 @@ pub enum Kind {
         scroll: f32,
     },
     /// 开关（pill 形 + 圆形 thumb；交互同复选框：点击翻转并写回 `checked` 绑定）
-    Switch { on: bool },
+    Switch {
+        on: bool,
+    },
     /// 单选：点击把 `value` 写回 `Signal<String>` 绑定（同组互斥由模型+view 重跑自然完成）
-    Radio { selected: bool, value: String },
+    Radio {
+        selected: bool,
+        value: String,
+    },
     /// 用户自绘/自定义行为：实例（desc+state 一体）跨帧保留在保留树里，
     /// 对齐按 **Rc 指针**判等 —— 换 cell = 换数据，同一 cell = 不动（视图态不丢）。
     /// 所有 hook 都不拿 `&mut Track`（见 `custom::CustomNode` 的文档）。
@@ -479,9 +500,7 @@ impl Kind {
             KindDesc::Box => Kind::Box,
             KindDesc::Text(s) => Kind::Text(s.clone()),
             KindDesc::Image(d) => Kind::Image(Arc::clone(d)),
-            KindDesc::Button { label } => Kind::Button {
-                label: label.clone(),
-            },
+            KindDesc::Button { label } => Kind::Button { label: label.clone() },
             KindDesc::Checkbox { checked } => Kind::Checkbox { checked: *checked },
             KindDesc::Slider { value, min, max } => Kind::Slider {
                 value: *value,
@@ -519,11 +538,7 @@ pub fn prev_char_boundary(s: &str, i: usize) -> usize {
 /// 后一个 char 边界
 pub fn next_char_boundary(s: &str, i: usize) -> usize {
     let i = i.min(s.len());
-    s[i..]
-        .chars()
-        .next()
-        .map(|c| i + c.len_utf8())
-        .unwrap_or(s.len())
+    s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(s.len())
 }
 
 /// 把任意字节偏移夹到 char 边界
@@ -583,6 +598,31 @@ pub enum Layer {
     Modal,
     /// 拖拽预览：最高
     DragPreview,
+}
+
+impl Layer {
+    /// **全部层，按 z 序从低到高**（= 枚举声明序）。
+    ///
+    /// ## 为什么要有这个常量
+    ///
+    /// 层序此前是**两份手写数组**：`render/scene.rs` 的 `LAYER_BOTTOM_UP`（自下而上）
+    /// 与 `hit.rs` 的 `LAYER_TOP_DOWN`（自上而下）。两份必须**严格互逆**，否则
+    /// 会出现"画在上面的层收不到点击"这种不报错的错。
+    ///
+    /// 但它们分散在两个文件、没有任何机制保证互逆 —— **加一个 `Layer` 变体时，
+    /// 漏改一处就是静默 bug**（这正是 P1「`Layer` 增变体不报错」的成因）。
+    ///
+    /// 现在两侧都从本常量派生（渲染侧正序、命中侧逆序）⇒ **不可能不同步**。
+    /// 语义仍由**枚举声明序**决定，本常量必须与之一致（由
+    /// `layer_all_matches_enum_declaration_order` 测试钉住）。
+    pub const ALL: [Layer; 6] = [
+        Layer::Content,
+        Layer::Overlay,
+        Layer::Popup,
+        Layer::Tooltip,
+        Layer::Modal,
+        Layer::DragPreview,
+    ];
 }
 
 /// 浮层锚点方位
@@ -772,6 +812,12 @@ pub struct Node {
 
     // ── 布局结果 ──
     pub flags: Flags,
+    /// 这些标记是**哪一轮**布局期间提的（`refactor-plan` D58）。
+    ///
+    /// `clear_layout_flags` 只能清"本轮布局**开始之前**"就有的标记；
+    /// 布局**过程中**新提的（比如 `write_back` 触发了新的 `mark_layout_dirty`）
+    /// 必须留给下一轮 —— 否则会被一起清掉 ⇒漏失效 ⇒ 画面停在旧布局。
+    pub layout_epoch: u32,
     pub desired: Size,
     pub computed: ComputedLayout,
 
@@ -793,6 +839,7 @@ impl Node {
             context_menu: None,
             text_wrap: None,
             layout: FlexStyle::default(),
+            layout_epoch: 0,
             paint: PaintStyle::default(),
             text: TextStyle::default(),
             image: ImageStyle::default(),
@@ -837,6 +884,7 @@ impl Node {
     /// 变成"重画整行宽度"，脏区收益直接减半。
     pub fn paint_bounds(&self) -> Rect {
         let r = self.rect();
+        let mut base = r;
         if matches!(self.kind, Kind::Text(_)) {
             let w = self.desired.width.min(r.width).max(0.0);
             let h = self.desired.height.min(r.height).max(0.0);
@@ -846,14 +894,50 @@ impl Node {
                     lieui_text::TextAlign::End => r.right() - w,
                     _ => r.x,
                 };
-                return Rect::new(x, r.y, w, h);
+                base = Rect::new(x, r.y, w, h);
             }
         }
-        r
+        // ★ 阴影的可见范围**超出**节点矩形（D33）。
+        //   绘制时阴影画在 `rect + offset`，再`inflate(spread)`，并带高斯模糊
+        //   （`std_dev = blur * 0.5`，见 `widgets/mod.rs` 的 draw）。
+        //   高斯的 3σ 覆盖 99.7% ⇒可见外扩 ≈ `blur * 1.5`。
+        //   而脏区按 `paint_bounds`取 ⇒ **光晕外圈不在脏区内 ⇒ 残影**。
+        //
+        //   这里保守地四边都外扩（偏移方向未知时宁可多标一点）。
+        match self.paint.shadow {
+            Some(sh) => {
+                let reach = sh.spread.max(0.0) + sh.blur.max(0.0) * 1.5;
+                if reach > 0.0 {
+                    return base.inflate(reach);
+                }
+                base
+            }
+            None => base,
+        }
     }
 }
 
 // ───────────────────────── 保留树 ─────────────────────────
+
+/// 按下态：**比"按下节点"多记了按下时的指针与按键**。
+///
+/// 为什么必须多记这两样：`Tapped`（点击）合成要校验"按下与抬起是**同一按键**"。
+/// 只记节点的话，**右键按下 + 左键抬起落在同一节点会被判成左键点击** ⇒ 触发勾选 / 提交 / 删除
+/// （`refactor-plan` D1，数据破坏级）。
+///
+/// `pointer` / `pos` 是为后续的位移阈值 / 长按阈值预留的：`input::step` 是纯函数、拿不到时钟，
+/// 加时间阈值要改签名并穿透全部调用点，所以分两步走（见 `refactor-plan` A1）。
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PressState {
+    /// 按下时命中的目标（`Tapped` 派发给它）
+    pub node: NodeId,
+    /// 按下时的指针 —— 触屏 / 多指下同一节点可能被不同指针先后按下
+    pub pointer: PointerId,
+    /// 按下时的按键：抬起时用它配对，决定合成 `Tapped` 还是 `RightTapped`
+    pub button: PointerButton,
+    /// 按下时的位置（位移阈值用）
+    pub pos: Point,
+}
 
 /// 保留树：**每窗口一棵**，跨帧存活
 #[derive(Default)]
@@ -863,24 +947,27 @@ pub struct Track {
     free: Vec<u32>,
     roots: Vec<Root>,
     next_root: u32,
+    /// 当前布局纪元（`refactor-plan` D58）。`layout()` 每轮开始时递增，
+    /// `clear_layout_flags` 据此只清"本轮之前"提的标记。
+    layout_epoch: u32,
 
     // ── 窗口级视图态 ──
     /// 当前 hover 的最深节点
     pub hover: Option<NodeId>,
     /// 命中链（根 → 最深命中），用于 hover 传播与标脏
     pub hover_path: Vec<NodeId>,
-    /// 当前按下节点
-    pub pressed: Option<NodeId>,
+    /// 当前按下态（含指针 / 按键，见 [`PressState`]）
+    pub pressed: Option<PressState>,
     pub pressed_path: Vec<NodeId>,
     /// 键盘焦点
     pub focused: Option<NodeId>,
     /// 指针捕获（多指针）
     pub captures: Vec<(PointerId, NodeId)>,
     /// 光标闪烁**相位**（窗口级：同一时刻只有焦点输入框画光标；由帧驱动翻转）
-///
-/// 分工：这里的 `blink_on` 是"当前该不该画光标"（**状态**，跟焦点节点走），
-/// "下一次翻转的时刻"（**时钟**）在 `WindowCtx` 的会话里 —— 它是一种唤醒源，
-/// 没焦点时为 `None` ⇒ 不产生定时唤醒 ⇒ 空闲零功耗。
+    ///
+    /// 分工：这里的 `blink_on` 是"当前该不该画光标"（**状态**，跟焦点节点走），
+    /// "下一次翻转的时刻"（**时钟**）在 `WindowCtx` 的会话里 —— 它是一种唤醒源，
+    /// 没焦点时为 `None` ⇒ 不产生定时唤醒 ⇒ 空闲零功耗。
     pub blink_on: bool,
 
     // ── 脏区（align / 事件阶段登记，渲染阶段消费）──
@@ -1043,6 +1130,16 @@ impl Track {
     /// 销毁子树（不含从父节点摘除的语义：会一并摘除）
     pub fn destroy(&mut self, id: NodeId) -> usize {
         let ids = self.descendants(id);
+        // ★ 破坏**前**登记旧绘制范围（refactor-plan D2）。
+        // 脏区是"旧像素 ∪ 新像素"：布局写回会登记旧∪新矩形，但删除路径不会——
+        // 于是同帧只要还有别的脏区（非空），被删节点所占的那块像素就没人重绘 ⇒ 残影。
+        // 之前只有"脏区恰好为空 ⇒ 渲染层按整窗处理"这条兜底掩盖着它。
+        // 必须在节点还活着时问damage_bounds（它要沿祖先链取变换）。
+        for i in &ids {
+            if let Some(r) = self.damage_bounds(*i) {
+                self.damage_rect(r);
+            }
+        }
         let parent = self.parent_of(id);
         self.detach(id);
         // 自定义节点：销毁前通知（资源清理的时机）
@@ -1087,6 +1184,102 @@ impl Track {
 
     pub fn roots_of(&self, layer: Layer) -> impl Iterator<Item = &Root> {
         self.roots.iter().filter(move |r| r.layer == layer)
+    }
+
+    /// **按 z 序（从下到上）返回全部层根** —— 渲染遍历顺序。
+    ///
+    /// 见 [`Self::z_order_impl`] 的排序键说明。
+    pub fn z_ordered_roots(&self) -> Vec<&Root> {
+        self.z_order_impl(false)
+    }
+
+    /// **按 z 序（从上到下）返回全部层根** —— 命中遍历顺序。
+    ///
+    /// ## 为什么不能直接 `z_ordered_roots().rev()`
+    ///
+    /// 排序是**稳定**的，"同 `(Layer, 深度)` 内后声明的在上"这条规则
+    /// **靠稳定性保证**。直接 `.rev()` 会把同 key 内的顺序也翻转
+    /// ⇒ 变成"先声明的在上" ⇒ **子菜单会跑到父菜单下面**。
+    ///
+    /// 所以命中侧用 `sort_by(|a, b| key(b).cmp(&key(a)))`：**key 降序、
+    /// 同 key 仍保持声明序**。
+    pub fn z_ordered_roots_top_down(&self) -> Vec<&Root> {
+        self.z_order_impl(true)
+    }
+
+    /// z 序排序核心。
+    ///
+    /// ## 排序键：`z = (Layer, 嵌套深度)` + **稳定性承载声明序号**
+    ///
+    /// - **Layer**：主序（`Layer::ALL` 的声明序）；
+    /// - **嵌套深度**：让**嵌套在父层里的层高于父层**（设计 §3.7）。
+    ///   例如 Modal 里声明的 Popup（`owner` = Modal）应盖在 Modal 之上，
+    ///   否则它会被 Modal 的 backdrop 盖住且收不到点击。
+    /// - **声明序号**：不显式参与 key，而是**由稳定排序承载** ——
+    ///   同 `(Layer, 深度)` 时后声明的自然排在上（子菜单正是靠这条叠放）。
+    ///
+    /// ## 性能
+    ///
+    /// O(n + Σdepth)，稳定排序额外 O(n log n)。层数是**小常数**（每窗口通常 < 20），
+    /// 不是热路径。刻意**没有**加 `RootId → index` 索引表：那会让 `add_root` /
+    /// `remove_root` / `root_mut` / `roots` 四处都背上"索引可能失效"的耦合，
+    /// 而 `root()` 的 O(n) 查找在 n=6 量级完全不是问题。**先量后优化**。
+    ///
+    /// ## 悬空 / 成环的 owner
+    ///
+    /// `remove_root` 会级联删除嵌套子层，但 `Root.owner` 可能指向**已消失**的层
+    /// （父层被 `Cmd` 单独移除、或对齐阶段先删了父）。此时该层**按顶层处理**（深度 0）。
+    /// `owner` 链若成环（A 指 B、B 指 A），用 `MAX_NESTING_DEPTH` 截断 ——
+    /// 否则排序会无限循环。两种情况都**不 panic**，只是退化。
+    fn z_order_impl(&self, top_down: bool) -> Vec<&Root> {
+        /// owner 链深度上限：防御成环，同时远大于任何真实嵌套层数。
+        const MAX_NESTING_DEPTH: usize = 16;
+
+        let key = |r: &Root| -> (usize, usize) {
+            let mut depth = 0usize;
+            // ★ 嵌套层**继承 owner 链顶层的 Layer 基准**，而不是用自己的 Layer 槽。
+            //
+            //   设计 §3.7 写的是 `z = (Layer, 嵌套深度, 序号)`，但**字面实现会让
+            //   Modal 内的 Popup（Layer 槽 2）排在 Modal（槽 4）之下** ——
+            //   也就是"Modal 里弹菜单"仍然不可用，整个嵌套功能失去意义。
+            //   （实测：`nested_popup_above_its_modal_parent` 正是这样失败的。）
+            //
+            //   正确语义：`Layer` 是**槽位**，嵌套声明意味着"我属于这个槽位内部"，
+            //   所以外层基准取顶层祖先的 Layer，深度只用来区分"槽内 / 槽外"。
+            //   独立弹窗（无 owner）仍用自己的 Layer 槽 ⇒ 不会被模态框盖住，
+            //   也不会盖住模态框 —— 这正是期望的模态语义。
+            let mut top = r.layer;
+            let mut cur = r.owner;
+            while let Some(oid) = cur
+                && depth < MAX_NESTING_DEPTH
+            {
+                match self.root(oid) {
+                    // 悬空 owner ⇒ 停止上溯，沿用已累积的基准（退化为该层自己的槽位）
+                    None => break,
+                    Some(p) => {
+                        depth += 1;
+                        top = p.layer;
+                        cur = p.owner;
+                    }
+                }
+            }
+            (top as usize, depth)
+        };
+
+        // 显式把「声明序号」一起排进key，**不依赖稳定性** —— 行为更直白，
+        // 且两个方向写起来完全对称。
+        //
+        // top_down : (key, 序号) 全降序  ⇒ 同层同深时**后声明的先命中**
+        // 自下而上: (key, 序号) 全升序  ⇒ 同层同深时**后声明的先绘制**（在上）
+        //
+        // ★ 曾经踩过的坑：只按 key 降序 + 稳定排序，会让同 key 内保持**升序**
+        //   （先声明的先来），正好与"后声明的在上"相反 —— 子菜单会跑到父菜单下面。
+        let mut idx: Vec<(usize, &Root)> = self.roots.iter().enumerate().collect();
+        match top_down {
+            true => idx.sort_by(|(ia, a), (ib, b)| key(b).cmp(&key(a)).then_with(|| ib.cmp(ia))),
+            false => idx.sort_by(|(ia, a), (ib, b)| key(a).cmp(&key(b)).then_with(|| ia.cmp(ib))),
+        }
+        idx.into_iter().map(|(_, r)| r).collect()
     }
 
     /// 按标签找层根（`ViewBuf::modal_tagged` 声明时打的标签）
@@ -1265,10 +1458,7 @@ impl Track {
             let Some(n) = self.get_mut(id) else {
                 return false;
             };
-            let Kind::Slider {
-                value, min, max, ..
-            } = &mut n.kind
-            else {
+            let Kind::Slider { value, min, max, .. } = &mut n.kind else {
                 return false;
             };
             let t = if rect.width > 0.0 {
@@ -1431,10 +1621,7 @@ impl Track {
             return false;
         };
         let Kind::Input {
-            text,
-            caret,
-            anchor,
-            ..
+            text, caret, anchor, ..
         } = &mut n.kind
         else {
             return false;
@@ -1490,10 +1677,7 @@ impl Track {
             return false;
         };
         let Kind::Input {
-            text,
-            caret,
-            anchor,
-            ..
+            text, caret, anchor, ..
         } = &mut n.kind
         else {
             return false;
@@ -1517,10 +1701,7 @@ impl Track {
             return false;
         };
         let Kind::Input {
-            text,
-            caret,
-            anchor,
-            ..
+            text, caret, anchor, ..
         } = &mut n.kind
         else {
             return false;
@@ -1600,10 +1781,7 @@ impl Track {
                 return;
             };
             let Kind::Input {
-                text,
-                caret,
-                scroll,
-                ..
+                text, caret, scroll, ..
             } = &n.kind
             else {
                 return;
@@ -1655,20 +1833,13 @@ impl Track {
     }
 
     pub fn release_pointer(&mut self, pointer: PointerId) -> Option<NodeId> {
-        let prev = self
-            .captures
-            .iter()
-            .find(|(p, _)| *p == pointer)
-            .map(|(_, id)| *id);
+        let prev = self.captures.iter().find(|(p, _)| *p == pointer).map(|(_, id)| *id);
         self.captures.retain(|(p, _)| *p != pointer);
         prev
     }
 
     pub fn captured_by(&self, pointer: PointerId) -> Option<NodeId> {
-        self.captures
-            .iter()
-            .find(|(p, _)| *p == pointer)
-            .map(|(_, id)| *id)
+        self.captures.iter().find(|(p, _)| *p == pointer).map(|(_, id)| *id)
     }
 
     // ── 脏标志与脏区 ──
@@ -1701,9 +1872,10 @@ impl Track {
 
     /// 是否有节点需要重排（M1 的帧驱动用它决定 `LAYOUT` 标志）
     pub fn has_layout_dirty(&self) -> bool {
-        self.nodes.iter().flatten().any(|n| {
-            n.flags.contains(Flags::MEASURE_DIRTY) || n.flags.contains(Flags::ARRANGE_DIRTY)
-        })
+        self.nodes
+            .iter()
+            .flatten()
+            .any(|n| n.flags.contains(Flags::MEASURE_DIRTY) || n.flags.contains(Flags::ARRANGE_DIRTY))
     }
 
     /// 标记"需要重绘"，并把该节点**当前**的绘制范围并入脏区
@@ -1721,7 +1893,9 @@ impl Track {
         let mut acc = crate::transform::Affine::IDENTITY;
         let mut cur = Some(id);
         while let Some(c) = cur {
-            let n = self.get(c)?;
+            // 祖先链中途断开（节点刚被释放 / parent 悬空）时，**带着已累积的变换继续**，
+            // 而不是整条放弃 —— 后者会让这次脏区登记静默消失，症状同样是残影（D57）。
+            let Some(n) = self.get(c) else { break };
             acc = acc.then(n.transform.matrix(n.rect()));
             cur = n.parent;
         }
@@ -1735,11 +1909,13 @@ impl Track {
     /// 子树重排不会改变它的尺寸，冒泡到此为止。这样 `layout()` 只需重排"最上层脏节点"的子树，
     /// 而不是整窗（对比旧实现的全表 `has_dirty_node()` + 全量重建 flex 树）。
     pub fn mark_layout_dirty(&mut self, id: NodeId) {
+        let epoch = self.layout_epoch;
         let mut cur = Some(id);
         while let Some(c) = cur {
             let parent = {
                 let Some(n) = self.get_mut(c) else { break };
                 n.flags.insert(Flags::MEASURE_DIRTY | Flags::ARRANGE_DIRTY);
+                n.layout_epoch = epoch; // ★ 记录"哪一轮提的"（D58）
                 if size_stable(&n.layout) {
                     // 自身尺寸确定 ⇒ 它就是边界，不再向上冒泡
                     break;
@@ -1750,6 +1926,13 @@ impl Track {
         }
         // 布局变化必然带来绘制变化
         self.mark_flags(id, Flags::PAINT_DIRTY);
+    }
+
+    /// 开始新一轮布局（`layout()` 在动手之前调用）。
+    ///
+    /// 递增 epoch ⇒ 本轮期间新提的脏标能被 [`Self::clear_layout_flags`] 区分出来并保留。
+    pub(crate) fn begin_layout_epoch(&mut self) {
+        self.layout_epoch = self.layout_epoch.wrapping_add(1);
     }
 
     /// 标记"节点在父的**流**里发生了变化"（尺寸改变 / 增删 / 可见性变化 / FlexStyle 变化）。
@@ -1775,9 +1958,14 @@ impl Track {
 
     /// 布局结束后清除重排标记（`layout()` 消费完自己的义务）
     pub fn clear_layout_flags(&mut self) {
+        let cur = self.layout_epoch;
         for n in self.nodes.iter_mut().flatten() {
-            n.flags
-                .remove(Flags::MEASURE_DIRTY | Flags::ARRANGE_DIRTY);
+            // ★ 只清"本轮之前"提的标记（D58）：布局**过程中**新提的
+            //   （`write_back` 触发 `mark_layout_dirty` 等）属于下一轮的活儿，
+            //   一起清掉就漏失效了 ⇒ 画面停在旧布局且下一帧也不再重排。
+            if n.layout_epoch < cur {
+                n.flags.remove(Flags::MEASURE_DIRTY | Flags::ARRANGE_DIRTY);
+            }
         }
     }
 
@@ -1797,9 +1985,7 @@ impl Track {
                 .unwrap_or(false)
         };
         self.node_ids()
-            .filter(|id| {
-                dirty(*id) && self.parent_of(*id).map(|p| !dirty(p)).unwrap_or(true)
-            })
+            .filter(|id| dirty(*id) && self.parent_of(*id).map(|p| !dirty(p)).unwrap_or(true))
             .collect()
     }
 
@@ -1917,7 +2103,14 @@ mod tests {
 
         let changed = t
             .get_mut(id)
-            .map(|n| KindDesc::Slider { value: 0.8, min: 0.0, max: 1.0 }.apply_to(&mut n.kind))
+            .map(|n| {
+                KindDesc::Slider {
+                    value: 0.8,
+                    min: 0.0,
+                    max: 1.0,
+                }
+                .apply_to(&mut n.kind)
+            })
             .unwrap();
         assert!(changed);
         match &t.get(id).unwrap().kind {
@@ -1931,7 +2124,14 @@ mod tests {
         // 同值再应用一次 → 零变化
         let changed_again = t
             .get_mut(id)
-            .map(|n| KindDesc::Slider { value: 0.8, min: 0.0, max: 1.0 }.apply_to(&mut n.kind))
+            .map(|n| {
+                KindDesc::Slider {
+                    value: 0.8,
+                    min: 0.0,
+                    max: 1.0,
+                }
+                .apply_to(&mut n.kind)
+            })
             .unwrap();
         assert!(!changed_again);
     }
@@ -1972,8 +2172,8 @@ mod tests {
 
     #[test]
     fn layer_defaults_follow_the_layer() {
-        assert_eq!(LayerOpts::for_layer(Layer::Overlay).hit_test_visible, false);
-        assert_eq!(LayerOpts::for_layer(Layer::Modal).blocks_below, true);
+        assert!(!LayerOpts::for_layer(Layer::Overlay).hit_test_visible);
+        assert!(LayerOpts::for_layer(Layer::Modal).blocks_below);
         assert!(LayerOpts::for_layer(Layer::Modal).backdrop.is_some());
         assert!(LayerOpts::for_layer(Layer::Popup).dismiss_on_outside_click);
         assert!(!LayerOpts::for_layer(Layer::DragPreview).hit_test_visible);
@@ -2109,5 +2309,103 @@ mod tests {
         let mut kind = Kind::Image(Arc::clone(&data));
         // 同一份 Arc → 未变化
         assert!(!KindDesc::Image(Arc::clone(&data)).apply_to(&mut kind));
+    }
+
+    use crate::style::ShadowSpec;
+    // ─────────────────── A7 回归（D33 / D58） ───────────────────
+
+    /// 回归（D33）：带阴影的节点，`paint_bounds` 必须**覆盖阴影的可见范围**。
+    ///
+    /// bug 表现：绘制时阴影画在 `rect + offset` 再 `inflate(spread)`，并带高斯模糊
+    /// （`std_dev = blur * 0.5`）；而脏区按 `paint_bounds` 取 —— 此前它只返回节点矩形
+    /// ⇒ **光晕外圈不在脏区内** ⇒ 改阴影相关属性后，那圈残影不会被重画。
+    #[test]
+    fn paint_bounds_covers_shadow_blur_reach() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        {
+            let n = t.get_mut(root).unwrap();
+            n.layout.dim = [100.0, 40.0];
+            n.paint.shadow = Some(ShadowSpec {
+                blur: 8.0,
+                spread: 2.0,
+                offset_x: 0.0,
+                offset_y: 4.0,
+                color: Color::new(0, 0, 0),
+            });
+        }
+        // 布局结果写回（paint_bounds 依赖 `rect()`）
+        t.get_mut(root).unwrap().computed = lieui_layout::ComputedLayout {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 40.0,
+            overflow_scroll: false,
+        };
+
+        let pb = t.get(root).unwrap().paint_bounds();
+        let r = t.get(root).unwrap().rect();
+
+        // 高斯 3σ ≈ blur * 1.5 = 12，再加 spread 2 ⇒ 至少外扩 14
+        let reach = 2.0 + 8.0 * 1.5;
+        assert!(
+            pb.width >= r.width + 2.0 * reach - 0.5 && pb.height >= r.height + 2.0 * reach - 0.5,
+            "D33：paint_bounds {pb:?} 未覆盖阴影外扩（rect {r:?}, reach {reach}）"
+        );
+        // 四边保守外扩（偏移方向未知，宁可多标）
+        assert!(pb.x <= r.x - reach + 0.5, "左侧应外扩");
+        assert!(pb.y <= r.y - reach + 0.5, "上侧应外扩");
+    }
+
+    /// 无阴影时 `paint_bounds` 不应被扩张（保持"精确脏区"的收益）。
+    #[test]
+    fn paint_bounds_is_not_inflated_without_shadow() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [100.0, 40.0];
+        t.get_mut(root).unwrap().computed = lieui_layout::ComputedLayout {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 40.0,
+            overflow_scroll: false,
+        };
+        let pb = t.get(root).unwrap().paint_bounds();
+        let r = t.get(root).unwrap().rect();
+        assert_eq!((pb.x, pb.y, pb.width, pb.height), (r.x, r.y, r.width, r.height));
+    }
+
+    /// 回归（D58）：**本轮布局期间**新提的脏标不能被 `clear_layout_flags` 清掉。
+    ///
+    /// bug 表现：`clear_layout_flags` 无条件清全树 MEASURE/ARRANGE。而布局过程中
+    /// （`write_back` 等）可能再次 `mark_layout_dirty`，那些标记属于**下一轮**的活儿，
+    /// 一起被清 ⇒ 漏失效 ⇒ 画面停在旧布局，且后续帧也不再重排（`has_layout_dirty` 恒假）。
+    #[test]
+    fn flags_raised_during_the_layout_round_survive_clear() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [100.0, 40.0];
+        let child = t.create(Kind::Box, None);
+        t.append_child(root, child);
+
+        // 第一轮：把已有脏标消费掉
+        t.mark_layout_dirty(child);
+        t.begin_layout_epoch();
+        t.clear_layout_flags();
+        assert!(!t.has_layout_dirty(), "第一轮之后应当是干净的");
+
+        // 第二轮：**布局过程中**（模拟 write_back 触发的）又标脏
+        t.begin_layout_epoch();
+        t.mark_layout_dirty(child);
+        t.clear_layout_flags();
+        assert!(
+            t.has_layout_dirty(),
+            "D58：本轮期间提的脏标被 clear_layout_flags 清掉了 ⇒ 漏失效"
+        );
+
+        // 第三轮：它属于"本轮之前" ⇒ 应被正常消费
+        t.begin_layout_epoch();
+        t.clear_layout_flags();
+        assert!(!t.has_layout_dirty(), "下一轮应把它消费掉");
     }
 }

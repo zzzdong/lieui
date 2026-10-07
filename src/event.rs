@@ -195,10 +195,16 @@ impl EventKind {
         use EventKind::*;
         match self {
             PreviewKeyDown | PreviewKeyUp => Routing::Tunnel,
-            PointerCaptureLost | Loaded | Unloaded | SizeChanged | EffectiveViewportChanged
-            | ScrollChanged | BringIntoViewRequested | Dismissed | Tick | NoFocusCandidateFound => {
-                Routing::Direct
-            }
+            PointerCaptureLost
+            | Loaded
+            | Unloaded
+            | SizeChanged
+            | EffectiveViewportChanged
+            | ScrollChanged
+            | BringIntoViewRequested
+            | Dismissed
+            | Tick
+            | NoFocusCandidateFound => Routing::Direct,
             _ => Routing::Bubble,
         }
     }
@@ -765,8 +771,7 @@ impl<T: Send + 'static> Emitter<T> {
 
     /// 发一条事件（UI 线程在 `on_external` 里收到）
     pub fn emit(&self, msg: T) -> bool {
-        self.waker
-            .post(self.window, crate::app::ExternalData::new(msg))
+        self.waker.post(self.window, crate::app::ExternalData::new(msg))
     }
 }
 
@@ -1040,11 +1045,10 @@ mod tests {
         let log = Rc::new(std::cell::RefCell::new(Vec::new()));
         for (i, id) in path.iter().enumerate() {
             let log = Rc::clone(&log);
-            t.get_mut(*id).unwrap().handlers.push(slot(
-                EventKind::Tapped,
-                false,
-                move |_| log.borrow_mut().push(i),
-            ));
+            t.get_mut(*id)
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::Tapped, false, move |_| log.borrow_mut().push(i)));
         }
 
         let rt = Runtime::new();
@@ -1078,11 +1082,10 @@ mod tests {
         let log = Rc::new(std::cell::RefCell::new(Vec::new()));
         for (i, id) in path.iter().enumerate() {
             let log = Rc::clone(&log);
-            t.get_mut(*id).unwrap().handlers.push(slot(
-                EventKind::Tapped,
-                false,
-                move |_| log.borrow_mut().push(i),
-            ));
+            t.get_mut(*id)
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::Tapped, false, move |_| log.borrow_mut().push(i)));
         }
         // 最内层（2）禁用
         t.get_mut(path[2]).unwrap().interaction.enabled = false;
@@ -1112,11 +1115,12 @@ mod tests {
         let log = Rc::new(std::cell::RefCell::new(Vec::new()));
         for (i, id) in path.iter().enumerate() {
             let log = Rc::clone(&log);
-            t.get_mut(*id).unwrap().handlers.push(slot(
-                EventKind::PreviewKeyDown,
-                false,
-                move |_| log.borrow_mut().push(i),
-            ));
+            t.get_mut(*id)
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::PreviewKeyDown, false, move |_| {
+                    log.borrow_mut().push(i)
+                }));
         }
 
         let rt = Runtime::new();
@@ -1143,11 +1147,10 @@ mod tests {
         let log = Rc::new(std::cell::RefCell::new(Vec::new()));
         for (i, id) in path.iter().enumerate() {
             let log = Rc::clone(&log);
-            t.get_mut(*id).unwrap().handlers.push(slot(
-                EventKind::Loaded,
-                false,
-                move |_| log.borrow_mut().push(i),
-            ));
+            t.get_mut(*id)
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::Loaded, false, move |_| log.borrow_mut().push(i)));
         }
 
         let rt = Runtime::new();
@@ -1176,32 +1179,31 @@ mod tests {
         // 目标（最内层）：标记 handled
         {
             let log = Rc::clone(&log);
-            t.get_mut(path[2]).unwrap().handlers.push(slot(
-                EventKind::Tapped,
-                false,
-                move |cx| {
+            t.get_mut(path[2])
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::Tapped, false, move |cx| {
                     log.borrow_mut().push("target");
                     cx.mark_handled();
-                },
-            ));
+                }));
         }
         // 中间层：普通（应被跳过）
         {
             let log = Rc::clone(&log);
-            t.get_mut(path[1]).unwrap().handlers.push(slot(
-                EventKind::Tapped,
-                false,
-                move |_| log.borrow_mut().push("mid"),
-            ));
+            t.get_mut(path[1])
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::Tapped, false, move |_| log.borrow_mut().push("mid")));
         }
         // 最外层：handledEventsToo（应仍然执行 —— 内置行为的语义）
         {
             let log = Rc::clone(&log);
-            t.get_mut(path[0]).unwrap().handlers.push(slot(
-                EventKind::Tapped,
-                true,
-                move |_| log.borrow_mut().push("root-builtin"),
-            ));
+            t.get_mut(path[0])
+                .unwrap()
+                .handlers
+                .push(slot(EventKind::Tapped, true, move |_| {
+                    log.borrow_mut().push("root-builtin")
+                }));
         }
 
         let rt = Runtime::new();
@@ -1230,14 +1232,13 @@ mod tests {
         let (mut t, path) = chain(2);
         let root = path[0];
 
-        t.get_mut(path[1]).unwrap().handlers.push(slot(
-            EventKind::Tapped,
-            false,
-            move |cx| {
+        t.get_mut(path[1])
+            .unwrap()
+            .handlers
+            .push(slot(EventKind::Tapped, false, move |cx| {
                 cx.damage(root);
                 cx.focus(root);
-            },
-        ));
+            }));
 
         let rt = Runtime::new();
         let w = WindowId::new(1);

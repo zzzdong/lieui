@@ -85,10 +85,7 @@ fn text_leaf_remeasures_under_constraint() {
 
     let mut t = FlexNode::new(2, FlexStyle::default());
     t.intrinsic_size = Some((400.0, 20.0));
-    t.measure_text = Some((
-        "hello world hello world hello world hello world".into(),
-        spec,
-    ));
+    t.measure_text = Some(("hello world hello world hello world hello world".into(), spec));
     root.add_child(t);
 
     root.layout(120.0, 400.0, LayoutDirection::Ltr);
