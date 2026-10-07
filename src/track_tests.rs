@@ -398,7 +398,7 @@ fn flags_raised_during_the_layout_round_survive_clear() {
 ///    必须归一化成 `a <= b`。
 /// 3. **写回绑定**：所有组件方法都要 `sig.set(..)`，否则模型与视图脱节。
 mod component_behavior {
-    use super::{Kind, NodeId, Track};
+    use super::{Flags, Kind, NodeId, Track};
     use crate::reactive::{Runtime, Signal};
 
     fn input_node(t: &mut Track, text: &str, caret: usize) -> NodeId {
@@ -735,5 +735,118 @@ mod component_behavior {
         assert!(!t.input_delete(id));
         assert!(!t.input_select_all(id));
         assert!(!t.input_move_caret(id, 1, false));
+    }
+
+    // ── 5. setter 的"标脏"契约（P3-b #1）────────────────────────────────
+
+    /// 建一棵 `root -> (mid -> leaf, sibling)` 的树，三者都设好尺寸。
+    fn dirty_tree() -> (Track, NodeId, NodeId, NodeId) {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [200.0, 100.0];
+        let mid = t.create(Kind::Box, None);
+        t.get_mut(mid).unwrap().layout.dim = [100.0, 40.0];
+        let leaf = t.create(Kind::Box, None);
+        t.get_mut(leaf).unwrap().layout.dim = [50.0, 20.0];
+        let sib = t.create(Kind::Box, None);
+        t.get_mut(sib).unwrap().layout.dim = [50.0, 20.0];
+        t.append_child(root, mid);
+        t.append_child(mid, leaf);
+        t.append_child(root, sib);
+        t.get_mut(root).unwrap().flags = Flags::empty();
+        t.get_mut(mid).unwrap().flags = Flags::empty();
+        t.get_mut(leaf).unwrap().flags = Flags::empty();
+        t.get_mut(sib).unwrap().flags = Flags::empty();
+        (t, root, leaf, sib)
+    }
+
+    /// ★★ `set_visibility` 必须同时标 **flow（自己 + 父）与 paint**。
+    ///
+    /// 漏掉任何一半都会产生"看起来坏了"的症状：
+    /// - 漏 flow ⇒ 兄弟不重排（`Collapsed` 让节点退出父流，占位要消失）
+    /// - 漏 paint ⇒ 屏幕上留旧像素残影
+    #[test]
+    fn set_visibility_marks_flow_and_paint() {
+        use crate::track::Visibility;
+        let (mut t, _root, leaf, _sib) = dirty_tree();
+
+        assert!(t.set_visibility(leaf, Visibility::Collapsed));
+
+        let f = t.get(leaf).unwrap().flags;
+        assert!(
+            f.contains(Flags::MEASURE_DIRTY | Flags::ARRANGE_DIRTY),
+            "自身必须标脏（退出父流）"
+        );
+        assert!(f.contains(Flags::PAINT_DIRTY), "必须标脏（旧像素要重画）");
+        assert!(t.has_layout_dirty(), "Track 必须报告有待布局");
+    }
+
+    /// 父节点也必须被标脏 —— 否则兄弟不知道要重排。
+    #[test]
+    fn set_visibility_marks_parent_too() {
+        use crate::track::Visibility;
+        let (mut t, _root, leaf, _sib) = dirty_tree();
+        assert!(t.set_visibility(leaf, Visibility::Collapsed));
+        let parent = t.parent_of(leaf).unwrap();
+        assert!(
+            t.get(parent)
+                .unwrap()
+                .flags
+                .contains(Flags::MEASURE_DIRTY | Flags::ARRANGE_DIRTY),
+            "★ 父节点必须一起标脏，否则兄弟不重排"
+        );
+    }
+
+    /// 值没变时**不标脏**（否则无谓的全窗重绘会打爆脏区优化）。
+    #[test]
+    fn set_visibility_no_change_marks_nothing() {
+        use crate::track::Visibility;
+        let (mut t, _root, leaf, _sib) = dirty_tree();
+        assert!(
+            !t.set_visibility(leaf, Visibility::Visible),
+            "默认就是 Visible，不算变化"
+        );
+        assert!(
+            !t.get(leaf).unwrap().flags.contains(Flags::PAINT_DIRTY),
+            "未变化不得标脏"
+        );
+    }
+
+    /// 不存在的节点 ⇒ 返回 false 且**不 panic**。
+    #[test]
+    fn set_visibility_on_missing_node_is_safe() {
+        let mut t = Track::new();
+        assert!(!t.set_visibility(crate::track::NodeId(9999), crate::track::Visibility::Hidden));
+        assert!(!t.set_interaction_enabled(crate::track::NodeId(9999), false));
+    }
+
+    /// ★ `set_interaction_enabled` 必须标 paint（绘制侧有 4 处读它）。
+    #[test]
+    fn set_interaction_enabled_marks_paint() {
+        let (mut t, _root, leaf, _sib) = dirty_tree();
+        assert!(t.set_interaction_enabled(leaf, false));
+        assert!(
+            t.get(leaf).unwrap().flags.contains(Flags::PAINT_DIRTY),
+            "★ 禁用态要立刻重绘（禁用前景色 / 光标闪烁都读它）"
+        );
+    }
+
+    /// 值没变时不标脏。
+    #[test]
+    fn set_interaction_enabled_no_change_marks_nothing() {
+        let (mut t, _root, leaf, _sib) = dirty_tree();
+        assert!(!t.set_interaction_enabled(leaf, true), "默认就是 true");
+        assert!(!t.get(leaf).unwrap().flags.contains(Flags::PAINT_DIRTY));
+    }
+
+    /// ★★ 交叉验证：setter 确实改了字段（否则上面几条全都不成立）。
+    #[test]
+    fn setters_actually_change_the_fields() {
+        use crate::track::Visibility;
+        let (mut t, _root, leaf, _sib) = dirty_tree();
+        t.set_visibility(leaf, Visibility::Hidden);
+        assert_eq!(t.get(leaf).unwrap().visibility, Visibility::Hidden);
+        t.set_interaction_enabled(leaf, false);
+        assert!(!t.get(leaf).unwrap().interaction.enabled);
     }
 }

@@ -200,19 +200,10 @@ pub fn apply_cmds(track: &mut Track, cmds: &[Cmd]) -> Dirty {
                 }
             }
             Cmd::SetVisibility { id, visibility } => {
-                let changed = {
-                    match track.get_mut(*id) {
-                        Some(n) if n.visibility != *visibility => {
-                            n.visibility = *visibility;
-                            true
-                        }
-                        _ => false,
-                    }
-                };
-                if changed {
-                    // 收起/显示会改变它在父流里的占位 ⇒ 兄弟要重排
-                    track.mark_flow_dirty(*id);
-                    track.mark_paint_dirty(*id);
+                // ★ 走 `Track::set_visibility`：它把"flow + paint 双标脏"这套
+                //   规则收敛在一处（原先这段逻辑内联在cmd 里，若再加 setter
+                //   就会有两份实现，容易只改一处）。
+                if track.set_visibility(*id, *visibility) {
                     dirty |= Dirty::LAYOUT | Dirty::PAINT | Dirty::PRESENT;
                 }
             }

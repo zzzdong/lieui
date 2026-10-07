@@ -5333,3 +5333,111 @@ G4 完成。按实测重新排序的候选：
 **track.rs 分析的结论**：`impl Track` 1023 行 / 76 方法，
 作者**已自行分 6 区**（最大区 305 行 / 19 方法），生产代码**零 panic**，
 80 个 pub fn 里只有 2 个零调用。**结构不混乱，不值得搬。**
+
+---
+
+## 2026-10-07 · P4 · `set_visibility` / `set_interaction_enabled` —— ✅ 完成
+
+> 这是 `track.rs` 实测分析出的**唯一有防御价值**的项：
+> 防的是**未来代码的静默错误**（改了状态不重绘），不是整理旧代码。
+
+### 一、问题：`Node` 字段全`pub`，运行期改状态容易漏标脏
+
+`Track` 原本**没有** `set_visibility` / `set_interaction_enabled`。
+字段是 `pub`，所以运行期可以直接写 —— 而**漏掉脏标记不会报错，只是看起来坏了**。
+
+#### `visibility` 同时被**三条**路径读取
+
+| 读取点 | 语义 |
+|---|---|
+| `hit.rs:73` | `!= Visible` ⇒ **不参与命中** |
+| `layout.rs:236` | `!= Collapsed` ⇒ **参与布局** |
+| `scene.rs:557` | `!= Visible` ⇒ **不绘制** |
+
+直接写字段 ⇒ 既不会**父流重排**（兄弟位置不对），
+也**不会把旧像素登记进脏区**（屏幕留残影）。两者都是静默错误。
+
+#### `interaction.enabled` 被绘制侧读了 4 处
+
+`render/mod.rs` × 4（禁用前景色 / 光标闪烁 / 命中反馈）、
+`event.rs:802`（事件路由跳过）、`focus.rs:63,78`（焦点链）、`track.rs:1748`（`input_is_active`）。
+
+漏 `mark_paint_dirty` ⇒ 禁用态要等**下一次别的改动**才重绘。
+
+### 二、核实：当前**没有**实际 bug
+
+写之前先核实了三条生产写入路径，**全部已正确处理**：
+
+| 路径 | 是否正确 |
+|---|---|
+| `cmd.rs:202` `SetVisibility` | ✅ 正确（`mark_flow_dirty` + `mark_paint_dirty`） |
+| `align.rs:146`（对齐器） | ✅ 正确（统一标脏） |
+| `view.rs:1128/1133/1138`（声明式构建） | ✅ 正确（下一帧 `align` 统一处理） |
+
+⇒ 这是**防御性**改动，不是修 bug。**如实标注。**
+
+### 三、实现
+
+**1. `Track::set_visibility(id, v) -> bool`**
+
+```rust
+if changed {
+    self.mark_flow_dirty(id);   // ★ Collapsed 让节点退出父流 ⇒ 兄弟要重排
+    self.mark_paint_dirty(id);  //   旧像素要重画
+}
+```
+
+用 `flow` 而非 `layout`：两者的**唯一区别**就是 `flow` 会连父节点一起标脏，
+而 `Collapsed` 正是会让占位消失、需要兄弟重排的那种改动。
+
+**2. `Track::set_interaction_enabled(id, v) -> bool`** —— 只标 paint。
+
+事件路由与焦点链是**即时查询**（`hit` / `tab_order` 每次重算）⇒ 不需脏标记。
+
+**3. `cmd.rs` 的 `SetVisibility` 改为调用 setter** —— ★ 这是**收敛**，不是重复。
+
+原先那段 `mark_flow_dirty + mark_paint_dirty` 是**内联在 cmd 处理里**的。
+加了 setter 后若不收敛，就变成**两份实现**，将来只改一处就出 bug。
+
+**4. 两个字段加⚠️ 文档注释** —— 明确「运行期请用setter，声明式路径除外」。
+
+### 四、测试（7 条，`track::component_behavior`）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `set_visibility_marks_flow_and_paint` | ★★ 自己标脏 **且** PAINT_DIRTY |
+| `set_visibility_marks_parent_too` | ★★ **父节点也必须标脏**（否则兄弟不重排） |
+| `set_visibility_no_change_marks_nothing` | 值未变**不标脏**（否则打爆脏区优化） |
+| `set_visibility_on_missing_node_is_safe` | 不存在的节点 ⇒ false 且不 panic |
+| `set_interaction_enabled_marks_paint` | ★ 禁用态立刻重绘 |
+| `set_interaction_enabled_no_change_marks_nothing` | 未变不标脏 |
+| `setters_actually_change_the_fields` | ★★ **交叉验证**：setter 确实改了字段 |
+
+最后一条是**特意加的**：前六条都只在检查"脏标记"，如果 setter 根本没改字段，
+它们会**全部照样通过**。**断言"副作用"之前，先断言"主作用"。**
+
+**变异验证**（把 `mark_flow_dirty` 删掉，模拟"漏了父流重排"）：
+
+```
+panicked at src\track_tests.rs:776: 自身必须标脏（退出父流）
+panicked at src\track_tests.rs:791: ★ 父节点必须一起标脏，否则兄弟不重排
+```
+
+**两条同时失败** ⇒ 测试确实守住了"flow ≠ layout"这个契约。
+
+### 五、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **17 个测试二进制全 ok**（lib 447 → **454**） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+| 变异（删 `mark_flow_dirty`） | **FAILED** ✓（2 条抓到） |
+
+### 六、剩余
+
+- **#2** 删 `add_builtin_handler`（零调用，14 行参数）—— 极低风险
+- **#3** D52 组件行为归位 —— **仍不建议**（减 11%、零功能价值、上次失败过）
+- D-b 滚动脱离布局 / G1 RuntimeInner 拆分 —— 前置未就位
+

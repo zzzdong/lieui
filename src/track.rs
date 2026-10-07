@@ -137,6 +137,9 @@ pub struct InteractionState {
     pub pointer_over: bool,
     pub pressed: bool,
     pub focused: bool,
+    /// ⚠️ **运行期修改请用 [`Track::set_interaction_enabled`]**，直接写字段会漏掉
+    /// `mark_paint_dirty` ⇒ 禁用态要等下一次别的改动才会重绘。
+    /// （声明式路径 `view()` 里的 `.enabled(..)` 除外：那是构建，下一帧 `align` 会统一处理。）
     pub enabled: bool,
 }
 
@@ -788,6 +791,9 @@ pub struct Node {
     pub image: ImageStyle,
 
     // ── 可视 / 命中属性（对齐 WinUI UIElement）──
+    /// ⚠️ **运行期修改请用 [`Track::set_visibility`]**，直接写字段会漏掉
+    /// 「父流重排」与「旧像素登记脏区」——两者都不报错，只是**看起来坏了**。
+    /// （声明式路径 `view()` 里的 `.visible(..)` 除外：那是构建，下一帧 `align` 会统一处理。）
     pub visibility: Visibility,
     pub hit_test_visible: bool,
     pub clip: Option<Rect>,
@@ -1403,6 +1409,78 @@ impl Track {
             n.interaction.focused = state != FocusState::Unfocused;
             self.mark_paint_dirty(id);
         }
+    }
+
+    /// 改可见性（返回是否变化）。**运行期改用它，不要直接写 `n.visibility`。**
+    ///
+    /// ## 为什么必须走这个方法
+    ///
+    /// `visibility` 同时被**三条**完全不同的路径读取，改动必须同时惊动它们：
+    ///
+    /// | 读取点 | 语义 |
+    /// |---|---|
+    /// | `hit.rs:73` | `!= Visible` ⇒ **不参与命中** |
+    /// | `layout.rs:236` | `!= Collapsed` ⇒ **参与布局** |
+    /// | `scene.rs:557` | `!= Visible` ⇒ **不绘制** |
+    ///
+    /// 直接写字段只会改到内存里的值：**既不会让父流重排**（兄弟的位置不对），
+    /// **也不会把旧像素登记进脏区**（屏幕上留着残影）。
+    /// 这两样都不会报错，只是**看起来坏了**—— GUI 里最难查的一类。
+    ///
+    /// ## 为什么是 `flow` 而不是 `layout`
+    ///
+    /// `Collapsed` 会让节点**退出父流**（占位消失）⇒ 兄弟要重排 ⇒ 必须连父节点
+    /// 一起标脏，这就是 [`Self::mark_flow_dirty`] 与 [`Self::mark_layout_dirty`]
+    /// 的唯一区别。
+    ///
+    /// ## 声明式路径不受影响
+    ///
+    /// `view()` 里的 `.visible(..)` / `.hidden()` / `.collapsed()` 仍然直接写字段
+    /// ——那是**构建**路径，下一帧 `align` 会统一标脏（`align.rs:142-150`）。
+    pub fn set_visibility(&mut self, id: NodeId, v: Visibility) -> bool {
+        let changed = match self.get_mut(id) {
+            Some(n) if n.visibility != v => {
+                n.visibility = v;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.mark_flow_dirty(id);
+            self.mark_paint_dirty(id);
+        }
+        changed
+    }
+
+    /// 改交互使能（返回是否变化）。**运行期改用它，不要直接写 `n.interaction.enabled`。**
+    ///
+    /// ## 为什么必须走这个方法
+    ///
+    /// `enabled` 同样被多条路径读取，其中**绘制侧就有4 处**会因它改变外观：
+    ///
+    /// | 读取点 | 语义 |
+    /// |---|---|
+    /// | `render/mod.rs` × 4 | 禁用态前景色 / 光标闪烁 / 命中反馈 |
+    /// | `event.rs:802` | 事件**路由**跳过（菜单里的禁用项最典型） |
+    /// | `focus.rs:63,78` | **焦点链**（`tab_order` / `focusable_ancestor`） |
+    /// | `track.rs:1748` | `input_is_active` |
+    ///
+    /// 漏掉 `mark_paint_dirty` 的后果：禁用态要等**下一次**别的改动才会重绘。
+    ///
+    /// 事件路由与焦点链是**即时查询**（`hit` / `tab_order` 每次重新算），
+    /// 所以**不需要**额外脏标记；但绘制需要。
+    pub fn set_interaction_enabled(&mut self, id: NodeId, v: bool) -> bool {
+        let changed = match self.get_mut(id) {
+            Some(n) if n.interaction.enabled != v => {
+                n.interaction.enabled = v;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.mark_paint_dirty(id);
+        }
+        changed
     }
 
     pub fn scroll_offset(&self, id: NodeId) -> (f32, f32) {
