@@ -1,9 +1,9 @@
-use std::time::Instant;
 use lieui::layout::layout;
 use lieui::prelude::Color;
 use lieui::render::Renderer;
 use lieui::track::{Kind, Layer, NodeId, Track};
 use lieui_geom::Size;
+use std::time::Instant;
 
 const WINDOW: Size = Size::new(1280.0, 800.0);
 const FRAMES: usize = 60;
@@ -46,9 +46,15 @@ fn scroll_list(n: usize) -> (Track, NodeId) {
 #[test]
 #[ignore = "perf probe; run manually"]
 fn scroll_frame_cost_decomposition() {
-    println!("window {}x{}, scroll 1px/frame, avg of {FRAMES}", WINDOW.width, WINDOW.height);
+    println!(
+        "window {}x{}, scroll 1px/frame, avg of {FRAMES}",
+        WINDOW.width, WINDOW.height
+    );
     println!();
-    println!("{:>7}  {:>10}  {:>10}  {:>10}  {:>11}  {:>14}", "rows", "layout ms", "render ms", "frame ms", "layout%", "nodes/bounds");
+    println!(
+        "{:>7}  {:>10}  {:>10}  {:>10}  {:>11}  {:>14}",
+        "rows", "layout ms", "render ms", "frame ms", "layout%", "nodes/bounds"
+    );
     println!("{}", "-".repeat(72));
     for n in [200usize, 1000, 5000, 20000] {
         let (mut t, list) = scroll_list(n);
@@ -57,7 +63,9 @@ fn scroll_frame_cost_decomposition() {
             layout(&mut t, WINDOW);
         }
         let mut r = Renderer::new(WINDOW, Color::rgba(250, 250, 250, 255));
-        for _ in 0..3 { r.render(&t, &[], false); }
+        for _ in 0..3 {
+            r.render(&t, &[], false);
+        }
         let (mut lay, mut ren) = (0.0f64, 0.0f64);
         let (mut nodes, mut bounds) = (0usize, 0usize);
         for i in 0..FRAMES {
@@ -75,7 +83,16 @@ fn scroll_frame_cost_decomposition() {
         let lay = lay * 1e3 / FRAMES as f64;
         let ren = ren * 1e3 / FRAMES as f64;
         let frame = lay + ren;
-        println!("{:>7}  {:>10.3}  {:>10.3}  {:>10.3}  {:>10.1}%  {:>8} / {}", n, lay, ren, frame, 100.0 * lay / frame, nodes, bounds);
+        println!(
+            "{:>7}  {:>10.3}  {:>10.3}  {:>10.3}  {:>10.1}%  {:>8} / {}",
+            n,
+            lay,
+            ren,
+            frame,
+            100.0 * lay / frame,
+            nodes,
+            bounds
+        );
     }
     println!();
     println!("layout% = upper bound of what a compositor could save");

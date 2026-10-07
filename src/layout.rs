@@ -88,8 +88,16 @@ pub fn layout(track: &mut Track, window: Size) -> LayoutStats {
             (Size::new(r.width.max(0.0), r.height.max(0.0)), Some((r.x, r.y)))
         };
 
+        let t_build = std::time::Instant::now();
         let mut flex = build(track, b);
+        let d_build = t_build.elapsed().as_nanos() as u64;
+        let t_lay = std::time::Instant::now();
         flex.layout(avail.width, avail.height, Direction::Ltr);
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            PROF_BUILD_NS.fetch_add(d_build, Relaxed);
+            PROF_LAYOUT_NS.fetch_add(t_lay.elapsed().as_nanos() as u64, Relaxed);
+        }
 
         // 写回起点：让 `base + flex.get_left()` 复现边界原本的绝对位置
         let (ox, oy) = match base {
@@ -240,6 +248,25 @@ pub(crate) fn layout_children(track: &Track, id: NodeId) -> Vec<NodeId> {
 }
 
 /// 把保留子树转成 `FlexNode` 子树（叶子带上测度信息）
+/// ★ 临时 instrumentation（D-a 前置测量用，测完即删）
+///
+///用 `AtomicU64` 存**纳秒**（crate `forbid(unsafe_code)`，且避开 `f64` 非原子）。
+static PROF_BUILD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_LAYOUT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取累计的 build / flex.layout 耗时（纳秒）
+pub fn prof_snap() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (PROF_BUILD_NS.load(Relaxed), PROF_LAYOUT_NS.load(Relaxed))
+}
+
+/// 清零累计计时
+pub fn prof_reset() {
+    use std::sync::atomic::Ordering::Relaxed;
+    PROF_BUILD_NS.store(0, Relaxed);
+    PROF_LAYOUT_NS.store(0, Relaxed);
+}
+
 pub(crate) fn build(track: &Track, id: NodeId) -> FlexNode {
     let Some(n) = track.get(id) else {
         return FlexNode::new(id.to_u64(), Default::default());
