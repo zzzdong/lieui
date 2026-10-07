@@ -4211,3 +4211,97 @@ fn scrollbar_drag_marks_the_runtime_dirty_while_dragging() {
         "拖动后偏移应前进"
     );
 }
+
+/// ★ 回归（用户需求 3）：**点滚动条空白轨道 ⇒ 翻一页**。
+///
+/// 与"抓 thumb 拖拽"是两回事：thumb 之外那一段轨道此前按了没反应。
+/// 本测试点 thumb **下方**的轨道 ⇒ 偏移应向前跳约一页（视口高度 - 24 重叠）。
+#[test]
+fn clicking_the_scrollbar_track_pages_down() {
+    struct List {
+        n: Signal<i32>,
+    }
+    impl ViewModel for List {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.scroll(|s| {
+                s.expand(true);
+                s.column(|c| {
+                    for i in 0..60 {
+                        c.text(format!("row {i}")).font_size(20.0);
+                    }
+                });
+            });
+            let _ = self.n.get();
+        }
+    }
+
+    let rt = Runtime::new();
+    let mut app = App::new(rt.clone());
+    let id = app.window(WindowConfig::new().size(200.0, 100.0), List { n: Signal::new(&rt, 0) });
+    app.frame_all();
+
+    let (sc, rect, content) = {
+        let w = app.window_ctx(id).unwrap();
+        let t = w.track();
+        let sc = t
+            .node_ids()
+            .find(|n| t.get(*n).map(|x| x.layout.overflow_scroll).unwrap_or(false))
+            .expect("滚动容器");
+        let n = t.get(sc).unwrap();
+        (sc, n.rect(), n.content_size)
+    };
+    let (track_r, thumb) = crate::widgets::vscroll_parts(rect, content, 0.0).expect("滚动条");
+    // 点 thumb **下方**的轨道空白处
+    let p = Point::new(track_r.x + track_r.width / 2.0, thumb.bottom() + 10.0);
+
+    app.frame_all(); // 清脏
+    app.window_ctx_mut(id).unwrap().pointer(
+        &rt,
+        InputEvent::Down {
+            pointer: PointerId(0),
+            pos: p,
+            button: PointerButton::Left,
+        },
+    );
+
+    let off = app.window_ctx(id).unwrap().track().scroll_offset(sc).1;
+    println!("offset after track click = {off}");
+    assert!(
+        off >= rect.height - 24.0 - 1.0,
+        "★ 点轨道下方应向前翻约一页（{0} - 24），实为 {off}",
+        rect.height
+    );
+    let d = rt.peek_dirty(id);
+    assert!(!d.is_empty(), "★ 翻页后必须有脏标（要重绘），实为 {d:?}");
+
+    // 反向：点 thumb **上方**的轨道应往回翻。
+    //
+    // ★ 必须先滚到**中段**：thumb 贴近轨道顶端时，"上方"没有可点区域
+    //   （`thumb.y - INFLATE` 已经越过轨道起点）——第一版就栽在这里，
+    //   点到的其实是 thumb 的命中带，偏移自然不动。
+    let mid = (content.height - rect.height) / 2.0;
+    app.window_ctx_mut(id)
+        .unwrap()
+        .track_mut()
+        .set_scroll_offset(sc, (0.0, mid));
+    app.frame_all();
+    let (track_r2, thumb2) = crate::widgets::vscroll_parts(rect, content, mid).expect("滚动条");
+    assert!(
+        thumb2.y > track_r2.y + 10.0,
+        "前置：中段时 thumb 上方应有可点轨道（track.y={} thumb.y={}）",
+        track_r2.y,
+        thumb2.y
+    );
+    let up = Point::new(track_r2.x + track_r2.width / 2.0, track_r2.y + 1.0);
+    app.window_ctx_mut(id).unwrap().pointer(
+        &rt,
+        InputEvent::Down {
+            pointer: PointerId(0),
+            pos: up,
+            button: PointerButton::Left,
+        },
+    );
+    let back = app.window_ctx(id).unwrap().track().scroll_offset(sc).1;
+    println!("offset after clicking above thumb = {back} (mid was {mid})");
+    assert!(back < mid, "★ 点 thumb 上方应往回翻，{mid} -> {back}");
+}

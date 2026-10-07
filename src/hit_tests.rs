@@ -633,3 +633,123 @@ mod nested_z_order {
         );
     }
 }
+
+/// ★★ 回归（用户报障）：**滚动条区域不得穿透到底下的控件**。
+///
+/// ## 修的是什么
+///
+/// 滚动条是**绘制**出来的，不是节点。此前命中时直接穿过它去找子节点 ⇒
+/// 点在滚动条上会命中**下面的行** ⇒ 松手合成 `Tapped`
+/// ⇒ **点一下滚动条就把那一页选中了**。
+///
+/// ## 本测试的两个方向
+///
+/// 1. 点在滚动条区域 ⇒ 命中链**止于滚动容器**，不含行；
+/// 2. 点在内容区 ⇒ 照常命中行（**反向**，防止"整个容器都不可穿透"）。
+#[cfg(test)]
+mod scrollbar_hit_area {
+    use crate::layout::layout;
+    use crate::track::{Kind, Layer, Track};
+    use lieui_geom::{Point, Size};
+
+    const WINDOW: Size = Size::new(200.0, 120.0);
+
+    /// 一个竖直溢出的滚动容器 + 若干行；`show_scrollbar = true`。
+    fn scroll_tree() -> (Track, crate::track::NodeId, Vec<crate::track::NodeId>) {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [WINDOW.width, WINDOW.height];
+        t.add_root(Layer::Content, None, root);
+
+        let sc = t.create(Kind::Box, None);
+        {
+            let n = t.get_mut(sc).unwrap();
+            n.layout.dim = [WINDOW.width, WINDOW.height];
+            n.layout.overflow_scroll = true;
+            n.layout.show_scrollbar = true;
+            n.paint.clip_content = true;
+        }
+        t.append_child(root, sc);
+
+        let mut rows = Vec::new();
+        for i in 0..12 {
+            let r = t.create(Kind::Box, None);
+            {
+                let n = t.get_mut(r).unwrap();
+                n.layout.dim = [WINDOW.width, 30.0];
+                n.layout.flex_shrink = 0.0;
+                n.paint.background_color = Some(lieui_geom::Color::rgba((i * 20) as u8, 90, 160, 255));
+            }
+            t.append_child(sc, r);
+            rows.push(r);
+        }
+        layout(&mut t, WINDOW);
+        (t, sc, rows)
+    }
+
+    /// ★ 点在滚动条上 ⇒ 命中链止于容器，**不含任何行**。
+    #[test]
+    fn clicking_the_scrollbar_does_not_hit_rows_beneath() {
+        let (t, sc, rows) = scroll_tree();
+        let rect = t.get(sc).unwrap().rect();
+        let content = t.get(sc).unwrap().content_size;
+        let (track_r, thumb) = crate::widgets::vscroll_parts(rect, content, 0.0).expect("应溢出并画出滚动条");
+        println!("rect={rect:?} content={content:?} track={track_r:?} thumb={thumb:?}");
+
+        // 点在轨道上（thumb 之外，靠近轨道底部）
+        let y = track_r.bottom() - 2.0;
+        let x = track_r.x + track_r.width / 2.0;
+        let p = Point::new(x, y);
+        let path = crate::hit::hit_path(&t, p);
+        println!("hit at scrollbar {p:?} => {path:?}");
+        assert!(path.contains(&sc), "应命中滚动容器：{path:?}");
+        for r in &rows {
+            assert!(!path.contains(r), "★★ 不得穿透到行 {r:?}（点滚动条会误选页面）");
+        }
+    }
+
+    /// ★★ 反向：点在**内容区**⇒ 照常命中行。
+    ///
+    /// 只测上一条不够 —— 若把整个容器都设成命中不透，上一条照样过，
+    /// 但列表点不动了。
+    #[test]
+    fn clicking_the_content_still_hits_rows() {
+        let (t, sc, rows) = scroll_tree();
+        let rect = t.get(sc).unwrap().rect();
+        // 内容区左侧（远离右边缘的滚动条）
+        let p = Point::new(rect.x + 20.0, rect.y + 15.0);
+        let path = crate::hit::hit_path(&t, p);
+        println!("hit at content {p:?} => {path:?}");
+        assert!(
+            rows.iter().any(|r| path.contains(r)),
+            "★★ 内容区必须照常命中行：{path:?}"
+        );
+    }
+
+    /// 没溢出（不画滚动条）⇒ 不做任何拦截。
+    #[test]
+    fn no_scrollbar_means_no_interception() {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [WINDOW.width, WINDOW.height];
+        t.add_root(Layer::Content, None, root);
+        let sc = t.create(Kind::Box, None);
+        {
+            let n = t.get_mut(sc).unwrap();
+            n.layout.dim = [WINDOW.width, WINDOW.height];
+            n.layout.overflow_scroll = true;
+            n.layout.show_scrollbar = true;
+        }
+        t.append_child(root, sc);
+        let r = t.create(Kind::Box, None);
+        t.get_mut(r).unwrap().layout.dim = [WINDOW.width, 20.0];
+        t.append_child(sc, r);
+        layout(&mut t, WINDOW);
+
+        // 内容只有 20px，不溢出 ⇒ 不画滚动条
+        let p = Point::new(WINDOW.width - 4.0, 10.0);
+        let path = crate::hit::hit_path(&t, p);
+        println!("no-overflow hit => {path:?}");
+        assert!(path.contains(&r), "没溢出就不该拦截，右边缘的点仍应命中行：{path:?}");
+    }
+}

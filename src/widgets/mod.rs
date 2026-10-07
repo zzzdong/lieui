@@ -241,7 +241,11 @@ const SCROLLBAR_INSET: f32 = 2.0;
 /// thumb 的最小长度（再短的视口比例也可抓）
 const MIN_THUMB_LEN: f32 = 24.0;
 /// thumb 命中带比绘制更宽（触摸容差）
-const SCROLLBAR_HIT_INFLATE: f32 = 6.0;
+/// 滚动条**命中**判据比可见 thumb 宽这么多（8px 的条太细，直接按像素抓到很难）。
+///
+/// `pub(crate)`：命中侧（`hit::descend`）要用**同一套**几何判"点在滚动条上"，
+/// 否则会出现"画在一处、命中在另一处"。
+pub(crate) const SCROLLBAR_HIT_INFLATE: f32 = 6.0;
 
 /// 竖直滚动条的 `(track, thumb)`；内容没有竖直溢出 ⇒ `None`
 pub(crate) fn vscroll_parts(view: Rect, content: Size, offset: f32) -> Option<(Rect, Rect)> {
@@ -350,13 +354,30 @@ fn scroll_handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
                 });
                 cmd.capture(view.pointer, id);
                 cmd.damage(id);
+                return;
+            }
+            // ★★ 点在**轨道**（滚动条的空白段，非 thumb）⇒ 翻一页。
+            //
+            // 这会发生在 thumb 的**两侧**：点在 thumb 上方 ⇒ 向上翻，
+            // 下方 ⇒ 向下翻 —— 与 WinUI / 浏览器一致的"点击翻页"。
+            //
+            // 放在 thumb 判据**之后**：抓住 thumb 优先（那是拖拽的起点）。
+            if let Some((track_r, thumb)) = vscroll_parts(rect, content, oy)
+                && view.pos.x >= track_r.x - SCROLLBAR_HIT_INFLATE
+                && view.pos.x <= track_r.right() + SCROLLBAR_HIT_INFLATE
+                && view.pos.y >= track_r.y - SCROLLBAR_HIT_INFLATE
+                && view.pos.y <= track_r.bottom() + SCROLLBAR_HIT_INFLATE
+            {
+                // 页步长 = 视口高度，留 24px 重叠（保留上下文，与常见 GUI 一致）
+                let page = (rect.height - 24.0).max(1.0);
+                let dir = if view.pos.y < thumb.y { -1.0 } else { 1.0 };
+                let max_y = (content.height - rect.height).max(0.0);
+                let ny = (oy + dir * page).clamp(0.0, max_y);
+                track.set_scroll_offset(id, (ox, ny));
+                cmd.damage(id);
             }
         }
         EventKind::PointerMoved => {
-            eprintln!(
-                "DBG scroll_handle Moved: drag={drag:?} captured={:?} rect={rect:?} content={content:?}",
-                track.captured_by(view.pointer)
-            );
             let Some(d) = drag else { return };
             if d.pointer != view.pointer || track.captured_by(view.pointer) != Some(id) {
                 return;

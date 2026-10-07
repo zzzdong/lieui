@@ -99,6 +99,32 @@ fn descend(track: &Track, id: NodeId, p: Point, to_parent: Affine, out: &mut Vec
 
     out.push(id);
 
+    // ★★ 滚动条区域：命中**归属于滚动容器自身**，不再下降子节点。
+    //
+    // ## 修的是什么
+    //
+    // 滚动条是**绘制**出来的（`draw_scrollbar_overlay`），不是节点。此前命中
+    // 时直接穿过去找子节点 ⇒ 点在滚动条上会命中**下面的行**
+    // ⇒ 松手合成 `Tapped` ⇒ **点一下滚动条就把那一页选中了**。
+    //
+    // 这里用与绘制**同一套**几何函数（`vscroll_parts` / `hscroll_parts`）
+    // 判命中，所以"看到哪里就能点哪里"，不会出现画在一处、命中在另一处。
+    //
+    // 未溢出时 `scroll_parts` 返回 `None`（不画滚动条）⇒ 不做拦截 ⇒
+    // 内容区行为完全不变。
+    if n.layout.overflow_scroll && n.layout.show_scrollbar {
+        let hit_inflate = crate::widgets::SCROLLBAR_HIT_INFLATE;
+        let in_bar = crate::widgets::vscroll_parts(rect, n.content_size, n.scroll_offset.1)
+            .map(|(track_r, _)| track_r.inflate(hit_inflate).contains(q))
+            .unwrap_or(false)
+            || crate::widgets::hscroll_parts(rect, n.content_size, n.scroll_offset.0)
+                .map(|(track_r, _)| track_r.inflate(hit_inflate).contains(q))
+                .unwrap_or(false);
+        if in_bar {
+            return true;
+        }
+    }
+
     // 后声明的子节点在上 ⇒ 逆序
     for c in n.children.iter().rev() {
         if descend(track, *c, p, to_local, out) {
