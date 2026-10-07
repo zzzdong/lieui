@@ -1928,26 +1928,6 @@ impl Track {
         }
     }
 
-    /// 追加一个"内置行为"处理器（`handled_events_too = true`）：
-    /// 即便用户处理器已 `mark_handled`，它仍然会被调用。
-    ///
-    /// 用途：框架内置交互（滑块拖拽、文本编辑、滚动条……）在 `align` 之后挂到节点上；
-    /// 它们不出现在用户态，也不需要 `view()` 重新声明。
-    pub fn add_builtin_handler(
-        &mut self,
-        id: NodeId,
-        kind: crate::event::EventKind,
-        f: impl Fn(&mut crate::event::Ctx) + 'static,
-    ) {
-        if let Some(n) = self.get_mut(id) {
-            n.handlers.push(HandlerSlot {
-                kind,
-                handler: std::rc::Rc::new(f),
-                handled_events_too: true,
-            });
-        }
-    }
-
     /// 是否有节点需要重排（M1 的帧驱动用它决定 `LAYOUT` 标志）
     pub fn has_layout_dirty(&self) -> bool {
         self.nodes

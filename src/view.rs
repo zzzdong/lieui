@@ -1238,7 +1238,22 @@ impl<'a> DescRef<'a> {
 
     /// 注册"即便已被处理也要调用"的处理器（≈ WinUI `handledEventsToo`）。
     ///
-    /// 供**框架内置行为**使用（用户态一般不需要）；这是旧实现 `.builtin()` 排序 hack 的正面替换。
+    /// 用户态一般不需要；框架内置行为也**不用**它（见下）。
+    ///
+    /// ## ★ 内置行为为什么不用这个机制
+    ///
+    /// 本方法（原`Track::add_builtin_handler` 的替代品）曾被设计成
+    /// "框架内置交互在 `align` 之后挂成 `handled_events_too = true` 的 handler"。
+    /// **实际实现走了另一条路**：内置交互是 `widgets::handle()` 里的**直接函数分派**
+    /// （`src/widgets/mod.rs:51`，按 `KindTag` switch）。
+    ///
+    /// 原因是 handler 签名拿不到 `&Event` —— 只有 `&EventView`（`Copy` 的定长摘要），
+    /// 而 **IME 预编辑/提交带字符串 payload**，`EventView` 装不下。
+    /// `handle()` 直接收 `&Event` 才有办法把 payload 转成 `input_set_preedit` /
+    /// `input_insert`。
+    ///
+    /// `Track::add_builtin_handler` 因此是设计变更的残留（长期零调用），
+    /// 已于 2026-10-07 删除。**要加内置行为请改 `widgets::handle()`。**
     pub fn on_always(mut self, kind: EventKind, f: impl Fn(&mut crate::event::Ctx) + 'static) -> Self {
         self.n().handlers.push(HandlerSlot {
             kind,

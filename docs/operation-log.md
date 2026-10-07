@@ -5441,3 +5441,105 @@ panicked at src\track_tests.rs:791: ★ 父节点必须一起标脏，否则兄�
 - **#3** D52 组件行为归位 —— **仍不建议**（减 11%、零功能价值、上次失败过）
 - D-b 滚动脱离布局 / G1 RuntimeInner 拆分 —— 前置未就位
 
+---
+
+## 2026-10-07 · P5 · 删`add_builtin_handler`（死 API）—— ✅ 完成
+
+### 一、★ 调查过程：差点**删错**
+
+`add_builtin_handler` 的文档写：
+
+> 用途：框架内置交互（滑块拖拽、文本编辑、滚动条……）在 `align` 之后挂到节点上；
+> 它们不出现在用户态，也不需要 `view()` 重新声明。
+
+按这个描述，它像是**框架内置行为的注册入口**—— 删掉会不会让内置交互挂不上？
+**所以先去查内置交互实际走哪条路。**
+
+**结论：内置行为走的是另一条路。**
+
+```51:76:src/widgets/mod.rs
+pub fn handle(track: &mut Track, id: NodeId, ev: &Event, cmd: &mut CmdBuf) {
+    ...
+    match node.kind.tag() {
+        KindTag::Slider => slider_handle(track, id, &ev.summary(), cmd),
+        KindTag::Checkbox => checkbox_handle(track, id, &ev.summary()),
+        ...
+```
+
+**直接函数分派**（按 `KindTag` switch），完全不经过 handler 机制。
+
+### 二、★ 为什么不用 handler —— 签名装不下 IME payload
+
+`handle()` 收的是 `&Event` 而**不是** `&EventView`。原因写在它自己的注释里：
+
+> 收 `&Event` 而不只是 `&EventView`：IME 预编辑/提交带字符串 payload，
+> 而 `EventView` 是 `Copy` 的定长摘要（放不下字符串）。
+
+而 handler 槽位（`HandlerSlot.handler`）只能拿 `&mut Ctx`——
+**IME 的字符串 payload 无处可放**。
+
+⇒ `add_builtin_handler` 是**设计变更的残留**：曾设计成"挂 handler"，
+实现改成了"直接分派"（为了 IME），入口就没人用了。
+
+### 三、★ 三条独立证据交叉验证"零调用"
+
+本项目反复栽在"搜索范围不够导致误判"，所以这次用三条独立证据：
+
+| # | 证据 | 结果 |
+|---|---|---|
+| 1 | 全仓文本搜索（`src` + `crates` + `tests` + `examples`） | 仅剩新写的注释引用，**无代码调用** |
+| 2 | 死 API 脚本复查 | 死 API 从 2 个 → **0 个** |
+| 3 | `pub fn` 计数 | 80 + 2（新 setter）− 1（删除）= **81** ✓ |
+
+> ★ **我自己的搜索 bug**：第一次查 `toggle_checked` 的调用点时用了
+> `Select-String -Path src/*.rs`（**只搜顶层**），得出"内置交互零调用"的错误结论。
+> 实际调用点在 `src/widgets/mod.rs`。**差点据此认定"整个内置交互机制是死的"。**
+> ⇒ **搜索范围必须与结论范围一致**（与P3-b 那次"我做完的那批 ≠ 全部"同源）。
+
+### 四、★ 死 API 脚本的盲点（如实记录）
+
+脚本现在报"0 个死 API"，但 **`input_preedit` 仍然没有生产调用**
+（渲染侧 `widgets/mod.rs` 直接解构 `n.kind` 的 `preedit` 字段）。
+
+**脚本判不出来了** —— 因为上一批给它补了测试，`track_tests.rs` 里 3 处调用
+被算作"有引用"。
+
+⇒ **"有测试"不等于"被使用"。** 脚本的判据是"全仓有引用"，
+它**无法区分**"生产调用"与"仅测试调用"。
+
+这个盲点**留着不修**（改成"生产调用"判据要引入 crate 依赖图分析，
+成本远大于收益）；但**结论要人工把关**，不能只看脚本输出。
+
+### 五、顺带补的文档
+
+`view.rs` 的 `on_always()` 注释里写清「内置行为**不用**它」+
+指向 `widgets::handle()` + 说明原因（`EventView` 装不下 IME payload）+
+注明 `add_builtin_handler` 已于本日删除。
+
+> **留着比删掉更危险**：一个文档与实现不符的入口，会引导后人
+> "要加内置行为就用这个"，然后发现内置行为在另一个文件里。
+
+`handled_events_too` **机制本身完全保留**（`on_always` 与 `event.rs:872`
+的消费者都健在），只删了那个没人用的**便捷入口**。
+
+### 六、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **17 个测试二进制全 ok**（lib 454，未变） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+| 死 API 脚本 | **2 → 0** |
+
+### 七、剩余
+
+| 项 | 状态 |
+|---|---|
+| `input_preedit` | 仍无生产调用（脚本盲点，已记录）；**保留** —— 它是IME 状态对外的合法读取口 |
+| **#3** D52 组件行为归位 | **仍不建议**（减 11%、零功能价值、上次失败过） |
+| D-b 滚动脱离布局 | 前置未就位（需 per-node 失效信号） |
+| G1 `RuntimeInner` 拆分 | 触及 reactive 核心，等 D52 之后再评估 |
+| 像素 snapping | **前置测量未完成**（尚不知如何让矩形落在半像素上） |
+
+
