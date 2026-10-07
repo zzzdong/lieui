@@ -17,8 +17,8 @@
 //! ## 为什么回调不是 `Send`
 //!
 //! 定时器在 **UI 线程**执行（回调拿 `&mut Ctx`，可以改 `Signal`、开窗、起任务），
-//! 所以闭包是 `!Send` 的普通 `FnMut`。跨线程的周期活儿请用 [`crate::task::spawn_task`]
-//! + [`crate::task::TaskCtx::post`]。
+//! 所以闭包是 `!Send` 的普通 `FnMut`。跨线程的周期活儿请让工作线程自己循环，
+//! 用 [`crate::task::Poster::post`] 把每轮结果投递回来。
 
 use std::time::{Duration, Instant};
 
@@ -119,8 +119,8 @@ impl Runtime {
         cb: TimerCallback,
     ) -> TimerHandle {
         let id = {
-            let n = self.inner.next_task_id.get() + 1;
-            self.inner.next_task_id.set(n);
+            let n = self.inner.next_busy_id.get() + 1;
+            self.inner.next_busy_id.set(n);
             n
         };
         self.inner.timers.borrow_mut().push(Timer {

@@ -120,8 +120,9 @@ impl RepaintHandle {
 
 /// 平台唤醒器：`RepaintHandle` 是 [`Waker`](crate::task::Waker) 的唯一 winit 实现。
 ///
-/// 实现 trait 之后，`Runtime::set_waker` 就能把它交给框架 —— 任务（`Runtime::spawn_task`）
-/// 与 `TaskCtx::post` 从此不需要调用方自己传句柄。
+/// 实现 trait 之后，`Runtime::set_waker` 就能把它交给框架 —— 于是
+/// [`crate::task::Poster`]（以及 `Runtime::emit`）自带通道，
+/// 调用方**不再必须**用 `run_with_handle` 手动传递句柄。
 impl crate::task::Waker for RepaintHandle {
     fn wake(&self) -> bool {
         // 显式写固有方法，避免与 trait 方法混淆
@@ -409,10 +410,8 @@ impl Runner {
 
         // ★ 消费本地投递队列（A6）。**此前平台层完全没做这件事**，于是：
         //
-        //   `TaskCtx` 持有的是 **spawn 时**的 `WakerSlot` 快照，而平台 waker 是
-        //   在 `run()` 里才 `set_waker` 注入的 ⇒ **在 `run()` 之前 spawn 的任务**
-        //   （典型：ViewModel 构造期起预加载 / 预热任务）永远持有 `Local` 槽位，
-        //   `post()` 全部落进 `LocalQueue`。而 `LocalQueue` 只被
+        //   调用方可能在 `run()` **之前**就把投递句柄交给工作线程（典型：ViewModel
+        //   构造期起预热）。那些投递落进本地队列，而本地队列只被
         //   `App::frame_all` 消费，平台层走的是逐窗口 `ctx.tick/frame`，**从不调它**
         //   ⇒ 消息积压、无任何人消费 ⇒ **任务永不回调、界面毫无反应，且零报错**。
         //
@@ -1036,7 +1035,7 @@ impl ApplicationHandler<AppEvent> for Runner {
 pub fn run(app: App, on_ready: Option<Box<dyn FnOnce(RepaintHandle)>>) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop: EventLoop<AppEvent> = EventLoop::with_user_event().build()?;
     let handle = RepaintHandle::new(event_loop.create_proxy());
-    // 唤醒器注入运行时：`Runtime::spawn_task` / `TaskCtx::post` / `Runtime::wake`
+    // 唤醒器注入运行时：`Runtime::poster` / `Runtime::emit` / `Runtime::wake`
     // 从此自带通道 —— 调用方**不再必须**用 `run_with_handle` 手动传递句柄。
     app.runtime().set_waker(Arc::new(handle.clone()));
     if let Some(f) = on_ready {

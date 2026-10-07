@@ -4,6 +4,7 @@ use crate::event::{Event, EventKind, KeyCode, Modifiers, NamedKey, PointerButton
 use crate::reactive::{Signal, act1};
 use crate::theme::Theme;
 use crate::track::{Kind, Layer, Placement};
+use std::cell::RefCell;
 use std::time::Duration;
 
 // ── 一个 counter ViewModel（就是 §九 示例的形态，去掉 winit 部分）──
@@ -2665,14 +2666,35 @@ fn unbound_radio_ignores_taps() {
 
 // ─────────────── 后台任务 + loading 遮罩（框架级） ───────────────
 
-#[test]
-fn background_task_shows_overlay_animates_and_delivers_its_result() {
-    use crate::task::TaskEvent;
+// ─────────────── 后台工作 + loading 遮罩（**纯原语**）───────────────
 
-    /// 任务结果的落地目标
+/// ★★ 端到端：**只用公开原语**搭出"后台工作 + 遮罩 + 结果回传"。
+///
+/// 框架**不再提供"任务"**：线程模型、取消协议、进度协议、完成时收遮罩 ——
+/// 全是调用方的事。这条测试就扮演那个调用方，所以它同时是
+/// "**原语够不够用**"的证明（不够的话这里根本写不出来）：
+///
+/// ```text
+/// rt.poster()      →  句柄交给工作线程        （投递 + 唤醒）
+/// rt.begin_busy()  →  BusyToken 存在 VM 里    （遮罩，由调用方决定何时收）
+/// ```
+///
+/// 关键差异（对比旧设计）：
+///
+/// - 载荷是**调用方自己的类型**（`Report`），不再套框架的 `TaskEvent` 信封；
+/// - `on_external` 里的 `downcast` **只有一层**；
+/// - 遮罩的收尾发生在**调用方收到结果时**，不是框架"看到任务结束"时。
+#[test]
+fn background_work_with_an_overlay_built_from_primitives_only() {
+    /// 工作线程回传的载荷（`Send`）
+    struct Report(u32);
+
     struct Worker {
         report: Signal<Option<u32>>,
+        /// 调用方**自己持有**遮罩句柄 ⇒ 收到结果时收掉
+        busy: RefCell<Option<crate::task::BusyToken>>,
     }
+
     impl ViewModel for Worker {
         fn view(self: &Rc<Self>, v: &mut ViewBuf) {
             v.column(|c| {
@@ -2680,11 +2702,15 @@ fn background_task_shows_overlay_animates_and_delivers_its_result() {
                 c.text(format!("report={:?}", self.report.get()));
             });
         }
+
         fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
-            if let Some(ev) = data.downcast::<TaskEvent>()
-                && let Some(r) = ev.payload.downcast::<u32>()
-            {
-                self.report.set(Some(r));
+            // ★ 通道是**不透明**的：直接取自己的类型，只有一层 downcast
+            if let Some(r) = data.downcast::<Report>() {
+                self.report.set(Some(r.0));
+                // ★ 结果到了 ⇒ 调用方收掉遮罩（框架完全不知情）
+                if let Some(t) = self.busy.borrow_mut().take() {
+                    t.finish();
+                }
             }
         }
     }
@@ -2693,6 +2719,7 @@ fn background_task_shows_overlay_animates_and_delivers_its_result() {
     let mut app = App::new(rt.clone());
     let vm = Rc::new(Worker {
         report: Signal::new(&rt, None),
+        busy: RefCell::new(None),
     });
     let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
     app.frame_all();
@@ -2700,10 +2727,15 @@ fn background_task_shows_overlay_animates_and_delivers_its_result() {
     // 无头环境没有平台唤醒器 ⇒ 投递走本地队列（测试正好用它当"事件循环"）
     assert!(!rt.is_online());
 
-    // 起任务 + 遮罩
-    let handle = rt.spawn_task_busy(id, "正在处理…", |ctx| {
-        ctx.progress(1, 2);
-        7u32
+    // ① 遮罩：调用方开、调用方收 —— 全程不依赖任何任务
+    let busy = rt.begin_busy(id, "正在处理…");
+    busy.set_progress(1, 2);
+    *vm.busy.borrow_mut() = Some(busy);
+
+    // ② 工作线程：真线程；只把结果投递回来
+    let poster = rt.poster();
+    std::thread::spawn(move || {
+        poster.post(id, Report(7));
     });
 
     // 下一帧：view 重跑（遮罩是声明式的）⇒ 遮罩层出现在保留树里
@@ -2726,6 +2758,7 @@ fn background_task_shows_overlay_animates_and_delivers_its_result() {
         assert!(all || !damage.is_empty(), "有遮罩 ⇒ 动画帧有重绘义务");
         assert!(ctx.next_wakeup(&rt).is_some(), "遮罩 ⇒ 定时唤醒（spinner）");
     }
+
     // 遮罩确实画到了屏幕上：卡片内的 padding 区应是卡片底色（不是窗口底色）
     {
         let ctx = app.window_ctx(id).unwrap();
@@ -2748,17 +2781,17 @@ fn background_task_shows_overlay_animates_and_delivers_its_result() {
         );
     }
 
-    // 等任务跑完（`frame_all` 会消费本地投递队列 ⇒ 等价于平台层的事件循环）
+    // 等结果回来（`frame_all` 会消费本地投递队列 ⇒ 等价于平台层的事件循环）
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
-    while (!handle.is_done() || vm.report.get().is_none()) && Instant::now() < deadline {
+    while vm.report.get().is_none() && Instant::now() < deadline {
         app.frame_all();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     app.frame_all();
 
-    // 结果落地 + 遮罩自动收起
-    assert_eq!(vm.report.get(), Some(7), "任务返回值经 TaskEvent 落到 Signal");
-    assert!(!rt.is_busy(id) && !rt.has_tasks(id), "完成 ⇒ 任务表与忙碌项都清空");
+    // 结果落地（**调用方类型**，一层 downcast）+ 遮罩由调用方收起
+    assert_eq!(vm.report.get(), Some(7), "载荷原样到达 on_external");
+    assert!(!rt.is_busy(id), "调用方收掉了遮罩");
     {
         let ctx = app.window_ctx(id).unwrap();
         assert!(

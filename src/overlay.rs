@@ -1,7 +1,7 @@
 //! 框架级 loading 遮罩（「忙碌」遮罩）。
 //!
 //! 由 [`Runtime`](crate::reactive::Runtime) 的忙碌项驱动（见 [`crate::task`]）：
-//! `rt.begin_busy(..)` / `rt.spawn_task_busy(..)` ⇒ 窗口出现本遮罩；忙碌项清空 ⇒
+//! `rt.begin_busy(..)` ⇒ 窗口出现本遮罩；忙碌项清空 ⇒
 //! 本帧不再声明这个层，`align` 的 stale 清理会把它删掉（**声明式**，无需手工增删）。
 //!
 //! 视觉分三层：

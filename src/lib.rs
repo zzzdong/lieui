@@ -23,7 +23,7 @@
 //! | [`transform`] | 2D 仿射矩阵（绘制 / 命中 / 裁剪共用） |
 //! | [`app`] | `ViewModel` / `WindowView`（对象安全擦除）/ `WindowCtx` 帧驱动 / 多窗口 `App` |
 //! | [`theme`] | `Theme`（design token）+ `ThemeMode`（浅/深/跟随系统/自定义）|
-//! | [`task`] | 后台任务与跨线程通信：`Waker` / `spawn_task(_busy)` / 取消 / loading 遮罩状态 |
+//! | [`task`] | 跨线程投递原语（`Poster` / `Waker`）+ loading 遮罩状态（`BusyToken`）—— **不含"任务"概念** |
 //! | [`timer`] | 统一时钟：`set_timeout` / `set_interval` / `request_animation`（帧唤醒汇总）|
 //!
 //! ## 事件与时钟（速览）
@@ -41,29 +41,50 @@
 //! `WindowCtx::next_wakeup()`（= 光标闪烁 / tooltip / 忙碌 spinner / 定时器 / 动画帧 的最早值）；
 //! 没有唤醒源就是 `ControlFlow::Wait`（空闲零功耗）。
 //!
-//! ## 后台任务与 loading 遮罩（速览）
+//! ## 后台工作与 loading 遮罩（速览）
+//!
+//! ★ **lieui 不提供"任务"概念**：它不替你开线程、不定取消协议、不管进度协议、
+//! 也不管"任务完成时收起遮罩"。它只给两条原语 —— 因为线程模型是**应用的**决定
+//! （线程池 / rayon / tokio / 自己的 reactor 都行），框架替不了也不该替。
+//!
+//! | 原语 | 作用 |
+//! |---|---|
+//! | [`Runtime::poster`] → [`Poster`] | 把 `Send` 数据**投递**回 UI 线程并唤醒（`Runtime` 自己是 `!Send`，进不了线程） |
+//! | [`Runtime::begin_busy`] → [`BusyToken`] | 挂一个 loading 遮罩，**何时收起由调用方决定**（`finish` / `drop` / `dismiss_after` 定时兜底） |
 //!
 //! 下面这段是**可编译的** doc test（`no_run`：需要真实窗口环境才能跑通）。
 //! 它同时承担示例与"API 形状守卫"两职——签名变了这里会编译失败。
 //!
 //! ```no_run
 //! # use lieui::prelude::*;
-//! # fn demo(cx: &mut Ctx, n: usize) {
-//! // 事件处理器里：起任务 + 遮罩（进度 / 取消都自动接好）
-//! cx.spawn_task_busy("正在导出…", move |ctx| {
-//!     for i in 0..n {
-//!         if ctx.is_cancelled() {
-//!             return Err("已取消");
-//!         }
-//!         ctx.progress(i, n);
-//!         // ……实际工作……
-//!     }
-//!     Ok("完成")
+//! # use std::sync::Arc;
+//! # use std::sync::atomic::{AtomicBool, Ordering};
+//! # struct Report(usize);
+//! # fn demo(cx: &mut Ctx, n: usize, cancel: Arc<AtomicBool>) {
+//! let win = cx.window();
+//! let poster = cx.poster();          // 可 `Send` 的投递句柄
+//!
+//! // 遮罩：谁开谁收（这里同时接上「取消」按钮）
+//! let busy = cx.begin_busy("正在导出…");
+//! busy.cancellable({
+//!     let cancel = Arc::clone(&cancel);
+//!     move || cancel.store(true, Ordering::SeqCst)
 //! });
+//!
+//! // 线程：调用方自己选并发模型
+//! std::thread::spawn(move || {
+//!     for i in 0..n {
+//!         // ……实际工作……
+//!         let _ = poster.post(win, Report(i));   // 投递 + 唤醒
+//!     }
+//!     let _ = poster.post(win, Report(n));
+//! });
+//! # let _ = busy;   // 真实代码里由「收到结果」那条路径 `finish()` 掉
 //! # }
 //! ```
 //!
-//! 结果在 `on_external` 里取：`data.downcast::<TaskEvent>()` → `ev.payload.downcast::<Result<..>>()`。
+//! 结果在 `on_external` 里取：**一层** `data.downcast::<Report>()` ——
+//! 通道是不透明的，没有框架信封要剥。
 //!
 //! ## 待补（里程碑）
 //!
@@ -118,7 +139,7 @@ pub use render::{
     damage_batches,
 };
 pub use style::{ImageFit, ImageStyle, PaintStyle, ShadowSpec, TextStyle};
-pub use task::{BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker};
+pub use task::{BusyItem, BusyToken, Poster, Waker};
 pub use timer::{FRAME_PERIOD, TimerHandle};
 pub use track::{
     Anchor, Axis, Flags, FocusPolicy, FocusState, ImageData, InteractionState, Key, Kind, KindDesc, KindTag, Layer,
@@ -146,7 +167,7 @@ pub mod prelude {
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::render::scene::Scene;
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
-    pub use crate::task::{BusyItem, BusyToken, CancelToken, TaskCtx, TaskEvent, TaskFailed, TaskHandle, Waker};
+    pub use crate::task::{BusyItem, BusyToken, Poster, Waker};
     pub use crate::theme::{Theme, ThemeMode};
     pub use crate::timer::{FRAME_PERIOD, TimerHandle};
     pub use crate::track::{AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility};

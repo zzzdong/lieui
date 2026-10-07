@@ -608,34 +608,35 @@ impl Ctx {
         self.rt.request_animation(self.window);
     }
 
-    // ── 后台任务 / loading 遮罩（见 `crate::task`）──
+    // ── 跨线程投递 / loading 遮罩（见 `crate::task`）──
 
-    /// 起一个后台任务（**在当前窗口**）：返回值由框架投递给 `on_external`（包在
-    /// [`crate::task::TaskEvent`] 里）。多数情况用带遮罩的
-    /// [`Self::spawn_task_busy`](Self::spawn_task_busy)。
-    pub fn spawn_task<T, F>(&self, work: F) -> crate::task::TaskHandle
-    where
-        T: Send + 'static,
-        F: FnOnce(crate::task::TaskCtx) -> T + Send + 'static,
-    {
-        self.rt.spawn_task(self.window, work)
+    /// 拿一份**可 `Send` 的投递句柄** —— 交给工作线程用。
+    ///
+    /// ★ 框架**不提供"任务"概念**：不替你开线程、不定取消协议、不管线程池。
+    /// 你只需要把结果**投递**回来：
+    ///
+    /// ```ignore
+    /// let poster = cx.poster();              // `Ctx` 是 `!Send`，但句柄能进线程
+    /// std::thread::spawn(move || {
+    ///     poster.post(win, heavy_work());    // 投递 + 唤醒
+    /// });
+    /// ```
+    pub fn poster(&self) -> crate::task::Poster {
+        self.rt.poster()
     }
 
-    /// 起一个后台任务 + loading 遮罩（文案 `label`）：完成时遮罩自动收起。
-    pub fn spawn_task_busy<T, F>(&self, label: impl Into<String>, work: F) -> crate::task::TaskHandle
-    where
-        T: Send + 'static,
-        F: FnOnce(crate::task::TaskCtx) -> T + Send + 'static,
-    {
-        self.rt.spawn_task_busy(self.window, label, work)
-    }
-
-    /// 手动开一个「忙碌」段（遮罩随 `BusyToken` 的 drop 结束）
+    /// 开一个「忙碌」段（loading 遮罩）—— **与任务无关**。
+    ///
+    /// 遮罩何时收起由你决定：[`crate::task::BusyToken::finish`] / `drop` /
+    /// [`crate::task::BusyToken::dismiss_after`]（定时兜底）。
     pub fn begin_busy(&self, label: impl Into<String>) -> crate::task::BusyToken {
         self.rt.begin_busy(self.window, label)
     }
 
-    /// 平台唤醒器（`None` = 无头 / 事件循环未起）。想自己管线程时用它带出去。
+    /// 平台唤醒器（`None` = 无头 / 事件循环未起）。
+    ///
+    /// 一般用 [`Self::poster`]（两种模式都能投递）；只有需要**显式区分**
+    /// "有没有事件循环"时才直接用这个。
     pub fn waker(&self) -> Option<std::sync::Arc<dyn crate::task::Waker>> {
         self.rt.waker()
     }
@@ -654,7 +655,7 @@ impl Ctx {
     ///
     /// 这是 `Signal` 之外的"消息"通道：适合枚举型业务事件（`MyEvent::SaveFinished`）、
     /// 或者"不想为它建 Signal"的一次性通知。同一个 `T` 也可以跨线程投递
-    /// （[`crate::task::TaskCtx::post`] 与 [`Emitter`] 是同一条管道）。
+    /// （[`crate::task::Poster::post`] 与 [`Emitter`] 是同一条管道）。
     pub fn emit<T: Send + 'static>(&self, msg: T) -> bool {
         self.rt.emit(self.window, msg)
     }
@@ -698,14 +699,15 @@ impl Runtime {
     /// 投递一条自定义事件到某个窗口：UI 线程在下一个 tick 的
     /// `ViewModel::on_external` 里收到（`data.downcast::<T>()`）。
     ///
-    /// 与 [`crate::task::TaskCtx::post`] 是同一条管道（`Waker`）：有平台时走
+    /// 与 [`crate::task::Poster::post`] 是同一条管道：有平台时走
     /// `EventLoopProxy`，无头时进本地队列（`App::frame_all` 消费）。返回 `false`
     /// 表示事件循环已退出。
     pub fn emit<T: Send + 'static>(&self, window: WindowId, msg: T) -> bool {
+        // `post_external`（而不是 `post`）：载荷已经是 `ExternalData`，
+        // 再走 `post` 会被**二次包装**，落地侧 `downcast::<T>()` 就取不到。
         self.inner
-            .waker
-            .borrow()
-            .post(window, crate::app::ExternalData::new(msg))
+            .poster
+            .post_external(window, crate::app::ExternalData::new(msg))
     }
 
     /// **广播**一条自定义事件给所有已注册窗口（载荷用 `Arc` 共享，免得逐个克隆）。
@@ -726,8 +728,9 @@ impl Runtime {
 
 /// 类型化的**事件发射器**：`Clone + Send`，可以挂在业务层里、也可以 move 进工作线程。
 ///
-/// 与 [`crate::task::TaskCtx`] 的区别：发射器只关心"发事件"，不带任务语义
-/// （没有进度 / 取消 / 完成）；适合把 UI 无关的业务模块（网络层、文件监听、设备）接进来。
+/// 就是 [`crate::task::Poster`] 的**类型化糖**（固定窗口 + 固定载荷类型）：
+/// poster 只关心"发事件"，不带任何任务语义。适合把 UI 无关的业务模块
+/// （网络层、文件监听、设备）接进来。
 ///
 /// ```ignore
 /// struct Net { tx: Emitter<NetEvent> }               // 业务层持有
@@ -737,11 +740,13 @@ impl Runtime {
 /// // UI 侧：ViewModel::on_external 里 downcast::<NetEvent>()
 /// ```
 ///
-/// 内部只存 [`WakerSlot`](crate::task::WakerSlot)（`Send + Sync`）而**不是** `Runtime`
-/// —— 这正是它天然能跨线程、无需 unsafe 的原因。
+/// 内部只存 [`Poster`](crate::task::Poster)（`Arc`，`Send + Sync`）而**不是**
+/// `Runtime`（`Rc`，`!Send`）—— 这正是它天然能跨线程、无需 unsafe 的原因；
+/// 也正因为存的是**共享的投递中心**，平台 waker 后装入它也立刻可见
+/// （见 `Poster` 文档里的 A6）。
 pub struct Emitter<T> {
     window: WindowId,
-    waker: crate::task::WakerSlot,
+    poster: crate::task::Poster,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -749,7 +754,7 @@ impl<T> Clone for Emitter<T> {
     fn clone(&self) -> Self {
         Self {
             window: self.window,
-            waker: self.waker.clone(),
+            poster: self.poster.clone(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -760,7 +765,7 @@ impl<T: Send + 'static> Emitter<T> {
     pub fn new(rt: &Runtime, window: WindowId) -> Self {
         Self {
             window,
-            waker: rt.inner.waker.borrow().clone(),
+            poster: rt.poster(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -771,7 +776,7 @@ impl<T: Send + 'static> Emitter<T> {
 
     /// 发一条事件（UI 线程在 `on_external` 里收到）
     pub fn emit(&self, msg: T) -> bool {
-        self.waker.post(self.window, crate::app::ExternalData::new(msg))
+        self.poster.post(self.window, msg)
     }
 }
 

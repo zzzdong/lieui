@@ -71,7 +71,7 @@ pub struct WindowConfig {
     pub always_on_top: bool,
     /// 是否使用框架的 loading 遮罩（默认 `true`）。
     ///
-    /// 关掉后 `Runtime::begin_busy` / `spawn_task_busy` 只维护状态，
+    /// 关掉后 `Runtime::begin_busy` 只维护状态，
     /// 遮罩由用户自己渲染（`Runtime::busy_items` 能拿到忙碌项）。
     pub auto_busy_overlay: bool,
     /// **整窗重绘模式**（默认 `false` = 用脏区局部重绘）。
@@ -1245,16 +1245,15 @@ impl WindowCtx {
         did_work
     }
 
-    /// 外部数据（后台线程 → UI 线程）
+    /// 外部数据（后台线程 → UI 线程，见 [`crate::task`]）。
     ///
-    /// 框架先消费自己的消息（任务进度 / 任务完成收尾，见 [`crate::task`]）：
-    /// - 进度消息 ⇒ 到此为止（驱动遮罩）；
-    /// - 任务完成 ⇒ 框架收尾（清任务表 + 收遮罩），**再**交给 `ViewModel::on_external`
-    ///   取载荷。
+    /// ★ **通道是不透明的**：一切都原样交给 `ViewModel::on_external`。
+    ///
+    /// 早先这里有一句 `if crate::task::on_task_message(..) { return; }` ——
+    /// 框架得先认一遍"这条是不是我自己发的任务消息"，是就吞掉。
+    /// 那种"框架拥有消息协议"的设计已经移除：`Sender`/`Poster` 侧只负责投递，
+    /// 语义全在调用方手里（遮罩由 `BusyToken` 自己收，不需要框架代劳）。
     pub fn external(&mut self, rt: &Runtime, data: ExternalData) {
-        if crate::task::on_task_message(rt, self.id, &data) {
-            return;
-        }
         let mut cx = Ctx::new(rt, self.id, EventView::external());
         self.view.on_external(&mut cx, data);
         if !cx.cmds().is_empty() {

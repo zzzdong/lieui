@@ -1,6 +1,17 @@
+//! `crate::task` 的单元测试：**两层原语**，与"任务"无关。
+//!
+//! | 层 | 提供什么 |
+//! |---|---|
+//! | 投递（[`Poster`] / [`Waker`]） | 非 UI 线程把 `Send` 数据投给 UI 线程并唤醒 |
+//! | 遮罩（[`BusyToken`]） | loading 遮罩的挂/收 —— **由调用方决定何时结束** |
+//!
+//! 框架**不再提供**线程模型 / 取消协议 / 进度协议 / 任务表 —— 那些是应用策略，
+//! 调用方用任何并发模型（线程池 / rayon / tokio）自己搭，只把结果投递回来。
+
 use super::*;
 use crate::window::WindowId;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// 记录调用的假唤醒器（无头测试用）
@@ -28,9 +39,25 @@ impl Waker for TestWaker {
     }
 }
 
+/// 事件循环已退出的假唤醒器（投递必须**如实报告失败**）
+#[derive(Default)]
+struct DeadWaker;
+
+impl Waker for DeadWaker {
+    fn wake(&self) -> bool {
+        false
+    }
+
+    fn post(&self, _window: WindowId, _data: ExternalData) -> bool {
+        false
+    }
+}
+
 fn win() -> WindowId {
     WindowId::new(1)
 }
+
+// ───────────────────────── 投递：无头 = 本地队列 ─────────────────────────
 
 #[test]
 fn local_queue_round_trips_without_a_platform() {
@@ -39,12 +66,10 @@ fn local_queue_round_trips_without_a_platform() {
     assert!(rt.wake(), "无头下唤醒是 no-op 成功");
 
     let w = win();
-    let handle = rt.waker();
-    assert!(handle.is_none(), "无平台 ⇒ 拿不到平台唤醒器");
+    assert!(rt.waker().is_none(), "无平台 ⇒ 拿不到平台唤醒器");
 
-    // 直接走本地队列（模拟任务线程投递）
-    let slot = rt.inner.waker.borrow().clone();
-    assert!(slot.post(w, ExternalData::new(7u8)));
+    // 走公开句柄（模拟任务线程投递）
+    assert!(rt.poster().post(w, 7u8));
     let got = rt.take_pending_external();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].0, w);
@@ -61,62 +86,58 @@ fn platform_waker_receives_posts_and_marks_online() {
     assert!(rt.wake());
     assert_eq!(tw.wakes.load(Ordering::SeqCst), 1);
 
-    let slot = rt.inner.waker.borrow().clone();
-    assert!(slot.post(win(), ExternalData::new("hi")));
+    assert!(rt.poster().post(win(), "hi"));
     assert_eq!(tw.take().len(), 1);
     assert!(rt.take_pending_external().is_empty(), "平台模式不落本地队列");
 }
 
-/// 回归（A6）：**在 `set_waker` 之前** spawn 的任务也必须能把消息与唤醒交给平台。
+/// ★★ 回归（A6 的**结构性**版本）：**先拿句柄、后装平台 waker** 也必须能到达平台。
 ///
-/// bug 表现：`TaskCtx` 持有 spawn 时的 `WakerSlot` **快照**，而平台 waker 是
-/// `run()` 里才注入的 ⇒ 构造期起的预加载任务永远持 `Local` 槽位，`post()`
-/// 落进 `LocalQueue`。而 `LocalQueue` 只被 `App::frame_all` 消费，**平台层从不调它**
-/// ⇒ 消息积压、无人消费、**任务永不回调、界面毫无反应且零报错**。
+/// ## 原 bug
 ///
-/// 修复分两半，本测试覆盖"转发"那一半（另一半是平台 tick 里的 drain）。
+/// 旧设计里工作线程持有的是"spawn 时的 `WakerSlot` **快照**"；平台 waker 是在
+/// `run()` 里才注入的 ⇒ 在那之前起的线程**永远**持 `Local` 槽位，投递只会落进
+/// 本地队列 —— 而平台层不 drain 它 ⇒ **消息积压、界面毫无反应且零报错**。
+/// 当时的补丁是"把平台 waker 事后塞进那个已被共享出去的队列"（retrofit）。
+///
+/// ## 现在为什么结构上不可能
+///
+/// [`Poster`] 指向 `Arc<PostHub>` —— **槽位本身是共享的**，`set_waker` 之后
+/// 立刻可见。所以这个测试不再验证"补丁生效"，而是验证**句柄不携带快照**。
 #[test]
-fn task_spawned_before_set_waker_still_reaches_the_platform() {
+fn a_poster_taken_before_set_waker_still_reaches_the_platform() {
     let rt = Runtime::new();
 
-    // ① 在平台 waker 注入**之前**取一个槽位快照 —— 这模拟"run() 之前 spawn 的任务"
-    let early = rt.inner.waker.borrow().clone();
+    // `run()` 之前：业务层就把句柄交给工作线程了
+    let early = rt.poster();
+    assert!(early.platform_waker().is_none(), "此时还没有平台");
 
-    // ② 平台启动：注入 waker（会给旧本地队列装上转发器）
+    // 平台起来，注入唤醒器
     let tw = Arc::new(TestWaker::default());
     rt.set_waker(tw.clone());
 
-    // ③ 那个"早期任务"完成并投递 —— 消息必须到达平台，而不是躺在本地队列里
-    assert!(early.post(win(), ExternalData::new("early")), "旧快照的 post 应成功");
-    assert_eq!(
-        tw.take().len(),
-        1,
-        "A6：set_waker 之前 spawn 的任务，其消息必须转发给平台（否则永久丢失）"
-    );
-    assert!(
-        rt.take_pending_external().is_empty(),
-        "消息已转交平台，不应滞留在本地队列"
-    );
+    // ★ 那个"旧的"句柄必须立刻看到平台，且**带回唤醒**
+    assert!(early.post(win(), "从旧句柄投递"));
+    assert_eq!(tw.posts.lock().unwrap().len(), 1, "A6：必须到达平台");
+    assert!(rt.take_pending_external().is_empty(), "不落本地队列");
+    assert!(early.platform_waker().is_some(), "句柄看到的是当前槽位");
 }
 
 /// 回归（A6 另一半）：`set_waker` 时**已积压**在本地队列里的消息要被转交平台。
 ///
-/// 否则它们会永远留在队列里：平台模式不再 drain 本地队列（`take_pending_external`
-/// 在 `Platform` 分支返回空），而这些消息又已经不该由 UI 再消费一次。
+/// 否则它们会永远留在队列里：平台模式不再 drain 本地队列，而这些消息又已经
+/// 不该由 UI 再消费一次。
 #[test]
 fn set_waker_forwards_already_queued_messages() {
     let rt = Runtime::new();
 
     // 平台启动前先投两条（模拟 ViewModel 构造期的同步投递）。
-    // ⚠️ **不要在这里 drain**：`take_pending_external` 是"取走"，会把要验证的消息清掉
-    // —— 那样断言就变成"队列本来就是空的"，测试失去意义。
-    {
-        let slot = rt.inner.waker.borrow().clone();
-        slot.post(win(), ExternalData::new("a"));
-        slot.post(win(), ExternalData::new("b"));
-    }
+    // ⚠️ **不要在这里 drain**：`take_pending_external` 是"取走"，会把要验证的消息
+    // 清掉 —— 那样断言就变成"队列本来就是空的"，测试失去意义。
+    let early = rt.poster();
+    early.post(win(), "a");
+    early.post(win(), "b");
 
-    // 注入平台 waker ⇒ 积压消息应被转交
     let tw = Arc::new(TestWaker::default());
     rt.set_waker(tw.clone());
 
@@ -128,165 +149,72 @@ fn set_waker_forwards_already_queued_messages() {
     assert!(rt.take_pending_external().is_empty(), "转交后本地队列应为空");
 }
 
+// ───────────────────────── 投递：非 UI 线程的入口 ─────────────────────────
+
+/// ★★ [`Poster`] —— **非 UI 线程的入口**，不需要任何"任务"概念。
+///
+/// 用**真线程**验证：`Runtime` 自己是 `!Send`（`Rc` 包着），进不了线程；
+/// 但 `rt.poster()` 拿到的句柄可以。
 #[test]
-fn spawn_task_delivers_a_task_event_with_the_payload() {
+fn post_delivers_from_another_thread_without_any_task() {
     let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
+    let w = win();
 
-    let handle = rt.spawn_task(win(), |ctx| {
-        ctx.post("progress-note");
-        Ok::<_, ()>(21u32 * 2)
-    });
-    assert_eq!(handle.id(), 1, "任务 id 自增");
-    assert!(rt.has_tasks(win()));
+    let poster = rt.poster();
+    std::thread::spawn(move || {
+        assert!(poster.post(w, String::from("worker 的结果")));
+    })
+    .join()
+    .unwrap();
 
-    // 等任务体跑完
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !handle.is_done() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert!(handle.is_done(), "任务应在超时前完成");
-
-    // 投递：中间消息 + 完成事件
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while msgs.len() < 2 && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(msgs.len(), 2, "一条中间消息 + 一条完成事件");
-
-    // 完成事件：框架收尾（清表）但**继续**交给用户
-    let (w, done) = msgs.pop().unwrap();
-    assert_eq!(w, win());
-    assert!(!on_task_message(&rt, w, &done), "TaskEvent 要交给用户");
-    assert!(!rt.has_tasks(win()), "任务表已清");
-    let ev = done.downcast::<TaskEvent>().expect("是 TaskEvent");
-    assert_eq!(ev.id, handle.id());
-    assert_eq!(ev.payload.downcast::<Result<u32, ()>>(), Some(Ok(42)));
-
-    // 中间消息：普通数据，框架不消费
-    let (_, note) = msgs.pop().unwrap();
-    assert!(!on_task_message(&rt, win(), &note));
-    assert_eq!(note.downcast::<&str>(), Some("progress-note"));
-}
-
-#[test]
-fn spawn_task_busy_shows_a_busy_item_and_clears_it_on_completion() {
-    let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
-
-    let handle = rt.spawn_task_busy(win(), "正在导出…", |ctx| {
-        ctx.progress(1, 4);
-        "done"
-    });
-    assert!(rt.is_busy(win()), "任务开始 ⇒ 遮罩出现");
-    let items = rt.busy_items(win());
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].label, "正在导出…");
-    assert_eq!(items[0].ratio(), None, "还没进度 ⇒ 不确定进度");
-    assert!(items[0].is_cancellable(), "带遮罩的任务默认可取消");
-
-    // 等消息齐（进度 + 完成）
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while (msgs.len() < 2 || !handle.is_done()) && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-
-    // 进度消息：框架消费并更新遮罩
-    let progress = msgs
-        .iter()
-        .position(|(_, d)| d.downcast_ref::<TaskProgress>().is_some())
-        .expect("有进度消息");
-    let (_, p) = msgs.remove(progress);
-    assert!(on_task_message(&rt, win(), &p), "进度消息被框架完全消费");
-    assert_eq!(rt.busy_items(win())[0].ratio(), Some(0.25));
-
-    // 完成：遮罩自动收起
-    let (_, done) = msgs.pop().expect("完成事件");
-    assert!(!on_task_message(&rt, win(), &done));
-    assert!(!rt.is_busy(win()), "任务完成 ⇒ 遮罩自动收起");
-}
-
-/// `progress_with`：进度与**明细文案**一次上报；遮罩两者都更新
-#[test]
-fn progress_with_carries_a_human_readable_detail_line() {
-    let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
-
-    let _handle = rt.spawn_task_busy(win(), "正在打开 3 个文件…", |ctx| {
-        // 把每个文件拆成三格 ⇒ 进度条在文件内部也会走
-        ctx.progress_with(1, 9, "第 1 / 3 个文件 · 正在读取 a.pdf");
-        ctx.progress_with(5, 9, "第 2 / 3 个文件 · 正在合并 b.pdf");
-        "done"
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while msgs.len() < 3 && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-
-    let mut seen = Vec::new();
-    for (_, d) in msgs {
-        if d.downcast_ref::<TaskProgress>().is_some() {
-            on_task_message(&rt, win(), &d);
-            let item = rt.busy_items(win()).into_iter().next().expect("遮罩项在");
-            seen.push((item.ratio().map(|r| (r * 100.0).round() as i32), item.detail.clone()));
-        }
-    }
+    let got = rt.take_pending_external();
+    assert_eq!(got.len(), 1, "消息落到了本地队列（无头模式）");
+    assert_eq!(got[0].0, w, "带着目标窗口");
     assert_eq!(
-        seen,
-        vec![
-            (Some(11), Some("第 1 / 3 个文件 · 正在读取 a.pdf".to_string())),
-            (Some(56), Some("第 2 / 3 个文件 · 正在合并 b.pdf".to_string())),
-        ],
-        "进度条与明细都跟着上报走"
+        got[0].1.downcast_ref::<String>().map(String::as_str),
+        Some("worker 的结果")
     );
 }
 
-/// 任务快到"来不及出帧"时遮罩会一闪而过甚至完全看不见 ⇒ `set_busy_min_visible`
-/// 把忙碌项留到最短可见时间；到点由 `reap_busy` 收掉（帧驱动每帧调它）。
+/// ✅ **正向**：事件循环已退出时 `post` 返回 `false`（调用方据此收敛）。
+///
+/// ★ **反向**对照：上面几条证明"能投进去"，这条证明"投不进去时**会说出来**" ——
+/// 只测前者的话，一个永远返回 `true` 的实现也会全绿。
+#[test]
+fn post_reports_failure_after_the_loop_is_gone() {
+    let rt = Runtime::new();
+    rt.set_waker(Arc::new(DeadWaker));
+
+    assert!(!rt.poster().post(win(), 1u8), "★ 必须如实报告 false");
+    assert!(!rt.wake(), "同上");
+}
+
+// ───────────────────────── 遮罩：与任务**无关** ─────────────────────────
+
+/// 快活儿也要看得见：忙碌段在**还没来得及出帧**时就结束 ⇒ 配了最短可见时间后
+/// 仍然挂着，到点由帧驱动的 [`Runtime::reap_busy`] 收掉。
+///
+/// 这里**没有任务**：收尾动作是调用方显式 `finish()` 触发的。
 #[test]
 fn busy_overlay_is_held_for_the_minimum_visible_time() {
     let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
+    let w = win();
+    rt.register_window(w);
     assert_eq!(rt.busy_min_visible(), Duration::ZERO, "默认不等待");
     rt.set_busy_min_visible(Duration::from_millis(300));
 
-    let handle = rt.spawn_task_busy(win(), "正在打开…", |_| 0u32);
+    let token = rt.begin_busy(w, "正在打开…");
+    assert!(rt.is_busy(w));
+    // 任务（在这里 = 调用方）瞬间完成
+    token.finish();
 
-    // 等任务完成并把完成消息喂回去（= 平台把 External 先于重绘处理掉的那种情形）
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while msgs.is_empty() && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert!(handle.is_done());
-    let (_, done) = msgs.pop().expect("完成事件");
-    on_task_message(&rt, win(), &done);
-
-    assert!(!rt.has_tasks(win()), "任务已经结束");
-    assert!(rt.is_busy(win()), "但遮罩还挂着（最短可见时间）");
-
+    assert!(rt.is_busy(w), "遮罩还挂着（没到最短可见时间）");
     assert!(!rt.reap_busy(Instant::now()), "还没到点 ⇒ 不收");
     assert!(
         rt.reap_busy(Instant::now() + Duration::from_millis(400)),
         "过了最短可见时间 ⇒ 收掉"
     );
-    assert!(!rt.is_busy(win()), "遮罩收起");
+    assert!(!rt.is_busy(w), "遮罩收起");
     assert!(
         !rt.reap_busy(Instant::now() + Duration::from_secs(1)),
         "已经收干净了（幂等）"
@@ -306,121 +234,6 @@ fn busy_token_can_set_a_detail_line() {
     assert_eq!(item.ratio(), Some(0.4));
     assert_eq!(item.detail.as_deref(), Some("正在写第 2 个分片"));
     token.finish();
-}
-
-/// 点遮罩上的「取消」⇒ 任务收到取消（这是 `spawn_task_busy` 的默认接线）
-#[test]
-fn clicking_the_overlay_cancel_button_cancels_the_task() {
-    let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
-
-    let handle = rt.spawn_task_busy(win(), "正在导出…", |ctx| {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !ctx.is_cancelled() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        ctx.is_cancelled()
-    });
-
-    // 模拟遮罩上的按钮点击
-    let click = rt.busy_items(win())[0].cancel.clone().expect("有取消按钮");
-    click();
-    assert!(handle.is_cancelled(), "点击 ⇒ 任务被取消");
-
-    // 任务收敛后遮罩收起
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while msgs.is_empty() && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let (_, done) = msgs.pop().expect("完成事件");
-    on_task_message(&rt, win(), &done);
-    assert!(!rt.is_busy(win()));
-}
-
-/// 任务体 panic：不能让遮罩永远挂着（框架必须收到"失败"并收尾）
-#[test]
-fn a_panicking_task_still_finishes_and_clears_its_overlay() {
-    let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
-
-    let handle = rt.spawn_task_busy(win(), "正在解析…", |_ctx| -> u32 { panic!("任务体崩了") });
-    assert!(rt.is_busy(win()));
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while msgs.is_empty() && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert!(handle.is_done(), "panic 也要走收尾路径（否则遮罩永远挂着）");
-
-    let (_, failed) = msgs.pop().expect("失败事件");
-    assert!(!on_task_message(&rt, win(), &failed), "失败事件也交给用户");
-    assert_eq!(
-        failed.downcast::<TaskFailed>().map(|f| f.id),
-        Some(handle.id()),
-        "投递的是 TaskFailed"
-    );
-    assert!(!rt.is_busy(win()), "失败 ⇒ 遮罩同样收起");
-    assert!(!rt.has_tasks(win()), "任务表同样清空");
-}
-
-#[test]
-fn cancelling_a_task_is_visible_inside_the_worker() {
-    let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
-
-    let handle = rt.spawn_task(win(), |ctx| {
-        // 等外部取消（最多 5s）
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !ctx.is_cancelled() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        ctx.is_cancelled()
-    });
-    handle.cancel();
-    assert!(handle.is_cancelled());
-
-    // 任务应以"已取消"收场
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut msgs = Vec::new();
-    while msgs.is_empty() && Instant::now() < deadline {
-        msgs.extend(tw.take());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let (_, done) = msgs.pop().expect("完成事件");
-    on_task_message(&rt, win(), &done);
-    let ev = done.downcast::<TaskEvent>().unwrap();
-    assert_eq!(ev.payload.downcast::<bool>(), Some(true), "线程里看到了取消");
-}
-
-#[test]
-fn closing_a_window_cancels_its_tasks_and_drops_its_busy_items() {
-    let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
-    rt.register_window(win());
-
-    let handle = rt.spawn_task_busy(win(), "正在加载…", |ctx| {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !ctx.is_cancelled() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    });
-    assert!(rt.is_busy(win()));
-
-    rt.cancel_tasks_of(win());
-    assert!(handle.is_cancelled());
-    assert!(!rt.has_tasks(win()), "任务表清空");
-    assert!(!rt.is_busy(win()), "遮罩项一并清掉");
 }
 
 #[test]
@@ -444,8 +257,10 @@ fn busy_token_is_raii_and_updates_progress() {
     assert!(rt.take_dirty(w).contains(Dirty::VIEW), "收起也要刷新一次");
 }
 
+/// 遮罩上的「取消」按钮**由调用方接管**：框架只存回调并在点击时执行它，
+/// 点完**不自动收起**（何时收是调用方的决定）。
 #[test]
-fn busy_token_can_be_cancelled_from_the_overlay() {
+fn the_overlay_cancel_button_calls_the_callers_callback() {
     let rt = Runtime::new();
     let w = win();
     rt.register_window(w);
@@ -463,39 +278,120 @@ fn busy_token_can_be_cancelled_from_the_overlay() {
     let cb = items[0].cancel.clone().unwrap();
     cb();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(rt.is_busy(w), "★ 点取消不自动收起 —— 由调用方决定");
 
     busy.finish();
     assert!(!rt.is_busy(w));
 }
 
 #[test]
-fn multiple_tasks_stack_busy_items_per_window() {
+fn multiple_busy_items_stack_per_window() {
     let rt = Runtime::new();
-    let tw = Arc::new(TestWaker::default());
-    rt.set_waker(tw.clone());
     let a = WindowId::new(1);
     let b = WindowId::new(2);
     rt.register_window(a);
     rt.register_window(b);
 
-    let h1 = rt.spawn_task_busy(a, "A 的任务", |_| ());
-    let h2 = rt.spawn_task_busy(a, "另一个任务", |_| ());
-    let _h3 = rt.spawn_task_busy(b, "B 的任务", |_| ());
+    let t1 = rt.begin_busy(a, "A 的活儿");
+    let t2 = rt.begin_busy(a, "另一个活儿");
+    let _t3 = rt.begin_busy(b, "B 的活儿");
 
-    assert_eq!(rt.busy_items(a).len(), 2, "同窗口多个任务各占一项");
+    assert_eq!(rt.busy_items(a).len(), 2, "同窗口多个忙碌段各占一项");
     assert_eq!(rt.busy_items(b).len(), 1, "遮罩按窗口隔离");
-    assert!(h1.is_running() && h2.is_running());
 
-    // 只把 **a 窗口** 的事件喂回去（b 的留在队列里没被消费 ⇒ 它的忙碌项应保持）
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while (h1.is_running() || h2.is_running()) && Instant::now() < deadline {
-        for (w, d) in tw.take() {
-            if w == a {
-                on_task_message(&rt, w, &d);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert!(rt.busy_items(a).is_empty(), "两个任务都完成后遮罩收起");
-    assert_eq!(rt.busy_items(b).len(), 1, "B 的任务未被消费 ⇒ 遮罩仍在");
+    t1.finish();
+    assert_eq!(rt.busy_items(a).len(), 1, "收一个还剩一个");
+    t2.finish();
+    assert!(rt.busy_items(a).is_empty());
+}
+
+/// 窗口关闭 ⇒ 它的忙碌项被清掉（否则遮罩留在已经没了的窗口上）。
+///
+/// ★ 这里只剩"遮罩"这一半：`cancel_tasks_of` 的**任务那一半**随"移除 task 概念"
+/// 一起删除了 —— 线程归调用方，取消也归调用方。
+#[test]
+fn closing_a_window_drops_its_busy_items() {
+    let rt = Runtime::new();
+    let w = win();
+    rt.register_window(w);
+
+    let _token = rt.begin_busy(w, "正在加载…");
+    assert!(rt.is_busy(w));
+
+    rt.clear_busy_of(w);
+    assert!(!rt.is_busy(w), "遮罩项随窗口关闭清掉");
+}
+
+/// ★★★ 遮罩**不是任务的一部分**：只用 [`Runtime::begin_busy`] / [`BusyToken`]
+/// 就能把它从挂上驱动到收掉 —— 全程没有任何线程、任何任务表。
+///
+/// 钉住的是**概念边界**：框架提供的是"遮罩作用域"，不是"任务"。
+#[test]
+fn a_busy_overlay_is_driven_without_any_task() {
+    let rt = Runtime::new();
+    let w = win();
+
+    assert!(rt.busy_items(w).is_empty(), "起手没有遮罩");
+
+    let t = rt.begin_busy(w, "正在打开…");
+    assert!(rt.is_busy(w), "遮罩已挂上");
+    assert_eq!(rt.busy_items(w)[0].label, "正在打开…");
+    assert_eq!(rt.busy_items(w)[0].ratio(), None, "未报进度 ⇒ 不确定进度");
+
+    // 调用方按**自己的**节奏驱动：文案 / 进度 / 明细 / 取消按钮
+    t.set_label("正在合并…");
+    t.set_progress(3, 10);
+    assert_eq!(rt.busy_items(w)[0].ratio(), Some(0.3));
+    t.set_detail("第 3 / 10 个文件 · 正在合并 b.pdf");
+    assert_eq!(
+        rt.busy_items(w)[0].detail.as_deref(),
+        Some("第 3 / 10 个文件 · 正在合并 b.pdf")
+    );
+    t.cancellable(|| {});
+    assert!(rt.busy_items(w)[0].is_cancellable());
+
+    t.finish();
+    assert!(!rt.is_busy(w), "遮罩已收");
+}
+
+/// ★★ 定时兜底：**没人 `finish()`** 也必须在到点后自己收掉。
+///
+/// 这就是"遮罩的关闭由**调用方或定时器**决定"里的定时器那条。
+/// 用途：什么时候回来没人说得准的活儿（网络请求、外部进程）。
+#[test]
+fn dismiss_after_is_a_timeout_backstop() {
+    let rt = Runtime::new();
+    let w = win();
+    rt.set_busy_min_visible(Duration::ZERO);
+
+    let t = rt.begin_busy(w, "正在等待外部进程…");
+    t.dismiss_after(Duration::from_millis(50));
+    assert!(rt.is_busy(w));
+
+    assert!(!rt.reap_busy(Instant::now()), "未到点 ⇒ 不收");
+    assert!(rt.is_busy(w));
+
+    assert!(rt.reap_busy(Instant::now() + Duration::from_millis(60)), "到点 ⇒ 收");
+    assert!(!rt.is_busy(w), "★ 定时兜底把它收掉了（调用方一直没 finish）");
+}
+
+/// ★ 到点时刻**只收紧、不放松**：`dismiss_after` 之后 `finish()` 必须取更早者。
+///
+/// 反例：若 `end_busy` 直接覆盖 `hide_at`，一个先 `finish()` 的遮罩会被后来那个
+/// 60s 的兜底拖住 —— 用户看着一个早就该消失的遮罩。
+#[test]
+fn finish_tightens_the_deadline_rather_than_loosening_it() {
+    let rt = Runtime::new();
+    let w = win();
+    rt.set_busy_min_visible(Duration::from_millis(30));
+
+    let t = rt.begin_busy(w, "x");
+    t.dismiss_after(Duration::from_secs(60)); // 最迟 60s
+    t.finish(); // 已经结束 ⇒ 最短可见 30ms 后就该收
+
+    assert!(
+        rt.reap_busy(Instant::now() + Duration::from_millis(50)),
+        "★ 取更早者：50ms 时已过 30ms 的下限，必须收掉（而不是等 60s 兜底）"
+    );
+    assert!(!rt.is_busy(w));
 }

@@ -1,48 +1,57 @@
-//! 后台任务与跨线程通信（框架级）。
+//! 跨线程投递 + loading 遮罩（框架级原语）。
 //!
-//! ## 为什么需要
+//! ## 这个模块**不提供**"任务"
 //!
-//! GUI 的耗时活儿（读盘、解析、网络、压缩……）不能占着 UI 线程跑，否则窗口僵死。
-//! 但 `Signal` / `Runtime` / `Ctx` 全是 `!Send`（`Rc` + `RefCell`），后台线程碰不得。
-//! 唯一安全的姿势是**投递 + 唤醒**：线程把 `Send` 数据交给 [`Waker`]，UI 线程在
-//! 帧循环里落地。
+//! 没有 `spawn_task` / `TaskCtx` / `TaskHandle` / `CancelToken` / `TaskEvent`，
+//! 也没有任务表。理由：
 //!
-//! 本模块把这条链路做完整：
+//! - **线程模型是应用的决定**：线程池 / rayon / tokio / 自己的 reactor —— 框架
+//!   替不了（当初硬编码 `std::thread::spawn` 就是替错了）；
+//! - **取消与进度是调用方的协议**：cooperative `AtomicBool`？`CancellationToken`？
+//!   这个形状对那个场景未必合适；
+//! - **信封会污染通道**：一旦框架拥有消息协议，`WindowCtx::external` 就得先认一遍
+//!   "这条是不是我自己发的"，一条本该**不透明**的通道就被污染了。
+//!
+//! ## 本模块提供的两条原语
+//!
+//! | 原语 | 作用 | 为什么属于 UI 库 |
+//! |---|---|---|
+//! | [`Poster`]（[`Runtime::poster`]） | 非 UI 线程把 `Send` 数据投递回 UI 线程并唤醒 | 它要接**事件循环**（winit 的 `EventLoopProxy` / 无头时的本地队列），只有窗口库知道怎么接 |
+//! | [`BusyToken`]（[`Runtime::begin_busy`]） | 挂一个 loading 遮罩 | 它是**渲染 + 输入阻断 + 最短可见时间**，全是 UI 层的事 |
 //!
 //! ```text
-//! UI 线程                                 工作线程
-//! ────────                                ────────
-//! rt.spawn_task_busy(win, "正在导出…", |ctx| {   ← 起线程 + 挂 loading 遮罩
-//!                                             for i in 0..n {
-//!                                                 if ctx.is_cancelled() { break }
-//!                                                 ctx.progress(i, n);      → post
-//!                                             }
-//!                                             Ok(summary)                  ← 返回值
-//!                                         })
-//!                                             ↓ 完成时框架自动投递
-//! WindowCtx::external → on_task_message       TaskEvent { id, payload }
-//!   ├─ 收起遮罩 / 清任务表（框架收尾）
-//!   └─ 继续交给 ViewModel::on_external（用户 downcast 自己的类型）
+//! UI 线程                                      工作线程（调用方自己的）
+//! ────────                                     ──────────────────────
+//! let poster = rt.poster();        ← 可 Send 的句柄 ──→  move 进线程
+//! let busy = rt.begin_busy(win, "正在导出…");          poster.post(win, MyMsg::Progress(3, 9));
+//! busy.cancellable(|| flag.store(true));               if flag.load() { … 收敛 … }
+//!                                                      poster.post(win, MyMsg::Done(summary));
+//!                          ↓ 收到 Done（UI 线程）
+//! ViewModel::on_external: data.downcast::<MyMsg>()  ⇒  busy.finish()
 //! ```
 //!
-//! ## 三层 API（按需要选）
-//!
-//! | 想要 | 用 |
-//! |---|---|
-//! | 只要"随时唤醒/投递" | [`Runtime::waker`] / [`Runtime::wake`] |
-//! | 起个后台任务，完成回传结果 | [`Runtime::spawn_task`] |
-//! | 再要一个 loading 遮罩 | [`Runtime::spawn_task_busy`] 或 [`Runtime::begin_busy`] |
+//! 注意最后一步：**遮罩由调用方收**（它收到自己的结果时收），不是框架
+//! "看到任务结束"时收 —— 框架压根不知道有这么一个工作。
+//! 也可以配 [`BusyToken::dismiss_after`] 做定时兜底。
 //!
 //! ## 平台无关（可无头测试）
 //!
 //! [`Waker`] 是一个 trait：winit 平台用 [`crate::platform::RepaintHandle`] 实现它；
-//! 没有平台时（无头测试、`App::frame_all` 驱动）`Runtime` 退化成**本地队列**
+//! 没有平台时（无头测试、`App::frame_all` 驱动）投递退化成**本地队列**
 //! （[`Runtime::take_pending_external`] 取出来手动喂给 `WindowCtx::external`）。
-//! 测试因此可以跑通"任务 → 投递 → 落地"的完整闭环，不需要真窗口。
+//! 测试因此可以跑通"工作线程 → 投递 → 落地"的完整闭环，不需要真窗口。
+//!
+//! ## A6：句柄的**稳定身份**
+//!
+//! [`Poster`] 会在 [`Runtime::set_waker`] **之前**就被 clone 出去（构造期起的线程）。
+//! 若句柄存的是"当时的唤醒器快照"，平台 waker 后装入它就**永远看不见**
+//! ⇒ 消息积压、无人消费、**界面毫无反应且零报错**。
+//!
+//! 所以句柄指向 `Arc<PostHub>`：**槽位本身是共享的**，装入立刻可见 ——
+//! 这类问题从"打补丁"变成"结构上不可能"。
 
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -63,36 +72,14 @@ pub trait Waker: Send + Sync + 'static {
     fn post(&self, window: WindowId, data: ExternalData) -> bool;
 }
 
-/// 无平台时的本地队列（`Arc<Mutex<..>>` ⇒ 可直接被工作线程使用）。
+/// 无平台时的本地队列（`Mutex` ⇒ 可被工作线程直接用）。
 #[derive(Default)]
-pub(crate) struct LocalQueue {
+struct LocalQueue {
     items: Mutex<VecDeque<(WindowId, ExternalData)>>,
-    /// 平台 waker 的转发目标（[`Runtime::set_waker`] 注入）。
-    ///
-    /// ## 为什么需要它（A6）
-    ///
-    /// `TaskCtx` 持有的是 **spawn 时**的 `WakerSlot` **快照**，而平台 waker 是
-    /// 在 `run()` 里才注入的 ⇒ **在 `run()` 之前 spawn 的任务**（典型：ViewModel
-    /// 构造期起预加载 / 预热）永远持有 `Local` 槽位。
-    ///
-    /// 光靠"平台 tick 里 drain 本地队列"只能保证消息**不丢**，但它**唤不醒**事件循环
-    /// （`Local` 的 `wake()` 是 no-op）⇒ 任务完成后要等到下一次真实输入才被处理。
-    ///
-    /// 所以 `set_waker` 会把平台 waker **装进这个已被共享出去的队列**里，
-    /// 于是这些"拿着旧快照的任务"也能把消息**与唤醒**转发给平台。
-    forward: Mutex<Option<Arc<dyn Waker>>>,
 }
 
 impl LocalQueue {
     fn push(&self, window: WindowId, data: ExternalData) {
-        // 有平台 waker 就直接交给它（顺带由它唤醒 UI）。
-        // `post` 消耗 `data`，所以不能"失败后退回本地队列"—— 而 `post` 返回 `false`
-        // 的语义本来就是"事件循环已退出，调用方尽快收敛"，丢弃是正确行为。
-        let fwd = self.forward.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(w) = fwd {
-            let _ = w.post(window, data);
-            return;
-        }
         self.items
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -102,16 +89,111 @@ impl LocalQueue {
     fn take(&self) -> Vec<(WindowId, ExternalData)> {
         self.items.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
     }
+}
 
-    /// 装上平台 waker 并**转走**已积压的消息（否则它们永远留在队列里）。
+/// 投递中心：**本地队列 + 后装入的平台唤醒器**，共享给所有 [`Poster`]。
+///
+/// 把这两样放进**同一个 `Arc`** 是 A6 的**结构性修复**（见 [`Poster`] 的文档）：
+/// 句柄 clone 出去之后，平台 waker 后装入也**立刻对它们可见** ——
+/// 不再需要"任务持有唤醒器快照 + 事后 retrofit"那套补丁。
+#[derive(Default)]
+struct PostHub {
+    queue: LocalQueue,
+    platform: Mutex<Option<Arc<dyn Waker>>>,
+}
+
+/// **跨线程投递句柄**：`Send + Sync + Clone` —— 非 UI 线程的入口。
+///
+/// ## 为什么需要它（而不是直接用 `Runtime`）
+///
+/// [`Runtime`] 是 `Rc<RuntimeInner>` ⇒ **`!Send`**，工作线程根本拿不到它。
+/// 此前"从别的线程投递数据"只能靠框架给的 `TaskCtx` 才做得到 —— 于是框架
+/// **替调用方定了线程模型**（`std::thread::spawn` 硬编码）、取消协议、进度协议，
+/// 还把消息信封塞进了这条本该**不透明**的通道（`WindowCtx::external` 得先认
+/// 一遍是不是框架自己发的）。
+///
+/// `Poster` 公开之后，调用方可以用**任何**并发模型（线程池 / rayon / tokio /
+/// 自己的 reactor）投递结果，框架**不需要知道"任务"这回事**。
+///
+/// ## 稳定身份：A6 的结构性修复
+///
+/// 句柄会在 `Runtime::set_waker` **之前**就 clone 出去（调用方自己起的线程、
+/// ViewModel 构造期的预热）。若句柄里存的是"当时的唤醒器快照"，平台 waker
+/// 后装入它就**永远看不见** ⇒ 消息积压、无人消费、**界面毫无反应且零报错**。
+///
+/// 所以句柄指向 `Arc<PostHub>` —— **槽位本身是共享的**，装入立刻可见。
+///
+/// ```ignore
+/// // UI 线程：把句柄交给工作线程（`Runtime` 自己进不了线程）
+/// let poster = rt.poster();
+/// std::thread::spawn(move || {
+///     let report = heavy_work();
+///     poster.post(win, report);       // ← 只需要这一句
+/// });
+/// ```
+#[derive(Clone)]
+pub struct Poster(Arc<PostHub>);
+
+impl Default for Poster {
+    fn default() -> Self {
+        Self(Arc::new(PostHub::default()))
+    }
+}
+
+impl Poster {
+    /// 只唤醒（不带数据）。
     ///
-    /// 返回 `true` 表示成功转交（这些消息已由平台接管，不需要 UI 再消费）。
-    fn attach_platform(&self, waker: Arc<dyn Waker>) -> bool {
-        let pending = {
-            let mut slot = self.forward.lock().unwrap_or_else(|e| e.into_inner());
-            *slot = Some(Arc::clone(&waker));
-            self.take()
-        };
+    /// 无头模式下是 no-op（返回 `true`）—— 消息已入本地队列，由
+    /// [`Runtime::take_pending_external`] 消费。
+    pub fn wake(&self) -> bool {
+        match self.platform_waker() {
+            Some(w) => w.wake(),
+            None => true,
+        }
+    }
+
+    /// **投递一条 `Send` 数据到某窗口并唤醒 UI 线程**（非 UI 线程的入口）。
+    ///
+    /// 返回 `false` = 事件循环已退出（调用方应尽快收敛，别再往这里投）。
+    /// 落地侧：UI 线程在 `WindowCtx::external` 里交给 `ViewModel::on_external`，
+    /// 用 [`ExternalData::downcast`] 取回自己的类型。
+    pub fn post<T: Send + 'static>(&self, window: WindowId, msg: T) -> bool {
+        self.post_external(window, ExternalData::new(msg))
+    }
+
+    /// [`Self::post`] 的低层形式：已构造好的 [`ExternalData`]。
+    pub fn post_external(&self, window: WindowId, data: ExternalData) -> bool {
+        // 有平台唤醒器就直接交给它（由它投递并唤醒）。
+        // `post` 消耗 `data`，所以不能"失败后退回本地队列"—— 它返回 `false`
+        // 的语义本来就是"事件循环已退出，调用方尽快收敛"，丢弃是正确行为。
+        //
+        // ★ 先把 `Arc` clone 出来再调用：`Waker::post` 是**外部实现**，
+        //   持锁调它有重入死锁风险。
+        match self.platform_waker() {
+            Some(w) => w.post(window, data),
+            None => {
+                self.0.queue.push(window, data);
+                true
+            }
+        }
+    }
+
+    /// 平台唤醒器（无头 / 未进入事件循环时是 `None`）
+    pub fn platform_waker(&self) -> Option<Arc<dyn Waker>> {
+        self.0.platform.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 取走本地队列（无头 / 平台切换的窗口期；有平台之后通常为空）
+    pub(crate) fn take_local(&self) -> Vec<(WindowId, ExternalData)> {
+        self.0.queue.take()
+    }
+
+    /// 装入平台唤醒器，并把**已积压**的消息转交（否则它们留在队列里没人要）。
+    ///
+    /// 返回 `true` = 转交了积压消息（它们已由平台接管）。
+    pub(crate) fn attach_platform(&self, waker: Arc<dyn Waker>) -> bool {
+        *self.0.platform.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&waker));
+        let pending = self.0.queue.take();
         if pending.is_empty() {
             return false;
         }
@@ -122,257 +204,7 @@ impl LocalQueue {
     }
 }
 
-/// 唤醒器槽位：平台注入的，或本地队列（无头）。
-#[derive(Clone)]
-pub(crate) enum WakerSlot {
-    Local(Arc<LocalQueue>),
-    Platform(Arc<dyn Waker>),
-}
-
-impl Default for WakerSlot {
-    fn default() -> Self {
-        Self::Local(Arc::new(LocalQueue::default()))
-    }
-}
-
-impl WakerSlot {
-    pub(crate) fn wake(&self) -> bool {
-        match self {
-            // 本地模式没有事件循环可唤醒：投递后由 `take_pending_external` 消费
-            WakerSlot::Local(_) => true,
-            WakerSlot::Platform(w) => w.wake(),
-        }
-    }
-
-    pub(crate) fn post(&self, window: WindowId, data: ExternalData) -> bool {
-        match self {
-            WakerSlot::Local(q) => {
-                q.push(window, data);
-                true
-            }
-            WakerSlot::Platform(w) => w.post(window, data),
-        }
-    }
-}
-
-// ───────────────────────── 取消 ─────────────────────────
-
-/// 取消令牌（`Clone + Send`）：任务内部（或它调用的库）轮询用。
-#[derive(Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
-
-impl CancelToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 置为已取消（幂等）
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-impl std::fmt::Debug for CancelToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CancelToken({})", self.is_cancelled())
-    }
-}
-
-// ───────────────────────── 任务句柄（工作线程侧）─────────────────────────
-
-/// 任务内部句柄：投递消息 / 上报进度 / 查取消。`Send + Clone` ⇒ 可以再分给子线程。
-#[derive(Clone)]
-pub struct TaskCtx {
-    id: u64,
-    window: WindowId,
-    waker: WakerSlot,
-    cancel: CancelToken,
-}
-
-impl TaskCtx {
-    /// 任务 id（与 [`TaskEvent::id`] 对应）
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    pub fn window(&self) -> WindowId {
-        self.window
-    }
-
-    /// 投递任意 `Send` 消息给 UI 线程：`ViewModel::on_external` 里 `downcast` 取。
-    ///
-    /// 返回 `false` = UI 线程已退出（事件循环结束）⇒ 任务应尽快收敛。
-    pub fn post<T: Send + 'static>(&self, msg: T) -> bool {
-        self.waker.post(self.window, ExternalData::new(msg))
-    }
-
-    /// 上报进度：框架**直接消费**（更新该任务的 loading 遮罩），不会传给 `on_external`。
-    ///
-    /// 任务没挂遮罩时是 no-op（仍返回唤醒是否成功）。
-    pub fn progress(&self, done: usize, total: usize) -> bool {
-        self.waker.post(
-            self.window,
-            ExternalData::new(TaskProgress {
-                id: self.id,
-                done,
-                total,
-                detail: None,
-            }),
-        )
-    }
-
-    /// 上报进度 + **明细文案**（一条消息、一次唤醒）。
-    ///
-    /// 遮罩会把 `detail` 显示在进度条下方（替代默认的 `done / total`），适合
-    /// "第 2 / 3 个文件 · 正在合并 b.pdf" 这类人话；`done`/`total` 可以比"文件数"
-    /// 更细（例如把每个文件拆成读盘/解析/合并三格），进度条因此**在文件内部也会走**。
-    pub fn progress_with(&self, done: usize, total: usize, detail: impl Into<String>) -> bool {
-        self.waker.post(
-            self.window,
-            ExternalData::new(TaskProgress {
-                id: self.id,
-                done,
-                total,
-                detail: Some(detail.into()),
-            }),
-        )
-    }
-
-    /// 是否已被取消（用户点了取消按钮 / 窗口关闭 / 应用退出）
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
-    }
-
-    /// 取消令牌：传给任务内部更深的库（它们不认识 `TaskCtx`）
-    pub fn cancel_token(&self) -> CancelToken {
-        self.cancel.clone()
-    }
-
-    /// 只唤醒 UI 线程跑一帧（不带数据）
-    pub fn wake(&self) -> bool {
-        self.waker.wake()
-    }
-}
-
-impl std::fmt::Debug for TaskCtx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskCtx")
-            .field("id", &self.id)
-            .field("window", &self.window)
-            .finish_non_exhaustive()
-    }
-}
-
-// ───────────────────────── 任务句柄（UI 线程侧）─────────────────────────
-
-/// UI 线程拿到的任务句柄（`!Send`：持有 `Runtime`）。
-pub struct TaskHandle {
-    rt: Runtime,
-    id: u64,
-    cancel: CancelToken,
-    done: Arc<AtomicBool>,
-}
-
-impl TaskHandle {
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// 请求取消：任务里 `TaskCtx::is_cancelled()` 会变 `true`（协作式，不强杀线程）。
-    pub fn cancel(&self) {
-        self.cancel.cancel();
-    }
-
-    /// 任务体是否已跑完（不含"结果已落地"）
-    pub fn is_done(&self) -> bool {
-        self.done.load(Ordering::SeqCst)
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
-    }
-
-    /// 该任务是否还挂在运行时（完成后由框架移除）
-    pub fn is_running(&self) -> bool {
-        self.rt.inner.tasks.borrow().iter().any(|t| t.id == self.id)
-    }
-}
-
-impl std::fmt::Debug for TaskHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskHandle")
-            .field("id", &self.id)
-            .field("done", &self.is_done())
-            .finish_non_exhaustive()
-    }
-}
-
-// ───────────────────────── 框架内部消息 ─────────────────────────
-
-/// 任务完成事件：框架先做收尾（清任务表 + 收遮罩），**再**把它交给 `ViewModel::on_external`。
-///
-/// 用户在 `on_external` 里按自己的返回类型取载荷：
-///
-/// ```ignore
-/// fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
-///     if let Some(ev) = data.downcast::<TaskEvent>() {
-///         if let Some(r) = ev.payload.downcast::<MyReport>() {
-///             self.report.set(r);
-///         }
-///     }
-/// }
-/// ```
-pub struct TaskEvent {
-    /// 任务 id（见 [`TaskCtx::id`] / [`TaskHandle::id`]）
-    pub id: u64,
-    /// 任务闭包返回值的类型擦除载荷
-    pub payload: ExternalData,
-}
-
-impl std::fmt::Debug for TaskEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TaskEvent {{ id: {} }}", self.id)
-    }
-}
-
-/// 任务**崩了**（工作线程 panic）：框架照常收尾（清任务表 + 收遮罩），
-/// 也会把它交给 `on_external`（用户想记日志就 `downcast::<TaskFailed>()`）。
-///
-/// 没有这条兜底的话，panic 的任务会让遮罩永远挂在屏幕上（任务永远不会"完成"）。
-pub struct TaskFailed {
-    /// 任务 id
-    pub id: u64,
-}
-
-impl std::fmt::Debug for TaskFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TaskFailed {{ id: {} }}", self.id)
-    }
-}
-
-/// 进度消息（框架消费，不交给用户）
-pub(crate) struct TaskProgress {
-    pub(crate) id: u64,
-    pub(crate) done: usize,
-    pub(crate) total: usize,
-    /// `Some` ⇒ 同时更新遮罩的明细文案（见 `TaskCtx::progress_with`）
-    pub(crate) detail: Option<String>,
-}
-
-// ───────────────────────── 运行时内部状态 ─────────────────────────
-
-/// 任务表条目（UI 线程侧）
-pub(crate) struct TaskRecord {
-    pub(crate) id: u64,
-    pub(crate) window: WindowId,
-    pub(crate) cancel: CancelToken,
-    /// 该任务挂的遮罩项（完成时自动收起）
-    pub(crate) busy: Option<u64>,
-}
+// ───────────────────────── 忙碌项（loading 遮罩）─────────────────────────
 
 /// 一个「忙碌」项 = loading 遮罩上的一行（同窗口多项时取最新的文案，并标出还有几个）。
 ///
@@ -384,7 +216,7 @@ pub struct BusyItem {
     /// 文案（`BusyToken::set_label` 可改）
     pub label: String,
     /// 进度明细（`Some` ⇒ 遮罩显示它，而不是默认的 `done / total`；
-    /// 见 `TaskCtx::progress_with` / `BusyToken::set_detail`）
+    /// 见 [`BusyToken::set_detail`]）
     pub detail: Option<String>,
     /// 确定进度 `(done, total)`；`None` = 不确定（画动画）
     pub progress: Option<(usize, usize)>,
@@ -449,28 +281,19 @@ impl Runtime {
 
     /// 注入平台唤醒器（`platform::run` 在进入事件循环时调用；此后所有投递走平台）。
     ///
-    /// ★ 同时把平台 waker **装进旧的本地队列**（A6）：`TaskCtx` 持有的是 spawn 时的
-    /// `WakerSlot` **快照**，所以在 `run()` **之前** spawn 的任务（典型：ViewModel 构造期
-    /// 起预加载）手里的槽位永远是 `Local`。不给它装转发器的话，这些任务完成后
-    /// 既不会唤醒事件循环、消息也只在无人 drain 的队列里堆积 ⇒ **界面毫无反应且零报错**。
+    /// ★ 装入的是**共享槽位**（[`Poster`] 里的 `Arc<PostHub>`），所以
+    /// **在这之前就 clone 出去的投递句柄也会立刻看见平台 waker** ——
+    /// 这就是 A6（"`run()` 之前起的线程消息积压、界面毫无反应且零报错"）的
+    /// **结构性修复**：不再有"句柄持有旧快照"这回事。
     ///
-    /// 装转发器时顺带把**已积压**的消息转交给平台（否则它们留在队列里没人要）。
+    /// 顺带把**已积压**的消息转交给平台（否则它们留在本地队列里没人要）。
     pub fn set_waker(&self, waker: Arc<dyn Waker>) {
-        let old = std::mem::replace(
-            &mut *self.inner.waker.borrow_mut(),
-            WakerSlot::Platform(Arc::clone(&waker)),
-        );
-        if let WakerSlot::Local(q) = old {
-            q.attach_platform(waker);
-        }
+        self.inner.poster.attach_platform(waker);
     }
 
     /// 当前平台唤醒器（无头 / 未进入事件循环时是 `None`）
     pub fn waker(&self) -> Option<Arc<dyn Waker>> {
-        match &*self.inner.waker.borrow() {
-            WakerSlot::Local(_) => None,
-            WakerSlot::Platform(w) => Some(Arc::clone(w)),
-        }
+        self.inner.poster.platform_waker()
     }
 
     /// 事件循环是否在线（有平台唤醒器）
@@ -478,147 +301,35 @@ impl Runtime {
         self.waker().is_some()
     }
 
+    /// 拿一份**可 `Send` 的投递句柄** —— 交给工作线程用。
+    ///
+    /// ★ 这是"跨线程通信"的入口，**不需要任何任务概念**：
+    ///
+    /// ```ignore
+    /// let poster = rt.poster();               // UI 线程
+    /// std::thread::spawn(move || {            // `Runtime` 自己是 `!Send`，进不了线程
+    ///     poster.post(win, heavy_work());     // 投递 + 唤醒
+    /// });
+    /// ```
+    ///
+    /// 句柄可以任意 `clone`（`Arc`），并且**先 clone、后装平台 waker** 也有效。
+    pub fn poster(&self) -> Poster {
+        self.inner.poster.clone()
+    }
+
     /// 唤醒 UI 线程跑一帧（"我改了点东西，来看看"）。
     ///
     /// 无头模式下是 no-op（返回 `true`）——数据仍会进本地队列，由
     /// [`Self::take_pending_external`] 消费。
     pub fn wake(&self) -> bool {
-        self.inner.waker.borrow().wake()
+        self.inner.poster.wake()
     }
 
-    /// 取走本地投递队列（无头 / 测试用；有平台唤醒器时恒为空）。
+    /// 取走本地投递队列（无头 / 测试用；有平台唤醒器时通常为空）。
     ///
     /// 典型用法：`for (win, data) in rt.take_pending_external() { app.window_ctx_mut(win)?.external(&rt, data) }`
     pub fn take_pending_external(&self) -> Vec<(WindowId, ExternalData)> {
-        match &*self.inner.waker.borrow() {
-            WakerSlot::Local(q) => q.take(),
-            WakerSlot::Platform(_) => Vec::new(),
-        }
-    }
-
-    // ── 任务 ──
-
-    /// 起一个后台任务：`work` 在工作线程跑，返回值 `T` 由框架投递给
-    /// `ViewModel::on_external`（包在 [`TaskEvent`] 里）。
-    ///
-    /// 任务结束（成功或 panic 之外的路径）时框架清理任务表；窗口关闭会**自动取消**
-    /// 该窗口的所有任务（`TaskCtx::is_cancelled()` 变 true）。
-    ///
-    /// ```ignore
-    /// let h = rt.spawn_task(win, |ctx| {
-    ///     ctx.post(FormatStarted);
-    ///     Ok::<_, ()>(42)
-    /// });
-    /// ```
-    pub fn spawn_task<T, F>(&self, window: WindowId, work: F) -> TaskHandle
-    where
-        T: Send + 'static,
-        F: FnOnce(TaskCtx) -> T + Send + 'static,
-    {
-        self.spawn_task_inner(window, None, work)
-    }
-
-    /// 同 [`Self::spawn_task`]，但**同时挂一个 loading 遮罩**（`label` 为文案）；
-    /// 任务完成时遮罩自动收起（无需手动 `BusyToken`）。
-    ///
-    /// 任务里用 [`TaskCtx::progress`] 上报进度即可驱动遮罩上的进度条。
-    pub fn spawn_task_busy<T, F>(&self, window: WindowId, label: impl Into<String>, work: F) -> TaskHandle
-    where
-        T: Send + 'static,
-        F: FnOnce(TaskCtx) -> T + Send + 'static,
-    {
-        self.spawn_task_inner(window, Some(label.into()), work)
-    }
-
-    fn spawn_task_inner<T, F>(&self, window: WindowId, busy_label: Option<String>, work: F) -> TaskHandle
-    where
-        T: Send + 'static,
-        F: FnOnce(TaskCtx) -> T + Send + 'static,
-    {
-        let id = {
-            let n = self.inner.next_task_id.get() + 1;
-            self.inner.next_task_id.set(n);
-            n
-        };
-        let cancel = CancelToken::new();
-        let done = Arc::new(AtomicBool::new(false));
-        let waker = self.inner.waker.borrow().clone();
-
-        // 挂遮罩（若有）：忙碌项由任务表持有 ⇒ 完成时自动收起
-        let busy = busy_label.map(|label| {
-            let bid = {
-                let n = self.inner.next_task_id.get() + 1;
-                self.inner.next_task_id.set(n);
-                n
-            };
-            // 遮罩自带的「取消」按钮 = 取消这个任务（协作式：任务里轮询
-            // `TaskCtx::is_cancelled`，看到就尽快收敛）
-            let cancel_from_ui = cancel.clone();
-            self.inner.busy.borrow_mut().push(BusyItem {
-                id: bid,
-                window,
-                label,
-                detail: None,
-                progress: None,
-                cancel: Some(Rc::new(move || cancel_from_ui.cancel())),
-                since: Instant::now(),
-                hide_at: None,
-            });
-            bid
-        });
-
-        self.inner.tasks.borrow_mut().push(TaskRecord {
-            id,
-            window,
-            cancel: cancel.clone(),
-            busy,
-        });
-        self.mark(window, Dirty::VIEW | Dirty::PRESENT);
-
-        let ctx = TaskCtx {
-            id,
-            window,
-            waker: waker.clone(),
-            cancel: cancel.clone(),
-        };
-        let done_flag = Arc::clone(&done);
-        std::thread::spawn(move || {
-            // panic 兜底：任务体崩了也要走"收尾"这条唯一路径（否则遮罩永远挂在屏幕上）
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(ctx)));
-            done_flag.store(true, Ordering::SeqCst);
-            let msg = match result {
-                Ok(v) => ExternalData::new(TaskEvent {
-                    id,
-                    payload: ExternalData::new(v),
-                }),
-                Err(_) => ExternalData::new(TaskFailed { id }),
-            };
-            let _ = waker.post(window, msg);
-        });
-
-        TaskHandle {
-            rt: self.clone(),
-            id,
-            cancel,
-            done,
-        }
-    }
-
-    /// 取消某窗口的全部任务（窗口关闭 / 应用退出时调用）
-    pub(crate) fn cancel_tasks_of(&self, window: WindowId) {
-        let mut tasks = self.inner.tasks.borrow_mut();
-        for t in tasks.iter() {
-            if t.window == window {
-                t.cancel.cancel();
-            }
-        }
-        tasks.retain(|t| t.window != window);
-        self.inner.busy.borrow_mut().retain(|b| b.window != window);
-    }
-
-    /// 某窗口是否还有后台任务在跑
-    pub fn has_tasks(&self, window: WindowId) -> bool {
-        self.inner.tasks.borrow().iter().any(|t| t.window == window)
+        self.inner.poster.take_local()
     }
 
     // ── 忙碌（loading 遮罩）──
@@ -642,12 +353,12 @@ impl Runtime {
 
     /// 开始一个「忙碌」段：窗口出现 loading 遮罩，返回的 [`BusyToken`] **drop 时自动收起**。
     ///
-    /// 不挂遮罩的纯任务用 [`Self::spawn_task`]；这里适合"不是任务但也要挡一下"的场景
+    /// 适合"不是任务、但也要挡一下 UI"的场景（外部进程、等待超时……）。
     /// （例如主线程里的一段同步重活、异步对话框等待）。
     pub fn begin_busy(&self, window: WindowId, label: impl Into<String>) -> BusyToken {
         let id = {
-            let n = self.inner.next_task_id.get() + 1;
-            self.inner.next_task_id.set(n);
+            let n = self.inner.next_busy_id.get() + 1;
+            self.inner.next_busy_id.set(n);
             n
         };
         self.inner.busy.borrow_mut().push(BusyItem {
@@ -684,24 +395,54 @@ impl Runtime {
         self.inner.busy.borrow().iter().any(|b| b.window == window)
     }
 
+    /// 窗口关闭时清掉它的忙碌项（遮罩不能留在已经没了的窗口上）。
+    ///
+    /// 这是 `cancel_tasks_of` 拆分后留下的**唯一一半**：任务那半随"框架不再管任务"
+    /// 一起删除（线程归调用方，取消也归调用方），遮罩这半仍是框架自己的状态。
+    pub(crate) fn clear_busy_of(&self, window: WindowId) {
+        self.inner.busy.borrow_mut().retain(|b| b.window != window);
+    }
+
     pub(crate) fn end_busy(&self, id: u64) {
         let hidden = {
             let mut items = self.inner.busy.borrow_mut();
             let Some(pos) = items.iter().position(|b| b.id == id) else {
                 return;
             };
-            let min = self.inner.busy_min_visible.get();
-            let hide_at = items[pos].since + min;
+            // `hide_at` 的语义是"**最迟**收掉的时刻"，两个来源取**较早**者：
+            //   · 最短可见时间（`since + busy_min_visible`）—— 快活儿也要被看见一下；
+            //   · 已有的 `hide_at` —— 可能来自 [`BusyToken::dismiss_after`] 的定时兜底。
+            // 收掉时刻只收紧、不放松。
+            let min_at = items[pos].since + self.inner.busy_min_visible.get();
+            let target = match items[pos].hide_at {
+                Some(prev) => prev.min(min_at),
+                None => min_at,
+            };
             // 一瞬间就结束的忙碌段（几毫秒的任务）常常**来不及出帧**就被撤下 ——
             // 用户什么也看不到。配了最短可见时间就先挂住，到点由 `reap_busy` 收。
-            if min > Duration::ZERO && Instant::now() < hide_at {
-                items[pos].hide_at = Some(hide_at);
+            if Instant::now() < target {
+                items[pos].hide_at = Some(target);
                 return;
             }
             items.remove(pos)
         };
         // 让该窗口重跑 view：遮罩层随之消失（层消失本身会整窗脏）
         self.mark(hidden.window, Dirty::VIEW | Dirty::PRESENT);
+    }
+
+    /// 给某个忙碌段设一个**最迟收起时刻**（定时兜底，见 [`BusyToken::dismiss_after`]）。
+    ///
+    /// 多次调用取**最早**者。不需要标脏：`hide_at` 不影响画面，而"遮罩在"
+    /// 本身就保证了 `next_wakeup` 会给定时唤醒 ⇒ `reap_busy` 会跑到点。
+    pub(crate) fn set_busy_deadline(&self, id: u64, at: Instant) {
+        let mut items = self.inner.busy.borrow_mut();
+        let Some(b) = items.iter_mut().find(|b| b.id == id) else {
+            return;
+        };
+        b.hide_at = Some(match b.hide_at {
+            Some(prev) => prev.min(at),
+            None => at,
+        });
     }
 
     /// 收掉"最短可见时间已过"的忙碌项（帧驱动每帧开头调用）。返回是否收掉了东西。
@@ -774,52 +515,6 @@ impl Runtime {
             b.cancel = Some(f);
         }
     }
-
-    /// 根据任务 id 找回它挂的忙碌项（进度消息 / 取消按钮用）
-    pub(crate) fn busy_id_of_task(&self, task: u64) -> Option<u64> {
-        self.inner
-            .tasks
-            .borrow()
-            .iter()
-            .find(|t| t.id == task)
-            .and_then(|t| t.busy)
-    }
-}
-
-/// UI 线程侧的框架消息处理。返回 `true` = 框架**完全消费**了这条消息
-/// （不再交给 `ViewModel::on_external`）。
-///
-/// - [`TaskProgress`] ⇒ 更新对应遮罩进度 ⇒ `true`
-/// - [`TaskEvent`] ⇒ 清任务表 + 收遮罩，但**继续**交给用户（让它取载荷）⇒ `false`
-pub(crate) fn on_task_message(rt: &Runtime, window: WindowId, data: &ExternalData) -> bool {
-    if let Some(p) = data.downcast_ref::<TaskProgress>() {
-        if let Some(bid) = rt.busy_id_of_task(p.id) {
-            rt.set_busy_progress(bid, p.done, p.total);
-            if let Some(d) = &p.detail {
-                rt.set_busy_detail(bid, Some(d.clone()));
-            }
-        }
-        return true;
-    }
-    let finished = data
-        .downcast_ref::<TaskEvent>()
-        .map(|ev| ev.id)
-        .or_else(|| data.downcast_ref::<TaskFailed>().map(|ev| ev.id));
-    if let Some(id) = finished {
-        let rec = {
-            let mut tasks = rt.inner.tasks.borrow_mut();
-            let idx = tasks.iter().position(|t| t.id == id);
-            idx.map(|i| tasks.remove(i))
-        };
-        if let Some(rec) = rec
-            && let Some(bid) = rec.busy
-        {
-            rt.end_busy(bid);
-        }
-        rt.mark(window, Dirty::VIEW | Dirty::PRESENT);
-        return false; // 交给用户（TaskEvent 带载荷，TaskFailed 可记日志）
-    }
-    false
 }
 
 // ───────────────────────── BusyToken ─────────────────────────
@@ -862,12 +557,28 @@ impl BusyToken {
         self.rt.set_busy_detail(self.id, Some(detail.into()));
     }
 
-    /// 挂「取消」按钮：点击时执行 `f`（通常在里面 `TaskHandle::cancel()` 或置 `CancelToken`）。
+    /// 挂「取消」按钮：点击时执行 `f`（通常是置调用方自己的取消标志）。
     ///
     /// 遮罩上的按钮文案固定为「取消」；点击后遮罩**不会**自动消失——由 `f` 里的
-    /// 逻辑决定何时 `finish()` / `drop`（任务侧看到取消后自行收敛）。
+    /// 逻辑决定何时 `finish()` / `drop`（工作线程看到标志后自行收敛）。
     pub fn cancellable(&self, f: impl Fn() + 'static) {
         self.rt.set_busy_cancel(self.id, Rc::new(f));
+    }
+
+    /// **定时兜底**：`after` 之后自动收起，即使调用方忘了 `finish()`。
+    ///
+    /// 用途：什么时候回来没人说得准的活儿（网络请求、外部进程、等到超时）——
+    /// "超过 30 秒就别再挡着 UI 了"。
+    ///
+    /// ★ 正是"遮罩的关闭由**调用方或定时器**决定、而不是由某个任务决定"这条：
+    ///   遮罩的存活期是**调用方声明的作用域**，收法有三种，全在调用方手里 ——
+    ///   `finish()`（显式）、`drop`（作用域结束）、`dismiss_after`（定时兜底）。
+    ///
+    /// 多次调用取**最早**者（到点时刻只收紧、不放松）。
+    /// 到点由帧驱动的 [`Runtime::reap_busy`] 收 —— 而"遮罩在"保证了定时唤醒，
+    /// 所以它不依赖外部事件（见 [`crate::WindowCtx::needs_frame`]）。
+    pub fn dismiss_after(&self, after: Duration) {
+        self.rt.set_busy_deadline(self.id, Instant::now() + after);
     }
 
     /// 提前结束（等价于 drop，但语义显式）

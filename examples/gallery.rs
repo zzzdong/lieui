@@ -19,8 +19,11 @@
 //! 12. **图标**（Material Icons 字体：`icon` / `icon_button`）；
 //! 13. **Tab 焦点迁移**（框架默认行为，键盘聚焦画焦点框）。
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lieui::prelude::*;
 use lieui_layout::FlexAlign;
@@ -80,8 +83,12 @@ struct Gallery {
     /// 主题跟随系统（勾选 ⇒ `ThemeMode::System`）
     follow_system: Signal<bool>,
     last_action: Signal<String>,
-    /// 后台任务演示的结果文案
+    /// 后台工作演示的结果文案
     bg_result: Signal<String>,
+    /// ★ 调用方自己持有的遮罩句柄（框架不再管"任务"）
+    bg_busy: RefCell<Option<BusyToken>>,
+    /// ★ 取消协议也是调用方的（框架不再提供 CancelToken）
+    bg_cancel: Arc<AtomicBool>,
     /// 虚拟列表的窗口状态（记住可见窗口起点）
     vl: VirtualListState,
     vl_items: Vec<u32>,
@@ -92,22 +99,45 @@ struct Gallery {
 }
 
 impl Gallery {
-    /// 起一个 ~3 秒的后台任务：演示 loading 遮罩、进度上报、以及遮罩上的「取消」。
+    /// 起一个 ~3 秒的后台工作：演示 loading 遮罩、进度上报、遮罩上的「取消」。
     ///
-    /// 任务跑在**工作线程**（`Ctx::spawn_task_busy` = `Runtime::spawn_task_busy` +
-    /// 当前窗口）——UI 线程全程不卡，遮罩与进度由框架自动渲染（见 `lieui::task`）。
+    /// ★ **没有"任务"概念**：线程、取消、进度、收遮罩全在这里 —— 只用两条原语
+    /// （[`Ctx::poster`] 投递 + [`Ctx::begin_busy`] 遮罩）。框架只负责渲染遮罩。
     fn start_background_demo(&self, cx: &mut Ctx) {
         const TOTAL: usize = 60;
-        cx.spawn_task_busy("正在处理 60 个分片…", |ctx| {
+        let win = cx.window();
+        let poster = cx.poster();
+
+        self.bg_cancel.store(false, Ordering::SeqCst);
+        let busy = cx.begin_busy("正在处理 60 个分片…");
+        {
+            let flag = Arc::clone(&self.bg_cancel);
+            busy.cancellable(move || flag.store(true, Ordering::SeqCst));
+        }
+        *self.bg_busy.borrow_mut() = Some(busy);
+
+        let cancel = Arc::clone(&self.bg_cancel);
+        std::thread::spawn(move || {
             let started = std::time::Instant::now();
+            let mut done = 0usize;
             for i in 1..=TOTAL {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                ctx.progress(i, TOTAL); // 驱动遮罩上的进度条
-                if ctx.is_cancelled() {
-                    return format!("已取消（处理到 {i}/{TOTAL}）");
+                done = i;
+                // 进度 = 投递一条消息（顺带唤醒 UI 线程）
+                let _ = poster.post(win, BgProgress { i, total: TOTAL });
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = poster.post(win, BgDone(format!("已取消（处理到 {i}/{TOTAL}）")));
+                    return;
                 }
             }
-            format!("完成 {TOTAL} 个分片，耗时 {} ms", started.elapsed().as_millis())
+            let _ = done;
+            let _ = poster.post(
+                win,
+                BgDone(format!(
+                    "完成 {TOTAL} 个分片，耗时 {} ms",
+                    started.elapsed().as_millis()
+                )),
+            );
         });
     }
 
@@ -234,13 +264,30 @@ impl Gallery {
     }
 }
 
+/// 工作线程回传的进度（调用方自己的消息类型）
+struct BgProgress {
+    i: usize,
+    total: usize,
+}
+
+/// 工作线程回传的最终文案
+struct BgDone(String);
+
 impl ViewModel for Gallery {
-    /// 后台任务回传：框架**先**收尾（清任务表 + 收遮罩），再把 `TaskEvent` 交到这里。
+    /// 后台工作回传：**通道是不透明的** —— 直接取自己的类型，没有框架信封；
+    /// 遮罩也由**调用方**收（框架连"有这么一个工作"都不知道）。
     fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
-        if let Some(ev) = data.downcast_ref::<TaskEvent>()
-            && let Some(msg) = ev.payload.downcast_ref::<String>()
-        {
-            self.bg_result.set(msg.clone());
+        // 一条消息只可能是其中一种 ⇒ 用 downcast_ref 逐个试（downcast 会消耗 data）
+        if let Some(p) = data.downcast_ref::<BgProgress>() {
+            if let Some(b) = self.bg_busy.borrow().as_ref() {
+                b.set_progress(p.i, p.total);
+            }
+        } else if let Some(d) = data.downcast_ref::<BgDone>() {
+            self.bg_result.set(d.0.clone());
+            self.bg_cancel.store(false, Ordering::SeqCst);
+            if let Some(t) = self.bg_busy.borrow_mut().take() {
+                t.finish();
+            }
         }
     }
 
@@ -533,7 +580,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sub_open: Signal::new(&rt, false),
         follow_system: Signal::new(&rt, false),
         last_action: Signal::new(&rt, String::new()),
-        bg_result: Signal::new(&rt, "（还没跑过后台任务）".to_string()),
+        bg_result: Signal::new(&rt, "（还没跑过后台工作）".to_string()),
+        bg_busy: RefCell::new(None),
+        bg_cancel: Arc::new(AtomicBool::new(false)),
         vl: VirtualListState::new(&rt),
         vl_items: (0..10_000).collect(),
         vl_picked: Signal::new(&rt, HashSet::new()),

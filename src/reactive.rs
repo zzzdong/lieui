@@ -98,14 +98,16 @@ pub(crate) struct RuntimeInner {
     pub(crate) theme_mode: Cell<crate::theme::ThemeMode>,
     /// 操作系统的深色状态（平台层上报；`System` 模式下据此选预设）
     pub(crate) system_dark: Cell<bool>,
-    /// 跨线程唤醒器（平台层进入事件循环时注入；未注入 = 本地队列模式）
-    pub(crate) waker: RefCell<crate::task::WakerSlot>,
-    /// 后台任务表（取消标志、所属窗口、是否挂遮罩）
-    pub(crate) tasks: RefCell<Vec<crate::task::TaskRecord>>,
+    /// **跨线程投递中心**（见 [`crate::task::Poster`]）。
+    ///
+    /// 平台层进入事件循环时把 `waker` 装进去（见 `Runtime::set_waker`）；
+    /// 未装 = 本地队列模式。★ 它是**共享的 `Arc`**，所以先 clone 出去的
+    /// 投递句柄也会立刻看见后装入的平台 waker —— 这是 A6 的结构性修复。
+    pub(crate) poster: crate::task::Poster,
     /// 每窗口的「忙碌」项（loading 遮罩的来源；空 = 没有遮罩）
     pub(crate) busy: RefCell<Vec<crate::task::BusyItem>>,
-    /// 任务 / 忙碌项的自增 id
-    pub(crate) next_task_id: Cell<u64>,
+    /// 忙碌项的自增 id（**只有遮罩用**；框架不再管"任务"，所以没有任务 id）
+    pub(crate) next_busy_id: Cell<u64>,
     /// loading 遮罩的**最短可见时间**（`Duration::ZERO` = 不等待，结束即刻收起）。
     /// 见 [`Runtime::set_busy_min_visible`]。
     pub(crate) busy_min_visible: Cell<std::time::Duration>,

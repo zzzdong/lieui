@@ -5794,3 +5794,130 @@ pub fn needs_frame(&self, rt: &Runtime) -> bool {
 - **未做真实 GUI 观察**（需要显示环境）：证据是**逐帧推演 + 变异验证 + 端到端语义复刻**。
 - 端到端那条是**语义复刻**，不是真平台：它验证不了平台那 3 行接线本身，
   但能验证"接线对了之后遮罩确实会自己消失"，以及"只看脏标志时会卡住"。
+
+---
+
+## 2026-10-08 · 移除 lieui 的「task」概念 —— ✅ 完成
+
+### 一、判据（为什么要移除，而不是"看起来复杂"）
+
+四条**可验证**的证据：
+
+| # | 证据 | 位置 |
+|---|---|---|
+| 1 | 框架必须**偷看**用户的通道：`external()` 第一句就是 `if task::on_task_message(..) { return; }` —— 一条定义就是"投递不透明 `Send` 数据"的通道，框架得逐条辨认是不是自己发的 | `window.rs` |
+| 2 | **原语没有出口**：`Runtime::waker()` 在无头模式返回 `None`，`Runtime` 本身是 `Rc` ⇒ **`!Send`**；"从别的线程投递"唯一的门是 `spawn_task` 给的 `TaskCtx` | `task.rs` |
+| 3 | **280/899 行是调用方策略**（线程模型 / 取消 / 进度），且与遮罩**纠缠**：`next_task_id` 是任务与遮罩**共用的同一个计数器**，`busy_id_of_task` 专为"把 task 的进度路由到它挂的遮罩"而存在 | `task.rs` |
+| 4 | **信封泄漏进用户代码**：pdfkit 被迫两层 downcast（先 `TaskEvent` 再自己的 `JobDone`）；框架还硬编码了 `std::thread::spawn` | `pdfkit`、`task.rs` |
+
+### 二、★ 过程中被实测推翻的一个判断
+
+上一轮我把"补一个 `Runtime::post`"说成**零风险**。写完立刻被编译器打回：
+
+```
+error[E0277]: `std::rc::Rc<RuntimeInner>` cannot be sent between threads safely
+```
+
+**`Runtime` 是 `!Send`** ⇒ 那个"入口"对工作线程**根本没用**。
+→ 必须补的是一个**可 `Send` 的句柄**（[`Poster`]）。
+
+而补句柄又逼出一件事：句柄会在 `set_waker` **之前**就 clone 出去（构造期的线程），
+若它存"当时的唤醒器快照"，平台 waker 后装入就**永远看不见** —— 这正是 **A6**
+（消息积压、界面毫无反应且零报错）。当时的补丁是 `LocalQueue::forward` +
+`attach_platform` 事后 retrofit。
+
+**所以把槽位本身做成共享的**（`Arc<PostHub>`：本地队列 + 后装入的平台 waker）：
+
+> A6 从"打补丁"变成"**结构上不可能**"。
+
+⇒ 上一轮评估里被我判为"收益有限、可以不做"的**单通道改造，因为这条需求变成了必需**。
+（**又一次**：判据要在动手之后再复核，不能只看当时的数据。）
+
+### 三、移除清单
+
+| 删除 | 说明 |
+|---|---|
+| `spawn_task` / `spawn_task_busy` | 框架不再开线程 |
+| `TaskCtx` / `TaskHandle` | 工作线程侧 / UI 线程侧的句柄 |
+| `CancelToken` | 取消协议归调用方 |
+| `TaskEvent` / `TaskFailed` / `TaskProgress` | 框架信封 |
+| `on_task_message` | **偷看通道的入口** |
+| `TaskRecord` + `RuntimeInner.tasks` | 任务表 |
+| `busy_id_of_task` | (2)↔(3) 的耦合缝 —— 随任务一起消失 |
+| `cancel_tasks_of` / `has_tasks` / `Runtime::waker` 的 `Option` 分支 | — |
+| `WakerSlot`（快照枚举） / `LocalQueue::forward` / `attach_platform` retrofit | 换成共享的 `PostHub` |
+
+**保留 / 新增**：
+
+| 提供 | 是什么 |
+|---|---|
+| `Poster`（`Runtime::poster()`） | ★ **可 `Send` 的投递句柄** —— 非 UI 线程的入口 |
+| `Runtime::emit` / `emit_global` / `wake` / `take_pending_external` | UI 线程侧的投递面 |
+| `Emitter<T>` | **降级为 `Poster` 的类型化糖**（原先自己存 `WakerSlot` 快照） |
+| `BusyToken`（`Runtime::begin_busy`） | 遮罩 —— 与任务**无关** |
+| `BusyToken::dismiss_after` | ★ 新增：定时兜底（"等不到结果就别再挡 UI"） |
+| `clear_busy_of` | 关窗清遮罩（`cancel_tasks_of` 留下的唯一一半） |
+
+`RuntimeInner`：15 → **14** 字段；`task.rs`：**897 → 610 行**；`task_tests.rs`：660 → 397。
+
+### 四、`WindowCtx::external` 不再偷看通道
+
+```rust
+// 之前
+if crate::task::on_task_message(rt, self.id, &data) { return; }
+// 现在：一切原样交给 ViewModel::on_external
+```
+
+通道恢复**不透明** —— 这是本次改动里最结构性的一处。
+
+### 五、pdfkit：那"一层"搬到了应用里
+
+`lieui` 不做的事，pdfkit **自己**做：新增 `src/app/tasks.rs`
+
+- `CancelToken`（`Arc<AtomicBool>` 的本地版）
+- `Msg { Progress, Done(Box<JobDone>), Panicked }`
+- `JobCtx { poster, win, cancel }`（替代 `TaskCtx`）
+- `AppVm::spawn_job(cx, label, work)` —— 与旧 `cx.spawn_task_busy` **同形**，
+  所以 13 个调用点是一次**文本替换**（`cx.spawn_task_busy(` → `self.spawn_job(cx, `）
+- `AppVm::on_job_message` —— **一层** downcast；遮罩在"收到结果"时由**调用方**收
+
+pdfkit：`cargo test` 49 通过、`clippy --all-targets` exit 0。
+
+### 六、★ 边界把关交给**编译器**：`tests/raw_task.rs`
+
+新增集成测试（`tests/` **只能看到公开 API**），搭出"后台工作 + 遮罩 + 进度 + 取消 + 结果回传"：
+
+> 如果原语不够用（缺投递入口 / 遮罩句柄不可从外部构造），**这个文件根本编译不过**。
+> ⇒ "层划对了没有"不再靠约定，而是编译期约束。
+
+3 条测试：正向（纯原语跑通）、**反向**（没人说结束 ⇒ 遮罩一直在）、
+定时兜底（`dismiss_after` 救回"永远等不到结果"）。
+
+### 七、验证
+
+| 项目 | 检查 | 结果 |
+|---|---|---|
+| lieui | `cargo test --workspace` | **20 个二进制全 ok / 562 条**（新增 `raw_task`） |
+| lieui | `clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| lieui | `fmt --check` / `build --examples` | 0 处差异 / exit 0 |
+| **pdfkit** | `cargo test` | **49 通过** |
+| **pdfkit** | `cargo clippy --all-targets` | exit 0 |
+
+### 八、教训（三条，都来自本批）
+
+1. **"零风险"的小改动，可能因为一个 `Send` 约束变成结构性改动** ——
+   我说 `Runtime::post` 零风险时，漏了 `Runtime` 是 `Rc`。**编译器的第一次拒绝就是信息**。
+2. **需求会反过来给旧结论定性**：单通道改造上一轮被判"收益有限"，
+   这一轮因为"入口必须对工作线程可用"而变成**必需**。
+   ⇒ 记录结论时要写清**它依赖什么前提**，否则前提一变结论就误导人。
+3. **"原语够不够用"应当由编译器回答**，而不是由设计文档回答 ——
+   `tests/` 只能看公开 API，所以它是天然的边界探针。
+
+### 九、下一步（未做）
+
+- `refactor-plan` 里 **D51**（`RuntimeInner` 杂物抽屉）因此瘦了一圈（15 → 14），
+  但**主体仍未拆**（前置的 per-node 失效信号未就位，见早前判断）。
+- `D52`（组件行为归位）现在更没必要做了：`track.rs` 里的 `input_*` / `slider_drag_to`
+  等是**保留树自己的状态机**，与"任务概念"无关。
+- 「便利层」的归处在 `examples/background_task.rs`（已重写为纯原语版）与
+  pdfkit 的 `src/app/tasks.rs` —— 两者都是**活的模板**。
