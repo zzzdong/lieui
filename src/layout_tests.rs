@@ -624,3 +624,143 @@ fn input_desired_size_uses_placeholder_when_empty() {
         n.desired.width
     );
 }
+
+/// ======================================================================
+/// D-a 前置护栏：`build()` 必须是**纯函数**（同样的树 ⇒ 同样的结果）
+/// ======================================================================
+///
+/// ## 为什么这是缓存的前提
+///
+/// 后续要做**边界级 FlexNode 树缓存**：整棵树构建一次，之后命中就复用。
+/// 这只在 `build()` 是纯函数时成立 —— 若同样的 `Track` 能构建出**不同**的
+/// `FlexNode`，那"复用上一次的结果"就会产出错误布局，而且**不报错**。
+///
+/// ## 为什么现在写
+///
+/// 本项目此前的 D52失败教训：**搬移/缓存前必须有测试证明"结果不变"**。
+/// 没有这条，出了问题无法区分是"搬错了"还是"本来就不确定"。
+#[cfg(test)]
+mod build_purity {
+    use super::*;
+    use crate::track::Kind;
+
+    /// 一棵覆盖各类测量输入的树：容器 / 文本 / 图片 / 嵌套容器。
+    fn sample_tree() -> (Track, NodeId) {
+        let mut t = Track::new();
+        let root = t.create(Kind::Box, None);
+        t.get_mut(root).unwrap().layout.dim = [300.0, 200.0];
+        t.add_root(Layer::Content, None, root);
+
+        let txt = t.create(Kind::Text("hello world".into()), None);
+        t.append_child(root, txt);
+
+        let img = t.create(
+            Kind::Image(std::sync::Arc::new(crate::track::ImageData {
+                width: 32,
+                height: 16,
+                rgba: Vec::new(),
+            })),
+            None,
+        );
+        t.append_child(root, img);
+
+        let inner = t.create(Kind::Box, None);
+        t.get_mut(inner).unwrap().layout.dim = [100.0, 50.0];
+        t.append_child(root, inner);
+        for i in 0..3 {
+            let b = t.create(Kind::Box, None);
+            t.get_mut(b).unwrap().layout.dim = [20.0, 10.0];
+            t.append_child(inner, b);
+            let _ = i;
+        }
+        (t, root)
+    }
+
+    /// 从 `FlexNode` 抽取**影响布局结果**的字段摘要（`FlexNode` 本身无 `PartialEq`）。
+    fn shape(n: &lieui_layout::FlexNode) -> String {
+        let mut s = format!(
+            "style={:?}|intrinsic={:?}|measure={:?}|children=[",
+            n.style,
+            n.intrinsic_size,
+            n.measure_text.as_ref().map(|(t, _)| t.as_str())
+        );
+        for c in &n.children {
+            s.push_str(&format!("{}:{};", c.id, shape(c)));
+        }
+        s.push(']');
+        s
+    }
+
+    /// ★ 核心：`build()` 是纯函数 —— 同一棵树连build 两次，结果**完全一致**。
+    ///
+    /// 这条测试是后续缓存的**前提**：若它不成立，缓存必然产出错误布局。
+    #[test]
+    fn build_is_idempotent() {
+        let (t, root) = sample_tree();
+        let a = build(&t, root);
+        let b = build(&t, root);
+        assert_eq!(shape(&a), shape(&b), "★ build() 必须是纯函数");
+    }
+
+    /// ★ 反向：改了**样式**必须让结果变化 —— 否则缓存会返回过期布局。
+    #[test]
+    fn build_reflects_style_change() {
+        let (mut t, root) = sample_tree();
+        let before = shape(&build(&t, root));
+        // ★ 默认就是 Column（实测），所以要设成 **Row** 才有变化。
+        //   第一版我设成 Column ⇒ 等于没改 ⇒ 测试失败才发现。
+        t.get_mut(root).unwrap().layout.flex_direction = FlexDirection::Row;
+        let after = shape(&build(&t, root));
+        assert_ne!(before, after, "样式变了，build 结果必须跟着变");
+    }
+
+    /// ★ 反向：改了**文本内容**必须让结果变化。
+    #[test]
+    fn build_reflects_text_change() {
+        let (mut t, root) = sample_tree();
+        let txt = t.children(root)[0];
+        let before = shape(&build(&t, root));
+        t.get_mut(txt).unwrap().kind = Kind::Text("different content".into());
+        let after = shape(&build(&t, root));
+        assert_ne!(before, after, "文本变了，build 结果必须跟着变");
+    }
+
+    /// ★ 反向：**子节点列表**变化必须让结果变化（增删都算）。
+    #[test]
+    fn build_reflects_children_change() {
+        let (mut t, root) = sample_tree();
+        let before = shape(&build(&t, root));
+        let extra = t.create(Kind::Box, None);
+        t.get_mut(extra).unwrap().layout.dim = [7.0, 7.0];
+        t.append_child(root, extra);
+        let after = shape(&build(&t, root));
+        assert_ne!(before, after, "加了子节点，build 结果必须跟着变");
+    }
+
+    /// ★ `visibility = Collapsed` 的子节点被 `layout_children` 过滤掉 ⇒ 结果变化。
+    ///
+    /// 这条是**最容易被漏掉的失效路径**：节点还在树上，只是不参与布局了。
+    #[test]
+    fn build_reflects_collapsed_child() {
+        let (mut t, root) = sample_tree();
+        let txt = t.children(root)[0];
+        let before = shape(&build(&t, root));
+        t.get_mut(txt).unwrap().visibility = crate::track::Visibility::Collapsed;
+        let after = shape(&build(&t, root));
+        assert_ne!(before, after, "Collapsed 子节点退出布局，build 结果必须跟着变");
+    }
+
+    /// ★ 父节点切成滚动容器会**改写子style**（`flex_shrink = 0`）
+    /// —— 这条是最隐蔽的失效路径，父变了而子没变。
+    #[test]
+    fn build_reflects_parent_scroll_rewrite() {
+        let (mut t, root) = sample_tree();
+        let inner = t.children(root)[2];
+        // 先让子节点有可被改写的 style
+        t.get_mut(inner).unwrap().layout.flex_shrink = 1.0;
+        let before = shape(&build(&t, root));
+        t.get_mut(root).unwrap().layout.overflow_scroll = true;
+        let after = shape(&build(&t, root));
+        assert_ne!(before, after, "父节点切��滚动容器会改写子 style，build 结果必须跟着变");
+    }
+}
