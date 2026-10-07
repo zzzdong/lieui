@@ -4715,3 +4715,74 @@ D37 剩下的真问题是"1px 分隔线与文本持续半像素模糊"。按本�
 | `cargo clippy --workspace --all-targets` | exit 0 |
 | `cargo fmt --all --check` | 0 处差异 |
 | `cargo build --examples` | exit 0 |
+
+---
+
+## 2026-10-07 · D52 组件行为归位 —— 尝试后回退（如实记录失败）
+
+### 结论
+
+D52（把 `Track` 里的组件行为方法搬去 `widgets/`）**本轮尝试失败，已回退**。
+工作区回到 `e259dba`（clean），门禁全绿（16 个二进制）。
+G4 测试外置（上一批）**已提交且保留**。
+
+### 为什么回退而不是继续迭代
+
+搬到一半错误数从 41 涨到 58 —— 插入 `track.rs` 时用的锚点
+`Some(cur) }` + `}` **匹配到了 `impl Ancestors` 而不是 `impl Track`**，
+方法插进了错误的 impl 块。要继续得先把 `impl Track` 的边界摸清
+（文件里 `Ancestors` / `Nodes` 等多个 impl 交织），再逐个重新定位。
+
+判断依据：
+- D52 是**纯机械搬移、零功能价值**（不修缺陷、不改行为）；
+- 继续需 3~5 轮编译-修复循环，每轮都可能命中新锚点陷阱；
+- 手上已有 G4 这个**干净且已提交**的成果。
+
+**不为"看起来没完成"而硬撑** —— 半迁移状态留在工作区比回退更危险。
+
+### 暴露的三个真实坑（比结论更值得记）
+
+**1. 切割范围比预期宽：混进了非 input 的方法。**
+计划搬 `input_*`（1540-1845），但区间里还有
+`set_dragging` / `capture_pointer` / `release_pointer` / `captured_by` ——
+它们直接读写 `Track` 的私有字段 `captures`，是**全局指针捕获**
+（滑块拖拽、菜单选中、滚动条拖动都用），**与"是不是输入框"无关**。
+教训：**按行号区间切割前，必须先确认区间内的方法都属于同一职责**。
+
+**2. `replace_in_file` 的锚点必须在正确的 impl 块内。**
+`Some(cur) }` + `}` 在 `track.rs` 里**不唯一** ⇒ 插错 impl。
+用"函数末尾特征"当锚点时，必须额外确认上下文处于哪个 impl。
+
+**3. 工具链拦住了无编码的读回写。**
+`Get-Content` → 修改 → `WriteAllLines` 被拦：
+> Blocked: reading file content without an explicit encoding
+
+正确做法是用**文件编辑工具**（`replace_in_file` / `write_to_file`）。
+此前 PowerShell 搬移成功过若干次，但那是**同编码（UTF-8 无 BOM）**的场景；
+一旦涉及中文注释的读回写就有风险。**这条应该写进项目约定。**
+
+### 如果将来重做（不要按行号切割）
+
+1. **先补测试护栏**：确认 `input_*` 的现有测试覆盖全部 12 个方法，缺的先补
+   —— 搬移是纯机械的，**测试是唯一的正确性保证**。
+2. **一个方法一个方法搬**（12 轮，每轮编译），不要一次搬 12 个
+   —— 后者会让错误信息互相掩盖。
+3. 方法体整块复制到新文件，立刻 `cargo build`，再逐个修签名；
+   确认无误后再删原块。
+4. **调用点分批改**：`widgets/mod.rs` 内的先改，再改 `app.rs` / `platform/mod.rs`。
+5. 搬完立刻 `cargo test --workspace` + `clippy --all-targets`，
+   确认**测试数与搬移前完全一致**（纯搬移的判据）。
+
+### 剩余 D52 清单（供后续参考）
+
+`src/track.rs` 2107 行，待归位：
+
+| 组 | 方法数 | 说明 |
+|---|---|---|
+| `input_*` | 9 pub + 3 私有辅助 | 最大且最内聚，建议第一个搬 |
+| `toggle_checked` / `toggle_switch` / `select_radio` | 3 | checkbox / switch / radio 状态翻转 |
+| `slider_drag_to` | 1 | 滑块拖拽（与 `set_dragging` 成对） |
+
+**不属于 D52、不要动**：`capture_pointer` / `release_pointer` / `captured_by` /
+`set_dragging` —— 已确认是**树级状态**（`Track::captures`）而非组件行为，
+留在 `Track` 是正确的。
