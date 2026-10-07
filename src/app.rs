@@ -230,6 +230,44 @@ impl App {
             .collect()
     }
 
+    /// 帧之间的**非渲染**工作：本地投递队列 → 定时器 / 动画 / `on_tick` →
+    /// 判断**是否需要出一帧**。返回 `true` = 平台层应当 `request_redraw`。
+    ///
+    /// ## 为什么这段在 `App` 而不是平台层
+    ///
+    /// 平台层（`platform::Runner`）需要真实 winit 窗口，**单测里构造不出来** ——
+    /// 而"该不该重绘"恰恰是排障时最需要钉住的一环（见 [`WindowCtx::needs_frame`]
+    /// 文档里那个"遮罩永远收不掉"的缺陷）。放在 `App` 上，它就和 `frame_all`
+    /// 一样可以被无头测试直接驱动、直接断言。
+    ///
+    /// 平台层在 `RedrawRequested` **之外**的唤醒点（`about_to_wait` / `user_event`）
+    /// 调它，拿到 `true` 就请求重绘 —— 少了这一环，定时器回调改了状态却没人画，
+    /// 就是**停帧**。
+    pub fn pump(&mut self, now: Instant) -> bool {
+        let rt = self.rt.clone();
+        let mut did_work = false;
+
+        // 本地投递队列（A6：`run()` 之前 spawn 的任务会往这里投）
+        for (w, data) in rt.take_pending_external() {
+            if let Some(ctx) = self.windows.iter_mut().find(|c| c.id() == w) {
+                ctx.external(&rt, data);
+                did_work = true;
+            }
+        }
+
+        for w in self.windows.iter_mut() {
+            w.animate(now); // 光标闪烁翻相位 / 遮罩卡片标脏（无聚焦输入框时 no-op）
+            did_work |= w.tick(&rt, now);
+            // ★ 遮罩在 ⇒ 必须真的出一帧（判据细节见 `WindowCtx::needs_frame`）。
+            //   少了这一句，"打开文件后 loading 遮罩不消失"就会复现：
+            //   定时唤醒到了、`tick` 没事可做 ⇒ 判定"没事做" ⇒ 不重绘 ⇒
+            //   `frame()` 不跑 ⇒ `Runtime::reap_busy` 不跑 ⇒ 遮罩永远收不掉。
+            did_work |= w.needs_frame(&rt);
+        }
+
+        did_work
+    }
+
     /// 关闭窗口（注销其脏标志，丢弃其保留树）。
     ///
     /// 顺带**取消该窗口的后台任务**并清掉它的忙碌项（否则线程会继续跑到结束、

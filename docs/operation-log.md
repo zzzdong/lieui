@@ -5679,3 +5679,118 @@ if c.len() < MEASURE_CACHE_MAX {
 
 
 
+
+---
+
+## 2026-10-08 · 修 loading 遮罩不自动消失（pdfkit「打开 PDF 后卡住」）—— ✅ 完成
+
+用户报告：**pdfkit 打开 PDF 后，loading 遮罩不自动消失**，停在最后一次进度上报
+的状态（标题「正在打开…」+ 明细「正在生成预览…」），鼠标划过窗口才被顺带重画掉。
+
+「正在生成预览…」是 `jobs.rs` 最后一次进度上报的**明细**（显示在标题下方），
+说明遮罩**卡在任务结束前那一帧**——这直接指向"任务结束后没人再出帧"。
+
+### 一、根因：定时唤醒**不请求重绘**，于是 `frame()` 永不运行
+
+四个环节连成一条链：
+
+| # | 环节 | 事实 |
+|---|---|---|
+| 1 | 任务结束 | `task::end_busy` 配了 `busy_min_visible`（pdfkit 设 **400ms**）时**只置 `hide_at` 就 `return`**，**不 mark 脏**（遮罩要"至少被看见 400ms"） |
+| 2 | 收尾时刻 | 到点由 `Runtime::reap_busy` 收掉 —— 而它**只在 `WindowCtx::frame()` 里调** |
+| 3 | 谁来出帧 | `next_wakeup` 在有遮罩时给 `Some(now + SPIN_PERIOD)`，平台 `WaitUntil` 到点唤醒；但 `about_to_wait` 用的是 `pump()` 的返回值决定"要不要 `request_redraw`" |
+| 4 | ★ 断点 | `pump` 的 `did_work` **只由 `external` / `tick` 置位**。定时唤醒到了、`tick` 没事可做 ⇒ 判定"没事做" ⇒ **不请求重绘** ⇒ `frame()` 永不运行 ⇒ `reap_busy` 永不执行 ⇒ **遮罩永远收不掉** |
+
+**为什么"没有脏标志"是常态**：遮罩的 spinner 相位由**挂钟**算，
+`WindowCtx::animate` 只把卡片标脏 —— 那笔脏记在 `Track` 里，
+**不在 `Runtime` 的脏标志里**。而且 `animate(now)` 的返回值在**两个调用点都被丢弃**
+（`platform/mod.rs` 的 redraw 路径与 pump 路径都是 `ctx.animate(now);`）。
+
+### 二、隐藏的第二半：`reap_busy` 排在 `take_dirty` **之后**
+
+`frame()` 里 `reap_busy` 在 `take_dirty` 之后 ⇒ 它标的那笔脏
+（`VIEW | PRESENT`）要等**下一帧**才被消费。而遮罩一收掉，
+`next_wakeup` 立刻回到 `None`（不再有唤醒源）⇒ **那一帧永远不来**。
+
+两半缺一不可：
+
+- 只修 `pump`：帧会跑，但收尾那帧只标脏不重跑 view ⇒ 遮罩仍在，随后无唤醒源 ⇒ 卡住；
+- 只修次序：压根没有帧来执行 `reap_busy`。
+
+### 三、改动
+
+**① `WindowCtx::frame`** —— `reap_busy` 移到 `take_dirty` **之前**：
+
+```rust
+pub fn frame(&mut self, rt: &Runtime) -> FrameStats {
+    let now = Instant::now();
+    rt.reap_busy(now);                  // ★ 必须在 take_dirty 之前
+    let mut dirty = rt.take_dirty(self.id);
+    ...
+```
+
+**② 新增 `WindowCtx::needs_frame(&Runtime) -> bool`** —— "要不要出帧"的**唯一判据**：
+
+```rust
+pub fn needs_frame(&self, rt: &Runtime) -> bool {
+    rt.is_busy(self.id) || !rt.peek_dirty(self.id).is_empty()
+}
+```
+
+**③ `App::pump(now) -> bool`** —— 把"帧之间的非渲染工作 + 要不要出帧"
+从平台层**下沉到 `App`**，平台那层只做委托。
+
+理由：平台层要真实 winit 窗口、**单测里构造不出来**，而"该不该重绘"正是
+这个 bug 的唯一入口。放到 `App` 上就和 `frame_all` 一样可以被无头测试直接驱动。
+
+**④ `platform` 三处统一问 `needs_frame`** —— `pump` / `user_event` / `window_event`
+此前**各写各的**（`user_event` 与 `window_event` 各有一份重复的
+`contains(PRESENT|PAINT|VIEW)`），且**都没算遮罩**。现在三处同一个判据。
+
+### 四、测试（3 条，全部变异验证）
+
+| 测试 | 钉住什么 | 变异 | 结果 |
+|---|---|---|---|
+| `busy_overlay_is_reaped_by_the_first_frame_after_the_min_visible_window` | ★ 到点后**第一帧**就收掉（旧实现要两帧，而第二帧永不来） | `reap_busy` 移回 `take_dirty` 之后 | **FAILED** ✓ |
+| `pump_reports_work_while_an_overlay_pends_even_without_dirty` | ★ 脏标志为空、只有遮罩时 `App::pump` 仍须为 `true` | 删掉 `did_work \|= w.needs_frame(..)` | **FAILED** ✓ |
+| `overlay_clears_from_pump_and_frame_alone_with_no_other_events` | ★★★ **端到端**：复刻平台事件循环（`pump` → `frame_all` → `sleep(SPIN_PERIOD)`），**不喂任何输入事件**，遮罩必须自己消失 | 同上 | **FAILED** ✓（`跑了 0 帧`） |
+
+**第 2、3 条特意断言**入口**而不是辅助方法**：`needs_frame` 只是判据，
+**接线**（`pump` 有没有用它）才是缺陷所在 —— 所以测试直接打 `App::pump`，
+并特意注明"删掉 `App::pump` 里那一句就会立刻失败"。
+
+### 五、★ 为什么原来的测试没抓到
+
+现有的 `a_fast_busy_section_still_shows_the_overlay` 是：
+**手工**调 `rt.reap_busy(±400ms)` 再 `frame_all()`。
+
+它验证了"收得掉"，却**从没走过"由帧自己来收"这条真实路径** ——
+于是上面两半缺陷整整漏掉。
+
+> 又一次同源教训：**测试替被测系统做了它自己该做的事**
+> （手工调 `reap_busy` = 替 `frame()` 完成了收尾），
+> 于是被测的那一段路径**根本没被执行**。
+> 与本项目的"对照组必须确认它走了对照组分支"完全同源。
+
+顺带一个**新测试自身的坑**（当场被抓，已记进注释）：端到端测试最初在循环开头
+就读 `root_by_tag(BUSY_OVERLAY_TAG)` —— 而那时遮罩**还没被声明过**
+（一次 frame 都没跑），于是立刻判定"已消失"、**假通过**。
+靠最后那句 `assert!(frames >= 1)` 才暴露（`frames = 0`）。
+修法：进循环前先 `app.frame_all()` 并断言"遮罩必须已经画出来"。
+
+### 六、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace`（lieui） | **19 个测试二进制全 ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+| `cargo build`（**pdfkit**，path 依赖本仓） | exit 0 |
+| 变异（`frame` 次序 / `pump` 接线） | 3 条测试分别 **FAILED** ✓ |
+
+### 七、诚实说明
+
+- **未做真实 GUI 观察**（需要显示环境）：证据是**逐帧推演 + 变异验证 + 端到端语义复刻**。
+- 端到端那条是**语义复刻**，不是真平台：它验证不了平台那 3 行接线本身，
+  但能验证"接线对了之后遮罩确实会自己消失"，以及"只看脏标志时会卡住"。

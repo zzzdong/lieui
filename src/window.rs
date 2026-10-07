@@ -512,6 +512,17 @@ impl WindowCtx {
 
     /// 跑一帧：消费脏标志 → `view()`/`align` → **重排** → 取走脏区（M3 在这里光栅化 + 上屏）。
     pub fn frame(&mut self, rt: &Runtime) -> FrameStats {
+        let now = Instant::now();
+
+        // ⓪ 忙碌收尾：收掉"最短可见时间"已过的遮罩项（见 `task::set_busy_min_visible`）。
+        //
+        // ★★ 必须在 `take_dirty` **之前**：收尾本身会 `mark(VIEW | PRESENT)`，
+        //   语义是"遮罩没了 ⇒ 本帧就得重画"。放在后面的话这次标脏要等**下一帧**才被
+        //   消费，而遮罩一收掉 `next_wakeup` 立刻回到 `None`（不再有唤醒源）⇒
+        //   那一帧**永远不来** ⇒ 遮罩停在屏幕上。
+        //   实测症状：打开 PDF 后 loading 遮罩不自动消失，鼠标划过窗口才被顺带重画掉。
+        rt.reap_busy(now);
+
         let mut dirty = rt.take_dirty(self.id);
         // ⓪-bis 右键菜单会话的存活检查（**每帧**，理由见 `drop_dead_context_menu`）。
         //   它可能要关掉菜单 ⇒ 那就得**本帧**重跑 view()，否则描述树里还留着注入的弹层。
@@ -523,9 +534,6 @@ impl WindowCtx {
             ..Default::default()
         };
 
-        // ⓪ 忙碌收尾：收掉"最短可见时间"已过的遮罩项（见 `task::set_busy_min_visible`）。
-        // 放在帧首：快任务挂上遮罩后立刻结束的情况，也能保证遮罩被画出来过。
-        rt.reap_busy(Instant::now());
         // 窗口尺寸登记（给 `view()` 里的"适应窗口"一类计算用；晚一帧无妨）
         rt.set_window_size(self.id, self.size);
 
@@ -684,6 +692,31 @@ impl WindowCtx {
             (b, _) => b,
         };
         [spin, blink, self.next_clock].into_iter().flatten().min()
+    }
+
+    /// 此刻本窗口**是否需要出一帧**（平台侧据此决定要不要 `request_redraw`）。
+    ///
+    /// 两个来源，缺一不可：
+    ///
+    /// 1. **脏标志**（`Runtime` 里那份）—— 常规路径；
+    /// 2. **忙碌遮罩** —— ★ 即使一个脏标志都没有，遮罩在就必须出帧：
+    ///    spinner 的相位由**挂钟**算（`WindowCtx::animate` 只负责把卡片标脏，
+    ///    那笔脏在 `Track` 里、不在 `Runtime` 的脏标志里），而"最短可见时间到点"
+    ///    的收尾（`Runtime::reap_busy`）只在 [`Self::frame`] 里跑。
+    ///
+    /// ## 为什么必须抽成一个判据
+    ///
+    /// `next_wakeup` 在有遮罩时会给出定时唤醒（spinner ≈ 30fps）。但**唤醒 ≠ 出帧**：
+    /// 平台侧 `about_to_wait` 用的是"这次唤醒有没有做事 ⇒ 要不要重绘"。
+    /// 定时唤醒到了、却没有任何脏标志、`tick` 也没事可做 ⇒ 判定"没事做"⇒ 不重绘 ⇒
+    /// `frame()` 永不运行 ⇒ `reap_busy` 永不执行 ⇒ **遮罩永远收不掉**
+    /// （实测：打开 PDF 后 loading 遮罩一直挂着，鼠标划过窗口才顺带重画掉）。
+    ///
+    /// 把判据收在这里，是为了让 `about_to_wait` / `user_event` / `window_event`
+    /// 三处**问同一个问题**，而不是各写各的（此前 `user_event` 与 `window_event`
+    /// 各有一份 `contains(PRESENT|PAINT|VIEW)` 的重复判断，且都没算遮罩）。
+    pub fn needs_frame(&self, rt: &Runtime) -> bool {
+        rt.is_busy(self.id) || !rt.peek_dirty(self.id).is_empty()
     }
 
     // ── loading 遮罩（后台任务忙碌时由框架声明）──

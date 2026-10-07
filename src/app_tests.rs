@@ -3027,6 +3027,210 @@ fn a_fast_busy_section_still_shows_the_overlay() {
     }
 }
 
+/// ★★ 到点后的**第一帧**就必须把遮罩收掉 —— 不能拖到第二帧。
+///
+/// ## 为什么必须单独钉这一条
+///
+/// 上面那条测试（`a_fast_busy_section_still_shows_the_overlay`）是**手工**调
+/// `rt.reap_busy(..)` 再 `frame_all()` 的 —— 它验证了"收得掉"，却**从没走过
+/// "由帧自己来收"这条真实路径**，于是下面这个缺陷整整漏掉了：
+///
+/// `reap_busy` 原先在 `frame()` 里排在 `take_dirty` **之后**，它标的那笔脏
+/// （`VIEW | PRESENT`）要等**下一帧**才被消费。而遮罩一收掉，`next_wakeup`
+/// 立刻回到 `None`（平台不再有唤醒源）⇒ **那一帧永远不来** ⇒
+/// 遮罩停在屏幕上。
+///
+/// **实测症状（pdfkit）**：打开 PDF 后 loading 遮罩不自动消失，停在最后一次
+/// 进度上报的状态（标题「正在打开…」+ 明细「正在生成预览…」），
+/// 鼠标划过窗口才被顺带重画掉。
+///
+/// 断言写成"**一帧**之后就没有遮罩"，正是为了让"需要第二帧"的实现失败。
+#[test]
+fn busy_overlay_is_reaped_by_the_first_frame_after_the_min_visible_window() {
+    struct Empty;
+    impl ViewModel for Empty {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.text("主界面");
+            });
+        }
+    }
+
+    let rt = Runtime::new();
+    let min = Duration::from_millis(30);
+    rt.set_busy_min_visible(min);
+    let mut app = App::new(rt.clone());
+    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
+    app.frame_all();
+
+    // 忙碌段：开始后立刻结束 ⇒ 遮罩转入"等最短可见时间"（`hide_at`）
+    let busy = rt.begin_busy(id, "正在打开…");
+    busy.finish();
+
+    // 第一帧：还在最短可见期内 ⇒ 遮罩必须在（否则用户什么都看不到）
+    app.frame_all();
+    assert!(
+        app.window_ctx(id)
+            .unwrap()
+            .track()
+            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+            .is_some(),
+        "最短可见期内遮罩要在"
+    );
+
+    // 越过最短可见时间
+    std::thread::sleep(min + Duration::from_millis(20));
+
+    // ★ 只跑一帧 —— 到点那一帧就该收掉
+    app.frame_all();
+    assert!(
+        app.window_ctx(id)
+            .unwrap()
+            .track()
+            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+            .is_none(),
+        "★ 到点后的第一帧就该收掉遮罩；若 `reap_busy` 排在 `take_dirty` 之后，\
+         这帧只会标脏不重跑 view ⇒ 遮罩仍在，而下一帧永远不会来"
+    );
+    assert!(!rt.is_busy(id), "遮罩项已从 Runtime 收掉");
+}
+
+/// ★★ 平台侧"要不要出帧"的判据：**有遮罩时，即使一个脏标志都没有也必须为真**。
+///
+/// 平台在 `RedrawRequested` 之外的唤醒点（`about_to_wait` / `user_event`）调
+/// [`App::pump`]，拿它当"要不要 `request_redraw`"。若判据只看脏标志，
+/// 定时唤醒就成了空转：唤醒到了、判定"没事做"、不重绘 ⇒ `frame()` 不跑 ⇒
+/// `reap_busy` 不跑 ⇒ **遮罩永远收不掉**（上一帧的画面就一直挂着）。
+///
+/// 为什么"没有脏标志"是**常态**：遮罩的 spinner 相位由**挂钟**算，
+/// `WindowCtx::animate` 只把卡片标脏 —— 那笔脏记在 `Track` 里，
+/// **不在 `Runtime` 的脏标志里**（`rt.peek_dirty` 因此为空）。
+///
+/// ★ 这里直接断言 `App::pump` 的返回值，而不是只断言 `WindowCtx::needs_frame` ——
+///   `needs_frame` 只是判据，**接线**（`pump` 有没有用它）才是缺陷所在。
+///   断言入口，删掉 `App::pump` 里那一句就会立刻失败。
+#[test]
+fn pump_reports_work_while_an_overlay_pends_even_without_dirty() {
+    struct Empty;
+    impl ViewModel for Empty {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.text("主界面");
+            });
+        }
+    }
+
+    let rt = Runtime::new();
+    rt.set_busy_min_visible(Duration::from_millis(300));
+    let mut app = App::new(rt.clone());
+    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
+    app.frame_all();
+
+    // 前提：干净状态
+    assert!(rt.peek_dirty(id).is_empty(), "前提：此刻没有脏标志");
+    assert!(!app.pump(Instant::now()), "无脏、无遮罩 ⇒ 不需要出帧（空闲零功耗）");
+
+    let busy = rt.begin_busy(id, "正在打开…");
+    busy.finish();
+    app.frame_all(); // 消费掉"起遮罩"那笔脏：遮罩已画出来
+
+    // ★ 此刻：脏标志为空，但遮罩还在（等最短可见时间）
+    assert!(
+        rt.peek_dirty(id).is_empty(),
+        "前提：遮罩已画出 ⇒ 脏标志为空（spinner 的脏记在 Track 里）"
+    );
+    assert!(rt.is_busy(id), "遮罩项还在（等最短可见时间到点）");
+    assert!(
+        app.pump(Instant::now()),
+        "★ 有遮罩 ⇒ 必须出一帧：spinner 要转、到点要收尾"
+    );
+
+    // 遮罩收掉 ⇒ 回到"不需要出帧"
+    rt.reap_busy(Instant::now() + Duration::from_millis(400));
+    app.frame_all();
+    assert!(!app.pump(Instant::now()), "遮罩与脏都没了 ⇒ 回到空闲");
+}
+
+/// ★★★ 端到端复刻用户报告：**没有任何输入事件**，只靠"下一次唤醒"驱动，
+/// 遮罩必须自己消失。
+///
+/// 上面两条各自只钉住一半（`frame` 的次序 / `pump` 的判据）。这一条复刻平台的
+/// 事件循环把两半**合起来**跑：
+///
+/// ```text
+/// about_to_wait   →  App::pump()        （非渲染工作 + 要不要出帧）
+/// RedrawRequested →  App::frame_all()   （真的一帧）
+/// ControlFlow::WaitUntil(now + SPIN_PERIOD)  →  sleep
+/// ```
+///
+/// **不加任何鼠标/键盘事件**。任意一半缺失，遮罩都会一直挂在屏幕上 ——
+/// 这正是 pdfkit「打开 PDF 后 loading 遮罩不自动消失」的缺陷
+/// （遮罩停在最后一次进度上报的状态：标题「正在打开…」+ 明细「正在生成预览…」）。
+///
+/// 平台事件循环本身要 winit 窗口、单测里跑不起来，所以这里做的是**语义复刻**：
+/// 它验证不了平台那 3 行接线，但能验证"接线对了之后，遮罩确实会自己消失"。
+#[test]
+fn overlay_clears_from_pump_and_frame_alone_with_no_other_events() {
+    struct Empty;
+    impl ViewModel for Empty {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            v.column(|c| {
+                c.text("主界面");
+            });
+        }
+    }
+
+    let rt = Runtime::new();
+    // 与 pdfkit `run_windowed` 同一个量级（它用 400ms）
+    let min = Duration::from_millis(250);
+    rt.set_busy_min_visible(min);
+    let mut app = App::new(rt.clone());
+    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
+    app.frame_all();
+
+    // 点「打开」：起忙碌任务（`spawn_task_busy("正在打开…", ..)`），
+    // 小文件 ⇒ 任务瞬间结束，遮罩转入"等最短可见时间"
+    let busy = rt.begin_busy(id, "正在打开…");
+    busy.finish();
+
+    let overlay_gone = |app: &App| {
+        app.window_ctx(id)
+            .unwrap()
+            .track()
+            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
+            .is_none()
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut frames = 0u32;
+
+    // ★ 先出一帧把遮罩**真的画出来** —— 否则下面的循环一开头就会读到
+    //   "层根不存在"（它还没被声明过）⇒ 判定"已消失"⇒ 测试假通过。
+    //   （写这条测试时就是这么栽的：变异后 frames=0 却"通过"了，
+    //   靠最后那句 `frames >= 1` 才暴露。）
+    app.frame_all();
+    assert!(!overlay_gone(&app), "最短可见期内遮罩必须已经画出来");
+
+    loop {
+        if app.pump(Instant::now()) {
+            app.frame_all();
+            frames += 1;
+        }
+        if overlay_gone(&app) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "★ 遮罩没有自动消失（跑了 {frames} 帧）。无输入事件时平台若不再出帧，\
+             `Runtime::reap_busy` 就永不执行 —— 遮罩会一直停在屏幕上"
+        );
+        // 模拟 `ControlFlow::WaitUntil(now + SPIN_PERIOD)`（无事件，纯定时唤醒）
+        std::thread::sleep(crate::overlay::SPIN_PERIOD);
+    }
+    assert!(frames >= 1, "至少出过一帧才能撤掉遮罩");
+    assert!(rt.peek_dirty(id).is_empty(), "收尾后脏标志应被本帧消费掉");
+}
+
 /// 整窗图片（PDF 预览那类）不得盖住浮层：遮罩是**后**声明的 Modal 层，必须压在图上。
 ///
 /// 症状来源：光栅层原先把图片 op 统一放到批次末尾 blit（"图片总在最上层"），

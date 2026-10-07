@@ -466,34 +466,18 @@ impl Runner {
         self.schedule_wakeup(el);
     }
 
-    /// 只消费**定时器 / 动画帧 / 本地投递**，**不渲染**。返回"是否有窗口真的做了事"。
+    /// 只消费**定时器 / 动画帧 / 本地投递**，**不渲染**。返回"是否需要出一帧"。
     ///
     /// ★ 主线 B 的闭环（`refactor-plan` §四·主线 B）：这是 `RedrawRequested` **之外**
     /// 的唤醒点（`about_to_wait` / `user_event`）走的路径。
     /// 定时器回调改了状态之后**必须有人请求重绘**，否则画面停在旧帧 ——
     /// "把 `frame` 收敛到单一入口"这个改法如果少了这一环，就会把
     /// "帧跑 3 次"换成**"定时器和动画停帧"**。
+    ///
+    /// ★ 逻辑本体在 [`App::pump`] —— 平台层要真实 winit 窗口，单测里构造不出来，
+    ///   而这段判定是"遮罩卡住"那类 bug 的唯一入口。平台这层只做委托。
     fn pump(&mut self, now: Instant) -> bool {
-        let rt = self.app.runtime();
-        let mut did_work = false;
-
-        // 本地投递队列（A6：`run()` 之前 spawn 的任务会往这里投）
-        for (w, data) in rt.take_pending_external() {
-            if let Some(ctx) = self.app.window_ctx_mut(w) {
-                ctx.external(&rt, data);
-                did_work = true;
-            }
-        }
-
-        let ids: Vec<WindowId> = self.app.windows().iter().map(|w| w.id()).collect();
-        for id in ids {
-            let Some(ctx) = self.app.window_ctx_mut(id) else {
-                continue;
-            };
-            ctx.animate(now); // 光标闪烁翻相位（无聚焦输入框时 no-op）
-            did_work |= ctx.tick(&rt, now);
-        }
-        did_work
+        self.app.pump(now)
     }
 
     /// 没有窗口了就退出事件循环。返回"是否已请求退出"。
@@ -999,18 +983,15 @@ impl ApplicationHandler<AppEvent> for Runner {
                 self.pump(Instant::now());
             }
         }
-        // 唤醒后立刻重绘（避免等下一个周期）
-        let dirty: Vec<WindowId> = self.app.windows().iter().map(|w| w.id()).collect();
-        for id in dirty {
+        // 唤醒后立刻重绘（避免等下一个周期）。
+        // ★ 判据统一走 `WindowCtx::needs_frame`（脏标志 **或** 忙碌遮罩）——
+        //   遮罩在时即使一个脏标志都没有也必须出帧（spinner 相位 / 到点收尾）。
+        let ids: Vec<WindowId> = self.app.windows().iter().map(|w| w.id()).collect();
+        for id in ids {
             let rt = self.app.runtime();
-            if let Some(ctx) = self.app.window_ctx_mut(id) {
-                let d = rt.peek_dirty(id);
-                if d.contains(Dirty::PRESENT) || d.contains(Dirty::PAINT) || d.contains(Dirty::VIEW) {
-                    if let Some(ws) = self.windows.get(&id) {
-                        ws.window.request_redraw();
-                    }
-                    let _ = ctx;
-                }
+            let need = self.app.window_ctx(id).is_some_and(|ctx| ctx.needs_frame(&rt));
+            if need && let Some(ws) = self.windows.get(&id) {
+                ws.window.request_redraw();
             }
         }
     }
@@ -1020,10 +1001,10 @@ impl ApplicationHandler<AppEvent> for Runner {
         // 交互产生的脏 ⇒ 请求重绘（winit 只在需要时才会给 RedrawRequested）
         if let Some(id) = self.app_window_id(os_id) {
             let rt = self.app.runtime();
-            let d = rt.peek_dirty(id);
-            if !d.is_empty()
-                && let Some(ws) = self.windows.get(&id)
-            {
+            // 同一判据（脏标志 **或** 忙碌遮罩）—— 遮罩期间拖拽 / 滚轮同样要出帧，
+            // 否则 spinner 会在交互中冻结。
+            let need = self.app.window_ctx(id).is_some_and(|ctx| ctx.needs_frame(&rt));
+            if need && let Some(ws) = self.windows.get(&id) {
                 ws.window.request_redraw();
             }
         }
