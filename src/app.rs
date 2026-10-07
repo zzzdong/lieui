@@ -282,7 +282,6 @@ impl App {
         self.windows.retain(|w| w.id() != id);
         let removed = self.windows.len() != before;
         if removed {
-            self.rt.clear_busy_of(id);
             self.rt.cancel_timers_of(id);
             self.rt.unregister_window(id);
         }

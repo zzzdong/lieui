@@ -69,11 +69,6 @@ pub struct WindowConfig {
     pub resizable: bool,
     pub decorations: bool,
     pub always_on_top: bool,
-    /// 是否使用框架的 loading 遮罩（默认 `true`）。
-    ///
-    /// 关掉后 `Runtime::begin_busy` 只维护状态，
-    /// 遮罩由用户自己渲染（`Runtime::busy_items` 能拿到忙碌项）。
-    pub auto_busy_overlay: bool,
     /// **整窗重绘模式**（默认 `false` = 用脏区局部重绘）。
     ///
     /// 打开后每帧都整窗重绘：脏区带来的收益（实测 1280×720 下局部重绘比整窗快
@@ -93,7 +88,6 @@ impl Default for WindowConfig {
             resizable: true,
             decorations: true,
             always_on_top: false,
-            auto_busy_overlay: true,
             full_repaint: false,
         }
     }
@@ -102,12 +96,6 @@ impl Default for WindowConfig {
 impl WindowConfig {
     pub fn background(mut self, c: lieui_geom::Color) -> Self {
         self.background = Some(c);
-        self
-    }
-
-    /// 关闭框架的 loading 遮罩（自己渲染，见 `Runtime::busy_items`）
-    pub fn auto_busy_overlay(mut self, on: bool) -> Self {
-        self.auto_busy_overlay = on;
         self
     }
 
@@ -345,14 +333,21 @@ struct CtxMenuSession {
 /// 混在一起会让 `align` 变成"两层状态的管理者"，直接破掉
 /// "结构只由 `view()` 描述"这条不变量。会话与层的关系是：**会话*生产*层，而不是层**。
 ///
-/// ## 三个层的生命周期不同，是刻意而非巧合
+/// ## 两个层的生命周期不同，是刻意而非巧合
 ///
 /// 取决于"内容要不要每帧重算"：
 ///
 /// - **tooltip**：文案静态 ⇒ 框架自己建一次子树、走 `add_framework_root`
 ///   （`align` 不管它，也不重建内容）；
-/// - **右键菜单 / loading 遮罩**：内容每帧都可能变（菜单要捕当下值、忙碌项会变）
-///   ⇒ 每帧**注入**进描述树，由 `align` 增删。
+/// - **右键菜单**：内容每帧可能变（要捕当下值）⇒ 每帧**注入**进描述树，
+///   由 `align` 增删。
+///
+/// ★ 这里曾有过第三个会话：框架内置的 **loading 遮罩**（`RuntimeInner.busy`）。
+/// 它已被移除 —— 那是个**组件**，不是库概念：
+/// 状态归应用（`Signal<bool>`），层由应用在 `view()` 里声明，
+/// 动画走通用的 `Ctx::request_animation` + [`crate::Ctx::damage_key`]。
+/// 移除后剩下的两个会话**都是"元素挂载型"**（挂在 `DescRef` 上），
+/// 形状反而统一了。
 #[derive(Default)]
 struct Sessions {
     /// tooltip 会话（悬停 → 计时 → 浮出；见 [`WindowCtx::sync_tooltip`]）
@@ -365,12 +360,6 @@ struct Sessions {
     /// 跟着焦点节点保留 —— 输入框跨帧存活、时钟随"有没有焦点"而有无。
     /// 没焦点的窗口这里恒为 `None` ⇒ 不产生唤醒 ⇒ 空闲零功耗。
     next_blink: Option<Instant>,
-    /// loading 遮罩的 spinner 实例（跨帧保留；`Color` = 主题 accent，变了才重建）
-    ///
-    /// 为什么要缓存：spinner 的真身是树里的 `Kind::Custom` 节点，对齐按 **Rc 指针**
-    /// 判等（同一 cell = 实例跨帧保留）。而遮罩每帧重新注入 ⇒ 每次新建 cell 会被
-    /// 当成"换数据"而重建动画（一直在原地重新开始转）。所以按 accent 缓存同一个实例。
-    spinner: Option<(crate::geom::Color, crate::custom::CustomCell)>,
 }
 
 /// 光标闪烁周期
@@ -512,17 +501,6 @@ impl WindowCtx {
 
     /// 跑一帧：消费脏标志 → `view()`/`align` → **重排** → 取走脏区（M3 在这里光栅化 + 上屏）。
     pub fn frame(&mut self, rt: &Runtime) -> FrameStats {
-        let now = Instant::now();
-
-        // ⓪ 忙碌收尾：收掉"最短可见时间"已过的遮罩项（见 `task::set_busy_min_visible`）。
-        //
-        // ★★ 必须在 `take_dirty` **之前**：收尾本身会 `mark(VIEW | PRESENT)`，
-        //   语义是"遮罩没了 ⇒ 本帧就得重画"。放在后面的话这次标脏要等**下一帧**才被
-        //   消费，而遮罩一收掉 `next_wakeup` 立刻回到 `None`（不再有唤醒源）⇒
-        //   那一帧**永远不来** ⇒ 遮罩停在屏幕上。
-        //   实测症状：打开 PDF 后 loading 遮罩不自动消失，鼠标划过窗口才被顺带重画掉。
-        rt.reap_busy(now);
-
         let mut dirty = rt.take_dirty(self.id);
         // ⓪-bis 右键菜单会话的存活检查（**每帧**，理由见 `drop_dead_context_menu`）。
         //   它可能要关掉菜单 ⇒ 那就得**本帧**重跑 view()，否则描述树里还留着注入的弹层。
@@ -563,11 +541,11 @@ impl WindowCtx {
             self.view_buf.set_theme(rt.theme());
             self.view_buf.begin();
             self.view.view_erased(&mut self.view_buf);
-            // 后台任务忙碌 ⇒ 追加框架 loading 遮罩层（声明式：忙碌项清空就不声明，
+            // 打开着的右键菜单：**追加**一个弹层（声明式：会话结束就不追加，
             // 下一帧 align 的 stale 清理会把旧层删掉）
-            self.push_busy_overlay(rt);
-            // 打开着的右键菜单：同样**追加**一个弹层（声明式：会话结束就不追加，
-            // 下一帧 align 的 stale 清理会把旧层删掉）
+            //
+            // ★ 这里**只有**这一种"框架替应用注入的层"了：loading 遮罩那套
+            //   （`Runtime::begin_busy` + 每帧注入）已随"它是个组件、不是库概念"移除。
             self.push_context_menu_layer();
             drop(_view_guard);
 
@@ -627,12 +605,6 @@ impl WindowCtx {
     ///
     /// 平台层负责定时唤醒（`ControlFlow::WaitUntil`）；打字会重置相位（光标常亮）。
     pub fn animate(&mut self, now: Instant) -> bool {
-        // loading 遮罩：spinner 相位由挂钟决定 ⇒ 每个动画帧只需把卡片标脏重绘
-        // （不重跑 `view()`，也不重排）
-        if let Some(card) = self.busy_card() {
-            self.track.mark_paint_dirty(card);
-        }
-
         let focused_input = self.track.focused.filter(|f| self.track.input_is_active(*f)).is_some();
 
         if !focused_input {
@@ -674,77 +646,40 @@ impl WindowCtx {
     /// 下一次需要唤醒的时刻（平台层据此设置 `ControlFlow::WaitUntil`）。
     ///
     /// 汇总**所有**唤醒源，平台层不必知道有哪些动画：
-    /// - 框架内部：光标闪烁、tooltip 计时、loading spinner；
+    /// - 框架内部：光标闪烁、tooltip 计时；
     /// - 时钟（[`crate::timer`]）：定时器到期、动画帧（`next_clock`，`frame()` 里刷新）。
     ///
     /// 没有任何来源 ⇒ `None`（平台用 `ControlFlow::Wait`：空闲零功耗）。
     ///
-    /// `rt` 用来问"本窗口还有没有忙碌项"（忙碌项的真相在 [`Runtime`] 里，这里不再
-    /// 缓存一份每帧刷新的快照 —— 缓存意味着多一处可能过期的真相，而调用方手里就有 `rt`）。
-    pub fn next_wakeup(&self, rt: &Runtime) -> Option<Instant> {
-        // 有遮罩（含"挂着等最短可见时间到点"的）⇒ 定时唤醒：驱动 spinner + 到点收尾
-        let spin = rt
-            .is_busy(self.id)
-            .then(|| Instant::now() + crate::overlay::SPIN_PERIOD);
+    /// ★ 早先这个函数还要一个 `&Runtime` 参数，**唯一用途**是问
+    /// `rt.is_busy(self.id)`（框架内置的 loading 遮罩）。那套已移除 ⇒
+    /// 一个**纯窗口级时钟查询**不再需要借运行时。
+    pub fn next_wakeup(&self) -> Option<Instant> {
         let blink = match (self.sess.next_blink, self.sess.tooltip.as_ref()) {
             (Some(b), Some(t)) if t.layer.is_none() => Some(b.min(t.since + TOOLTIP_DELAY)),
             (_, Some(t)) if t.layer.is_none() => Some(t.since + TOOLTIP_DELAY),
             (b, _) => b,
         };
-        [spin, blink, self.next_clock].into_iter().flatten().min()
+        [blink, self.next_clock].into_iter().flatten().min()
     }
 
     /// 此刻本窗口**是否需要出一帧**（平台侧据此决定要不要 `request_redraw`）。
     ///
-    /// 两个来源，缺一不可：
-    ///
-    /// 1. **脏标志**（`Runtime` 里那份）—— 常规路径；
-    /// 2. **忙碌遮罩** —— ★ 即使一个脏标志都没有，遮罩在就必须出帧：
-    ///    spinner 的相位由**挂钟**算（`WindowCtx::animate` 只负责把卡片标脏，
-    ///    那笔脏在 `Track` 里、不在 `Runtime` 的脏标志里），而"最短可见时间到点"
-    ///    的收尾（`Runtime::reap_busy`）只在 [`Self::frame`] 里跑。
-    ///
     /// ## 为什么必须抽成一个判据
     ///
-    /// `next_wakeup` 在有遮罩时会给出定时唤醒（spinner ≈ 30fps）。但**唤醒 ≠ 出帧**：
     /// 平台侧 `about_to_wait` 用的是"这次唤醒有没有做事 ⇒ 要不要重绘"。
-    /// 定时唤醒到了、却没有任何脏标志、`tick` 也没事可做 ⇒ 判定"没事做"⇒ 不重绘 ⇒
-    /// `frame()` 永不运行 ⇒ `reap_busy` 永不执行 ⇒ **遮罩永远收不掉**
-    /// （实测：打开 PDF 后 loading 遮罩一直挂着，鼠标划过窗口才顺带重画掉）。
+    /// 若"有没有做事"的判据与"要不要重绘"的判据**各写各的**，就会出现
+    /// "唤醒到了、判定没事做、不重绘"⇒ **停帧**（回调改了状态却没人画）。
     ///
     /// 把判据收在这里，是为了让 `about_to_wait` / `user_event` / `window_event`
-    /// 三处**问同一个问题**，而不是各写各的（此前 `user_event` 与 `window_event`
-    /// 各有一份 `contains(PRESENT|PAINT|VIEW)` 的重复判断，且都没算遮罩）。
-    pub fn needs_frame(&self, rt: &Runtime) -> bool {
-        rt.is_busy(self.id) || !rt.peek_dirty(self.id).is_empty()
-    }
-
-    // ── loading 遮罩（后台任务忙碌时由框架声明）──
-
-    /// 声明本帧的忙碌遮罩（无忙碌项或窗口关闭了自动遮罩 ⇒ 什么都不做）
-    fn push_busy_overlay(&mut self, rt: &Runtime) {
-        if !self.cfg.auto_busy_overlay {
-            return;
-        }
-        let items = rt.busy_items(self.id);
-        if items.is_empty() {
-            return;
-        }
-        // spinner 实例跨帧保留（主题 accent 变了才重建）
-        let accent = rt.theme().accent;
-        if self.sess.spinner.as_ref().map(|(c, _)| *c) != Some(accent) {
-            self.sess.spinner = Some((accent, crate::custom::cell(crate::overlay::Spinner::new(accent))));
-        }
-        let spinner = self.sess.spinner.as_ref().unwrap().1.clone();
-        crate::overlay::push_busy_overlay(&mut self.view_buf, &items, spinner);
-    }
-
-    /// 遮罩卡片节点（loading 动画的标脏目标）。
+    /// 三处**问同一个问题**（此前那两处各有一份 `contains(PRESENT|PAINT|VIEW)`
+    /// 的重复判断）。
     ///
-    /// 结构固定：tag 层根 → 第一个子节点（卡片）。找不到 ⇒ `None`（没有遮罩）。
-    fn busy_card(&self) -> Option<NodeId> {
-        let root = self.track.root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)?;
-        self.track.children(root.node).first().copied()
+    /// ★ 这里曾有一项 `rt.is_busy(self.id)`：框架内置遮罩"即使零脏标志也要出帧"。
+    /// 那套已移除 —— 自绘动画改由**应用**用 `Ctx::request_animation` 表达
+    /// （RAF：定时唤醒 + `tick` 里 `on_animation` 返回 `true` ⇒ `did_work` 成立）。
+    pub fn needs_frame(&self, rt: &Runtime) -> bool {
+        !rt.peek_dirty(self.id).is_empty()
     }
 
     // ── 事件 ──

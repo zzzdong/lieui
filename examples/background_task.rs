@@ -1,50 +1,93 @@
-//! 后台工作 + loading 遮罩 —— **只用原语自己搭**。
+//! 后台工作 + loading 遮罩 —— **全部由应用实现**。
 //!
 //! ```text
 //! cargo run -p lieui --example background_task
 //! ```
 //!
-//! ## 这个示例在演示一条**边界**
+//! ## 这个示例在演示一条边界
 //!
-//! lieui **不提供"任务"概念**：它不管线程、不管取消协议、不管进度协议、
-//! 也不管"任务完成时收起遮罩"。它只给两样原语：
+//! lieui **不提供"任务"概念，也不提供"遮罩"概念** —— 两者都是**应用的**决定：
 //!
-//! | 原语 | 作用 |
+//! | 谁的事 | 用什么 |
 //! |---|---|
-//! | [`Runtime::poster`] → [`Poster`] | 把 `Send` 数据**投递**回 UI 线程并唤醒（`Runtime` 自己是 `!Send`） |
-//! | [`Runtime::begin_busy`] → [`BusyToken`] | 挂一个 loading 遮罩，**何时收起由你决定** |
+//! | 线程 / 取消 / 进度 | 应用自己（这里 `std::thread` + `AtomicBool` + 自定义消息） |
+//! | 遮罩显示还是消失 | 应用状态 `Signal<bool>` —— **调用者决定** |
+//! | 层从哪来 | `ViewBuf::modal_tagged` —— 在 `view()` 里声明 |
+//! | 每帧重绘自己 | `Ctx::damage_key` + `Ctx::request_animation`（通用机制） |
+//! | 最短可见时间 | `Ctx::set_timeout`（通用机制，不是特例 API） |
+//! | 长什么样 | 本文件的 `Spinner`（自绘 `CustomNode`） |
 //!
-//! 剩下的（起线程 / 取消 / 进度 / 收遮罩）全在这个文件里 —— 也就是"调用方的事"。
-//! 想换线程池、换成 tokio、换成 rayon，只改这一段，**框架一行都不用动**。
+//! 库只给那些**通用**能力。想换线程池 / rayon / tokio，只改 [`Demo::start`] 一段。
 //!
-//! ## 与旧 API 的对照
+//! ## 与旧 API 的对照（那一套已从库里移除）
 //!
-//! | 旧（框架提供的 `spawn_task_busy`） | 现在（本文件） |
+//! | 旧（库内置） | 现在（本文件） |
 //! |---|---|
-//! | 框架 `std::thread::spawn` | 你自己 `std::thread::spawn` |
-//! | 框架的 `CancelToken` | 你自己一个 `Arc<AtomicBool>` |
-//! | `ctx.progress(done, total)` | 你自己投递一条 `Msg::Progress` |
-//! | 载荷套框架的 `TaskEvent` 信封 | 直接投递你自己的 `Msg` |
-//! | 框架"看到任务结束"就收遮罩 | **你收到结果时**收遮罩 |
+//! | `cx.spawn_task_busy(label, \|ctx\| ..)` | `std::thread::spawn` + `poster.post` |
+//! | `ctx.progress(done, total)` | 自定义 `Msg::Progress` |
+//! | `BusyToken` / `begin_busy` | `Signal<bool>` + `view()` 里的 `if` |
+//! | `set_busy_min_visible` | `set_timeout` |
+//! | 库内置的 spinner + 卡片 | 本文件的 `Spinner` + 卡片 DSL |
 //!
 //! 关键机制不变：`Signal` / `Runtime` / `Ctx` 都是 `!Send`，工作线程只能
-//! **投递 + 唤醒**；管道由框架接好（`platform::run` 注入唤醒器，
+//! **投递 + 唤醒**；管道由库接好（`platform::run` 注入唤醒器，
 //! `WindowCtx::external` 在 UI 线程落地）。
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use lieui::prelude::*;
 
-/// 工作线程回传的**调用方自己的消息**（`Send`）
+/// 遮罩层根的标签（**应用自己定的**）
+const BUSY_LAYER: u64 = 0x6261_636b_6772_6f75; // "backgrou"
+/// spinner 节点的 `Key`（`damage_key` 靠它定位；`on_animation` 里拿不到 `NodeId`）
+const SPINNER_KEY: &str = "spinner";
+
+/// 自绘 spinner：相位取自**单调时钟**（挂钟会被 NTP 校时回拨 ⇒ 倒转/跳帧）。
+struct Spinner {
+    started: Instant,
+    color: Color,
+}
+
+impl CustomNode for Spinner {
+    fn intrinsic_size(&self) -> Size {
+        Size::new(18.0, 18.0)
+    }
+
+    fn draw(&self, out: &mut Scene, rect: Rect, transform: Affine) {
+        const N: usize = 3;
+        const CYCLE_MS: u128 = 300;
+        let gap = 3.0_f32;
+        let dot = ((rect.width - gap * (N as f32 - 1.0)) / N as f32)
+            .min(rect.height)
+            .max(1.0);
+        let total = N as f32 * dot + (N as f32 - 1.0) * gap;
+        let x0 = rect.x + (rect.width - total) * 0.5;
+        let y = rect.y + (rect.height - dot) * 0.5;
+        let phase = (self.started.elapsed().as_millis() % (CYCLE_MS * N as u128)) as f32 / CYCLE_MS as f32;
+
+        for i in 0..N {
+            let delta = (phase - i as f32).rem_euclid(N as f32);
+            let k = (1.0_f32 - delta).clamp(0.0, 1.0);
+            let alpha = (70.0 + 185.0 * k) as u8;
+            custom::fill_rect(
+                out,
+                Rect::new(x0 + i as f32 * (dot + gap), y, dot, dot),
+                dot * 0.5,
+                Color::rgba(self.color.r, self.color.g, self.color.b, alpha),
+                transform,
+            );
+        }
+    }
+}
+
+/// 工作线程回传的**调用方自己的消息**
 enum Msg {
-    /// 进度：驱动遮罩上的进度条（框架不知道"进度"是什么）
     Progress { done: usize, total: usize },
-    /// 完成：带结果
     Done(Report),
-    /// 任务体崩了（`catch_unwind` 兜底）—— 这是**调用方**的兜底策略
     Panicked,
 }
 
@@ -55,37 +98,43 @@ struct Report {
     cancelled: bool,
 }
 
+/// 遮罩至少显示这么久（**应用策略**：快活儿也要被看见一下）
+const MIN_VISIBLE: Duration = Duration::from_millis(400);
+
 struct Demo {
     report: Signal<String>,
     done: Signal<u32>,
-    /// ★ 调用方**自己持有**遮罩句柄 ⇒ 收到结果时才收它
-    busy: RefCell<Option<BusyToken>>,
-    /// ★ 取消协议也是调用方的（框架不再提供 `CancelToken`）
+    /// ★ 遮罩"由谁持有"的答案：就是这里 —— 一个普通 `Signal<bool>`
+    loading: Signal<bool>,
+    /// 进度（也是应用状态）
+    progress: Signal<Option<(usize, usize)>>,
+    /// 起始时刻（算最短可见时间；应用状态）
+    started: Cell<Option<Instant>>,
+    /// ★ spinner 实例必须**跨帧留着**：`CustomCell` 按 `Rc` 指针判等，
+    ///   每帧新建会被 `align` 当成"换数据"而重建 ⇒ 动画一直在原地重来。
+    spinner: CustomCell,
+    /// ★ 取消协议也是调用方的（库不再提供 `CancelToken`）
     cancel: Arc<AtomicBool>,
 }
 
 impl Demo {
-    /// 起一个后台工作：**三段全是调用方的东西** —— 线程、取消、遮罩。
+    /// 三段全是应用的东西：线程、取消、遮罩。
     fn start(&self, cx: &mut Ctx) {
         let win = cx.window();
         let poster = cx.poster();
 
-        // ① 遮罩：谁开谁收。这里同时接上「取消」按钮 —— 点它只是置个标志，
-        //    遮罩**不会**自动消失（由 `Msg::Done` 的处理负责收）
+        // ① 遮罩：**调用者决定显示**
         self.cancel.store(false, Ordering::SeqCst);
-        let busy = cx.begin_busy("正在统计 2000 万以内的质数…");
-        {
-            let flag = Arc::clone(&self.cancel);
-            busy.cancellable(move || flag.store(true, Ordering::SeqCst));
-        }
-        *self.busy.borrow_mut() = Some(busy);
+        self.started.set(Some(Instant::now()));
+        self.progress.set(None);
+        self.loading.set(true);
 
         // ② 线程：调用方自己选并发模型（线程池 / rayon / tokio 都行）
         let cancel = Arc::clone(&self.cancel);
         std::thread::spawn(move || {
             // panic 兜底也归调用方：不 catch 的话遮罩就永远挂着了
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let limit = 20_000_000u64;
                 let segments = 40u64;
                 let mut primes = 0usize;
@@ -129,6 +178,23 @@ impl Demo {
             };
         });
     }
+
+    /// 收起遮罩：**调用者决定**；"最短可见时间"用通用的 `set_timeout` 表达。
+    ///
+    /// 库里原先为这件事有个特例 API（`Runtime::set_busy_min_visible`）——
+    /// 它其实就是"到点再置一次状态"。
+    fn finish(self: &Rc<Self>, cx: &mut Ctx) {
+        let Some(t0) = self.started.get() else {
+            return;
+        };
+        let left = MIN_VISIBLE.saturating_sub(t0.elapsed());
+        if left.is_zero() {
+            self.loading.set(false);
+            return;
+        }
+        let me = Rc::clone(self);
+        cx.set_timeout(left, move |_| me.loading.set(false));
+    }
 }
 
 fn is_prime(n: u64) -> bool {
@@ -150,8 +216,8 @@ impl ViewModel for Demo {
         v.column(|c| {
             c.center();
             c.gap(12.0);
-            c.text("后台工作 + loading 遮罩（纯原语）").font_size(18.0);
-            c.text("只用了 Runtime::poster + Runtime::begin_busy")
+            c.text("后台工作 + loading 遮罩（全部由应用实现）").font_size(18.0);
+            c.text("库只提供投递 / 定时 / 层 / 自绘这些通用能力")
                 .font_size(12.0)
                 .color(Color::rgba(0x66, 0x66, 0x66, 255));
             c.text(format!("完成次数：{}", self.done.get())).font_size(13.0);
@@ -161,19 +227,45 @@ impl ViewModel for Demo {
                 move |cx| me.start(cx)
             });
         });
+
+        // ★ 遮罩 = 一句普通的声明式代码（**库不知道"遮罩"是什么**）
+        if self.loading.get() {
+            let spinner = self.spinner.clone();
+            let progress = self.progress.get();
+            v.modal_tagged(BUSY_LAYER, |m| {
+                m.center();
+                m.container(|card| {
+                    card.width(300.0);
+                    card.padding(20.0);
+                    card.background(Color::WHITE);
+                    card.radius(12.0);
+                    card.layout(|l| l.flex_shrink = 0.0);
+                    card.row(|r| {
+                        r.gap(10.0);
+                        r.custom(&spinner).key(SPINNER_KEY);
+                        r.column(|col| {
+                            col.gap(4.0);
+                            col.text("正在统计 2000 万以内的质数…");
+                            col.text(match progress {
+                                Some((d, t)) => format!("{d} / {t} 段"),
+                                None => "准备中…".to_string(),
+                            })
+                            .font_size(12.0)
+                            .color(Color::rgba(0x66, 0x66, 0x66, 255));
+                        });
+                    });
+                });
+            });
+        }
     }
 
     /// 消息落地：**只有一层 downcast**（没有框架信封）
-    fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
+    fn on_external(self: &Rc<Self>, cx: &mut Ctx, data: ExternalData) {
         let Some(msg) = data.downcast::<Msg>() else {
             return;
         };
         match msg {
-            Msg::Progress { done, total } => {
-                if let Some(b) = self.busy.borrow().as_ref() {
-                    b.set_progress(done, total);
-                }
-            }
+            Msg::Progress { done, total } => self.progress.set(Some((done, total))),
             Msg::Done(r) => {
                 self.report.set(format!(
                     "上批结果：{} 个质数，耗时 {} ms{}",
@@ -183,18 +275,23 @@ impl ViewModel for Demo {
                 ));
                 self.done.update(|d| *d += 1);
                 self.cancel.store(false, Ordering::SeqCst);
-                // ★ 遮罩由**调用方**收：框架连"有这么一个工作"都不知道
-                if let Some(t) = self.busy.borrow_mut().take() {
-                    t.finish();
-                }
+                // ★ 遮罩由**调用方**收：库连"有这么一个工作"都不知道
+                self.finish(cx);
             }
             Msg::Panicked => {
                 self.report.set("工作线程崩了（调用方兜底）".to_string());
-                if let Some(t) = self.busy.borrow_mut().take() {
-                    t.finish();
-                }
+                self.finish(cx);
             }
         }
+    }
+
+    /// RAF：遮罩在就一直要下一帧，并且**只**把自己的节点标脏。
+    fn on_animation(self: &Rc<Self>, cx: &mut Ctx, _now: Instant, _dt: Duration) {
+        if !self.loading.get() {
+            return; // 收起后不再请求 ⇒ 自然停帧（空闲零功耗）
+        }
+        cx.damage_key(SPINNER_KEY); // ★ 不是 `damage_all`
+        cx.request_animation();
     }
 }
 
@@ -202,17 +299,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = Runtime::new();
     let mut app = App::new(rt.clone());
 
+    let accent = rt.theme().accent;
     let vm = Rc::new(Demo {
         report: Signal::new(&rt, "还没跑过".to_string()),
         done: Signal::new(&rt, 0),
-        busy: RefCell::new(None),
+        loading: Signal::new(&rt, false),
+        progress: Signal::new(&rt, None),
+        started: Cell::new(None),
+        spinner: custom::cell(Spinner {
+            started: Instant::now(),
+            color: accent,
+        }),
         cancel: Arc::new(AtomicBool::new(false)),
     });
 
     let _id = app.window_erased(
         WindowConfig::new()
-            .title("lieui · 后台工作（纯原语）")
-            .size(600.0, 380.0),
+            .title("lieui · 后台工作（应用自实现）")
+            .size(640.0, 400.0),
         lieui::app::erased(Rc::clone(&vm)),
     );
 

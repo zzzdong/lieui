@@ -19,7 +19,6 @@
 //! 12. **图标**（Material Icons 字体：`icon` / `icon_button`）；
 //! 13. **Tab 焦点迁移**（框架默认行为，键盘聚焦画焦点框）。
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -85,8 +84,10 @@ struct Gallery {
     last_action: Signal<String>,
     /// 后台工作演示的结果文案
     bg_result: Signal<String>,
-    /// ★ 调用方自己持有的遮罩句柄（框架不再管"任务"）
-    bg_busy: RefCell<Option<BusyToken>>,
+    /// ★ 遮罩状态：**就是应用状态**（"显示还是消失"由调用者决定）
+    bg_loading: Signal<bool>,
+    /// 进度（也是应用自己的协议；库不知道"进度"是什么）
+    bg_progress: Signal<Option<(usize, usize)>>,
     /// ★ 取消协议也是调用方的（框架不再提供 CancelToken）
     bg_cancel: Arc<AtomicBool>,
     /// 虚拟列表的窗口状态（记住可见窗口起点）
@@ -108,13 +109,10 @@ impl Gallery {
         let win = cx.window();
         let poster = cx.poster();
 
+        // 遮罩：**调用者决定显示**（库只提供 `modal_tagged` 这样的通用层能力）
         self.bg_cancel.store(false, Ordering::SeqCst);
-        let busy = cx.begin_busy("正在处理 60 个分片…");
-        {
-            let flag = Arc::clone(&self.bg_cancel);
-            busy.cancellable(move || flag.store(true, Ordering::SeqCst));
-        }
-        *self.bg_busy.borrow_mut() = Some(busy);
+        self.bg_progress.set(Some((0, TOTAL)));
+        self.bg_loading.set(true);
 
         let cancel = Arc::clone(&self.bg_cancel);
         std::thread::spawn(move || {
@@ -264,6 +262,9 @@ impl Gallery {
     }
 }
 
+/// 遮罩层根的标签（**应用自己定的**）
+const BG_LAYER: u64 = 0x6761_6c6c_5f62_6775; // "gall_bgu"
+
 /// 工作线程回传的进度（调用方自己的消息类型）
 struct BgProgress {
     i: usize,
@@ -279,19 +280,40 @@ impl ViewModel for Gallery {
     fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
         // 一条消息只可能是其中一种 ⇒ 用 downcast_ref 逐个试（downcast 会消耗 data）
         if let Some(p) = data.downcast_ref::<BgProgress>() {
-            if let Some(b) = self.bg_busy.borrow().as_ref() {
-                b.set_progress(p.i, p.total);
-            }
+            self.bg_progress.set(Some((p.i, p.total)));
         } else if let Some(d) = data.downcast_ref::<BgDone>() {
             self.bg_result.set(d.0.clone());
             self.bg_cancel.store(false, Ordering::SeqCst);
-            if let Some(t) = self.bg_busy.borrow_mut().take() {
-                t.finish();
-            }
+            self.bg_loading.set(false); // ★ 遮罩由调用方收起
         }
     }
 
     fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+        // ★ 遮罩 = 一句普通的声明式代码（**库不知道"遮罩"是什么**）
+        if self.bg_loading.get() {
+            let p = self.bg_progress.get();
+            v.modal_tagged(BG_LAYER, |m| {
+                m.center();
+                m.container(|card| {
+                    card.width(300.0);
+                    card.padding(20.0);
+                    card.background(Color::WHITE);
+                    card.radius(12.0);
+                    card.layout(|l| l.flex_shrink = 0.0);
+                    card.column(|col| {
+                        col.gap(6.0);
+                        col.text("正在处理 60 个分片…").font_size(14.0);
+                        col.text(match p {
+                            Some((i, total)) => format!("{i} / {total}"),
+                            None => "准备中…".to_string(),
+                        })
+                        .font_size(12.0)
+                        .color(Color::rgba(0x66, 0x66, 0x66, 255));
+                    });
+                });
+            });
+        }
+
         // 唯一的内容根：菜单栏（固定）+ 可滚动主体
         v.column(|c| {
             // ── 顶部：菜单栏 ──
@@ -581,7 +603,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         follow_system: Signal::new(&rt, false),
         last_action: Signal::new(&rt, String::new()),
         bg_result: Signal::new(&rt, "（还没跑过后台工作）".to_string()),
-        bg_busy: RefCell::new(None),
+        bg_loading: Signal::new(&rt, false),
+        bg_progress: Signal::new(&rt, None),
         bg_cancel: Arc::new(AtomicBool::new(false)),
         vl: VirtualListState::new(&rt),
         vl_items: (0..10_000).collect(),

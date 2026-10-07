@@ -38,19 +38,23 @@
 //! 框架控制消息（开窗/关窗）单独走 `Ctx::request`（`RequestQueue`），别拿它当事件总线。
 //!
 //! **一个时钟**：定时器与动画帧统一在 [`timer`]，平台层只问
-//! `WindowCtx::next_wakeup()`（= 光标闪烁 / tooltip / 忙碌 spinner / 定时器 / 动画帧 的最早值）；
+//! `WindowCtx::next_wakeup()`（= 光标闪烁 / tooltip / 定时器 / 动画帧 的最早值）；
 //! 没有唤醒源就是 `ControlFlow::Wait`（空闲零功耗）。
 //!
 //! ## 后台工作与 loading 遮罩（速览）
 //!
-//! ★ **lieui 不提供"任务"概念**：它不替你开线程、不定取消协议、不管进度协议、
-//! 也不管"任务完成时收起遮罩"。它只给两条原语 —— 因为线程模型是**应用的**决定
-//! （线程池 / rayon / tokio / 自己的 reactor 都行），框架替不了也不该替。
+//! ★ **lieui 不提供"任务"概念，也不提供"遮罩"概念** —— 两者都是**应用的**决定：
+//!
+//! - **任务 / 线程模型**：线程池 / rayon / tokio / 自己的 reactor 都行；
+//! - **遮罩**：它是个**组件**（状态 + 一句声明式代码），状态归应用。
+//!
+//! 库只给三条**通用**原语：
 //!
 //! | 原语 | 作用 |
 //! |---|---|
 //! | [`Runtime::poster`] → [`Poster`] | 把 `Send` 数据**投递**回 UI 线程并唤醒（`Runtime` 自己是 `!Send`，进不了线程） |
-//! | [`Runtime::begin_busy`] → [`BusyToken`] | 挂一个 loading 遮罩，**何时收起由调用方决定**（`finish` / `drop` / `dismiss_after` 定时兜底） |
+//! | [`Ctx::request_animation`] | "我要下一帧"（RAF；配合 [`Ctx::damage_key`] 只重绘自己） |
+//! | `Ctx::set_timeout` / `ViewBuf::modal_tagged` | 定时；声明一个阻断输入的 Modal 层 |
 //!
 //! 下面这段是**可编译的** doc test（`no_run`：需要真实窗口环境才能跑通）。
 //! 它同时承担示例与"API 形状守卫"两职——签名变了这里会编译失败。
@@ -63,13 +67,7 @@
 //! # fn demo(cx: &mut Ctx, n: usize, cancel: Arc<AtomicBool>) {
 //! let win = cx.window();
 //! let poster = cx.poster();          // 可 `Send` 的投递句柄
-//!
-//! // 遮罩：谁开谁收（这里同时接上「取消」按钮）
-//! let busy = cx.begin_busy("正在导出…");
-//! busy.cancellable({
-//!     let cancel = Arc::clone(&cancel);
-//!     move || cancel.store(true, Ordering::SeqCst)
-//! });
+//! let working = Signal::new(&Runtime::new(), true);   // ★ 遮罩状态：就是应用状态
 //!
 //! // 线程：调用方自己选并发模型
 //! std::thread::spawn(move || {
@@ -79,12 +77,16 @@
 //!     }
 //!     let _ = poster.post(win, Report(n));
 //! });
-//! # let _ = busy;   // 真实代码里由「收到结果」那条路径 `finish()` 掉
+//! # let _ = (working, cancel);
 //! # }
 //! ```
 //!
 //! 结果在 `on_external` 里取：**一层** `data.downcast::<Report>()` ——
 //! 通道是不透明的，没有框架信封要剥。
+//!
+//! 遮罩则完全在 `view()` 里：`if self.working.get() { v.modal_tagged(TAG, |m| …) }`。
+//! 完整可跑的版本见 `tests/spinner_modal.rs`（**只用公开 API**，含自绘 spinner 的
+//! 每帧重绘与"最短可见时间"）。
 //!
 //! ## 待补（里程碑）
 //!
@@ -104,7 +106,6 @@ pub mod icon;
 pub mod input;
 pub mod layout;
 pub mod menu;
-pub(crate) mod overlay;
 #[cfg(feature = "winit")]
 pub mod platform;
 pub mod reactive;
@@ -139,7 +140,7 @@ pub use render::{
     damage_batches,
 };
 pub use style::{ImageFit, ImageStyle, PaintStyle, ShadowSpec, TextStyle};
-pub use task::{BusyItem, BusyToken, Poster, Waker};
+pub use task::{Poster, Waker};
 pub use timer::{FRAME_PERIOD, TimerHandle};
 pub use track::{
     Anchor, Axis, Flags, FocusPolicy, FocusState, ImageData, InteractionState, Key, Kind, KindDesc, KindTag, Layer,
@@ -167,7 +168,7 @@ pub mod prelude {
     pub use crate::reactive::{Runtime, Signal, act, act1};
     pub use crate::render::scene::Scene;
     pub use crate::style::{PaintStyle, ShadowSpec, TextStyle};
-    pub use crate::task::{BusyItem, BusyToken, Poster, Waker};
+    pub use crate::task::{Poster, Waker};
     pub use crate::theme::{Theme, ThemeMode};
     pub use crate::timer::{FRAME_PERIOD, TimerHandle};
     pub use crate::track::{AnchorTarget, FocusState, ImageData, Key, Layer, NodeId, Placement, Transform, Visibility};

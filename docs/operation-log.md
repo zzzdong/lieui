@@ -6060,3 +6060,93 @@ step 0/1 已完成，且证明了"**删掉 busy 不会丢能力**"。剩下：
    和元素外挂"，实测**两者都已存在**（6 个 Layer 变体 + 两个元素挂载 session）。
 3. **真正的缺口往往不在被质疑的地方** —— 用户的怀疑指向 busy，但实测查出的缺口
    是"自绘节点无法请求重绘"（`damage_key`），一个**与 busy 无关的通用能力**。
+
+---
+
+## 2026-10-08 · 移除 lieui 的「loading 遮罩」（它是个组件，不是库概念）—— ✅ 完成
+
+用户判定：`BusyItem` / `BusyToken` 这套**不该内置在 UI 库里，它属于 widget 层级**。
+选定形态 **①**：库**不发布**任何遮罩渲染件 —— 全删，由应用自己写。
+
+### 一、判据：它污染了**核心帧循环**
+
+| # | 位置 | 事实 |
+|---|---|---|
+| 1 | `WindowCtx::frame` | **帧首无条件**调 `rt.reap_busy(now)` —— 库的主循环知道什么是"忙碌项" |
+| 2 | `WindowCtx::frame` | `view()` 之后无条件 `push_busy_overlay(rt)` —— **库注入用户没声明的 UI** |
+| 3 | `WindowCtx::next_wakeup` | ★★ `&Runtime` 参数的**唯一用途**就是 `rt.is_busy(id)` —— 一个**纯窗口级时钟查询**被迫借运行时 |
+| 4 | `WindowCtx::needs_frame` | 判据里混进 `is_busy` |
+| 5 | `WindowCtx::animate` | 里 `busy_card()` → 标脏 spinner 卡片 |
+| 6 | `WindowConfig` | `auto_busy_overlay` —— 一个**组件**的开关出现在**窗口配置**里 |
+| 7 | `RuntimeInner` | 3 个字段：`busy` / `next_busy_id` / `busy_min_visible` |
+| 8 | `task.rs` | `BusyItem`(7 字段) + `BusyToken`(7 方法) + `Runtime` 13 个方法 |
+
+**体量**：`overlay.rs` **170 行** + `task.rs` 里 busy 占 **343 行**（56%）+ `window.rs` 8 处帧触点。
+
+而「遮罩不自动消失」那个缺陷的形状**直接来自这个架构**（"库要保证某个组件的动画帧"
+⇒ `reap_busy` 只在 `frame()` 里跑 ⇒ 定时唤醒不重绘就卡住）。
+
+### 二、删除清单（16 文件，**净 −1220 行**）
+
+| 删除 | 说明 |
+|---|---|
+| `src/overlay.rs` + `overlay_tests.rs` | 整个模块（内置遮罩渲染 + Spinner + SPIN_PERIOD + BUSY_OVERLAY_TAG） |
+| `BusyItem` / `BusyToken` | 两个类型（含 7 个方法） |
+| `Runtime` 13 个方法 | `begin_busy` / `end_busy` / `reap_busy` / `is_busy` / `busy_items` / `clear_busy_of` / `set_busy_*`（5 个）/ `busy_min_visible` / `set_busy_deadline` |
+| `RuntimeInner` 3 字段 | `busy` / `next_busy_id` / `busy_min_visible`（**14 → 13**） |
+| `Ctx::begin_busy` | — |
+| `WindowConfig::auto_busy_overlay` + builder | 一个组件的开关不该在窗口配置里 |
+| `WindowCtx` 8 处 | 帧首收尾 / 每帧注入层 / `next_wakeup` 的 spinner 分支 / `needs_frame` 的 busy 项 / `animate` 的卡片标脏 / `push_busy_overlay` / `busy_card` / `Sessions.spinner` |
+| `next_wakeup(&Runtime)` → `next_wakeup()` | ★ 参数的唯一用途没了 ⇒ **纯窗口级查询不再借运行时** |
+
+**顺带**：`next_busy_id`（任务与忙碌项**共用**的计数器）改名 `next_timer_id` ——
+它现在只服务定时器，这才叫对了名字。
+
+### 三、应用侧：那"一层"归位（① = 库不发布渲染件）
+
+| 去处 | 内容 |
+|---|---|
+| `tests/spinner_modal.rs`（上一批已建） | ★ **边界证明**：只用公开 API 做"自绘 spinner + 最短可见时间 + 反向（没人说结束就一直在）" |
+| `tests/raw_task.rs`（改写） | **投递**边界证明：后台工作 + 进度 + 取消 + 结果回传，全程只用公开 API |
+| `examples/background_task.rs`（重写） | ★ **参考实现**（≈100 行：自绘 Spinner 60 + 卡片 DSL 40 + 应用状态） |
+| `examples/gallery.rs`（改造） | 遮罩改为应用声明的 Modal 层 |
+| **pdfkit** | 新增 `BusyState`（文案 / 进度 / 明细 / 取消令牌 / 起始时刻）+ `ui::mod` 里的 `busy_modal` 层；`set_busy_min_visible(400ms)` → `Ctx::set_timeout` |
+
+### 四、测试迁移：**4 条护栏失效是预期的**
+
+被删的 4 条（`a_fast_busy_section…` / `busy_overlay_is_reaped…` /
+`pump_reports_work_while_an_overlay_pends…` / `overlay_clears_from_pump_and_frame…`）
+测的正是"**库保证遮罩**"这条路径 —— **那条路径就是要删的，不是回归**。
+
+**但两条测"真库不变量"的必须留下**，只换 vehicle：
+
+| 保留（改写） | 钉的不变量 |
+|---|---|
+| `an_app_declared_modal_covers_a_full_window_image` | ★ **光栅层的层序**：整窗图片不得盖住后声明的 Modal（原 bug：图片 op 统一放到批次末尾 blit） |
+| `a_declared_modal_blocks_input_to_the_content_below` | ★ **Modal 阻断下层交互**（层语义） |
+
+新增 `pump_reports_work_when_an_animation_frame_is_due`：**RAF 的通用替代** ——
+`request_animation` ⇒ `tick` 返回 true ⇒ `App::pump` 报"要出帧"（原先靠 `is_busy` 那一项）。
+
+### 五、验证
+
+| 项目 | 检查 | 结果 |
+|---|---|---|
+| lieui | `cargo test --workspace` | **21 个测试二进制全 ok / 551 条** |
+| lieui | `clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| lieui | `fmt --check` / `build --examples` | 0 处差异 / exit 0 |
+| **pdfkit** | `cargo test` / `clippy --all-targets` | **49 通过** / exit 0 |
+
+**规模**：`task.rs` 611 → **258**；`window.rs` 1291 → **1226**；
+`overlay.rs`（170）删除；`RuntimeInner` 14 → **13** 字段；全批 **净 −1220 行**。
+
+### 六、教训
+
+1. **"库提供能力"与"库拥有概念"是两件事** —— 遮罩需要的每一样能力（投递 / 定时 /
+   声明层 / 自绘 / 逐帧标脏）都是**通用**的；把"遮罩"本身放进去，是**概念**越界。
+   判据很清楚：**删掉它之后，通用能力一条都没少**。
+2. **污染会沿着"最省事的路径"蔓延** —— `next_wakeup(&Runtime)` 就是标本：
+   一个纯窗口级查询，因为"顺手能问到 is_busy"，就永久背上了一个运行时参数。
+   ⇒ 看到"参数只为一件事存在"时，那件事多半不该在这里。
+3. **删功能时必须区分"测功能的"与"测不变量的"** —— 4 条护栏测功能（该删），
+   2 条测不变量（该留，只换 vehicle）。若一起删，就会丢掉一个真实的**光栅层序**回归护栏。

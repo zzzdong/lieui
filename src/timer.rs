@@ -119,8 +119,8 @@ impl Runtime {
         cb: TimerCallback,
     ) -> TimerHandle {
         let id = {
-            let n = self.inner.next_busy_id.get() + 1;
-            self.inner.next_busy_id.set(n);
+            let n = self.inner.next_timer_id.get() + 1;
+            self.inner.next_timer_id.set(n);
             n
         };
         self.inner.timers.borrow_mut().push(Timer {

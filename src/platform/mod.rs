@@ -504,12 +504,12 @@ impl Runner {
     /// 按"下一个时钟事件"设定唤醒策略（无事件则纯 `Wait`，空闲零功耗）。
     fn schedule_wakeup(&self, el: &ActiveEventLoop) {
         let mut wakeup: Option<Instant> = None;
-        // `next_wakeup` 要问"还有没有忙碌项"（spinner），真相在 Runtime 里 ——
-        // 好处是窗口不必每帧缓存一份 busy 快照，也就没有"过期真相"这回事。
-        let rt = self.app.runtime();
+        // `next_wakeup` 是**纯窗口级时钟查询**（光标闪烁 / tooltip / 定时器 / 动画帧）——
+        // 早先它还要一个 `&Runtime`，唯一用途是问"有没有框架内置的 busy 遮罩"；
+        // 遮罩随"它是组件"移除后，它不再需要知道运行时。
         for id in self.app.windows().iter().map(|w| w.id()) {
             if let Some(ctx) = self.app.window_ctx(id)
-                && let Some(t) = ctx.next_wakeup(&rt)
+                && let Some(t) = ctx.next_wakeup()
             {
                 wakeup = Some(match wakeup {
                     Some(prev) if prev <= t => prev,

@@ -104,13 +104,9 @@ pub(crate) struct RuntimeInner {
     /// 未装 = 本地队列模式。★ 它是**共享的 `Arc`**，所以先 clone 出去的
     /// 投递句柄也会立刻看见后装入的平台 waker —— 这是 A6 的结构性修复。
     pub(crate) poster: crate::task::Poster,
-    /// 每窗口的「忙碌」项（loading 遮罩的来源；空 = 没有遮罩）
-    pub(crate) busy: RefCell<Vec<crate::task::BusyItem>>,
-    /// 忙碌项的自增 id（**只有遮罩用**；框架不再管"任务"，所以没有任务 id）
-    pub(crate) next_busy_id: Cell<u64>,
-    /// loading 遮罩的**最短可见时间**（`Duration::ZERO` = 不等待，结束即刻收起）。
-    /// 见 [`Runtime::set_busy_min_visible`]。
-    pub(crate) busy_min_visible: Cell<std::time::Duration>,
+    /// 定时器的自增 id（原先与忙碌项共用一个计数器 `next_task_id`；
+    /// 忙碌项随"遮罩是组件"一起移除后，它对定时器来说该叫自己的名字）
+    pub(crate) next_timer_id: Cell<u64>,
     /// 定时器表（`set_timeout` / `set_interval`；UI 线程闭包）
     pub(crate) timers: RefCell<Vec<crate::timer::Timer>>,
     /// 请求了下一动画帧的窗口（`request_animation`；每帧回调后清空，要持续就再请求）

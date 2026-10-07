@@ -625,14 +625,6 @@ impl Ctx {
         self.rt.poster()
     }
 
-    /// 开一个「忙碌」段（loading 遮罩）—— **与任务无关**。
-    ///
-    /// 遮罩何时收起由你决定：[`crate::task::BusyToken::finish`] / `drop` /
-    /// [`crate::task::BusyToken::dismiss_after`]（定时兜底）。
-    pub fn begin_busy(&self, label: impl Into<String>) -> crate::task::BusyToken {
-        self.rt.begin_busy(self.window, label)
-    }
-
     /// 平台唤醒器（`None` = 无头 / 事件循环未起）。
     ///
     /// 一般用 [`Self::poster`]（两种模式都能投递）；只有需要**显式区分**

@@ -4,7 +4,6 @@ use crate::event::{Event, EventKind, KeyCode, Modifiers, NamedKey, PointerButton
 use crate::reactive::{Signal, act1};
 use crate::theme::Theme;
 use crate::track::{Kind, Layer, Placement};
-use std::cell::RefCell;
 use std::time::Duration;
 
 // ── 一个 counter ViewModel（就是 §九 示例的形态，去掉 winit 部分）──
@@ -2664,147 +2663,6 @@ fn unbound_radio_ignores_taps() {
 
 // ─────────────── M5：主题 ───────────────
 
-// ─────────────── 后台任务 + loading 遮罩（框架级） ───────────────
-
-// ─────────────── 后台工作 + loading 遮罩（**纯原语**）───────────────
-
-/// ★★ 端到端：**只用公开原语**搭出"后台工作 + 遮罩 + 结果回传"。
-///
-/// 框架**不再提供"任务"**：线程模型、取消协议、进度协议、完成时收遮罩 ——
-/// 全是调用方的事。这条测试就扮演那个调用方，所以它同时是
-/// "**原语够不够用**"的证明（不够的话这里根本写不出来）：
-///
-/// ```text
-/// rt.poster()      →  句柄交给工作线程        （投递 + 唤醒）
-/// rt.begin_busy()  →  BusyToken 存在 VM 里    （遮罩，由调用方决定何时收）
-/// ```
-///
-/// 关键差异（对比旧设计）：
-///
-/// - 载荷是**调用方自己的类型**（`Report`），不再套框架的 `TaskEvent` 信封；
-/// - `on_external` 里的 `downcast` **只有一层**；
-/// - 遮罩的收尾发生在**调用方收到结果时**，不是框架"看到任务结束"时。
-#[test]
-fn background_work_with_an_overlay_built_from_primitives_only() {
-    /// 工作线程回传的载荷（`Send`）
-    struct Report(u32);
-
-    struct Worker {
-        report: Signal<Option<u32>>,
-        /// 调用方**自己持有**遮罩句柄 ⇒ 收到结果时收掉
-        busy: RefCell<Option<crate::task::BusyToken>>,
-    }
-
-    impl ViewModel for Worker {
-        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
-            v.column(|c| {
-                c.center();
-                c.text(format!("report={:?}", self.report.get()));
-            });
-        }
-
-        fn on_external(self: &Rc<Self>, _cx: &mut Ctx, data: ExternalData) {
-            // ★ 通道是**不透明**的：直接取自己的类型，只有一层 downcast
-            if let Some(r) = data.downcast::<Report>() {
-                self.report.set(Some(r.0));
-                // ★ 结果到了 ⇒ 调用方收掉遮罩（框架完全不知情）
-                if let Some(t) = self.busy.borrow_mut().take() {
-                    t.finish();
-                }
-            }
-        }
-    }
-
-    let rt = Runtime::new();
-    let mut app = App::new(rt.clone());
-    let vm = Rc::new(Worker {
-        report: Signal::new(&rt, None),
-        busy: RefCell::new(None),
-    });
-    let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
-    app.frame_all();
-
-    // 无头环境没有平台唤醒器 ⇒ 投递走本地队列（测试正好用它当"事件循环"）
-    assert!(!rt.is_online());
-
-    // ① 遮罩：调用方开、调用方收 —— 全程不依赖任何任务
-    let busy = rt.begin_busy(id, "正在处理…");
-    busy.set_progress(1, 2);
-    *vm.busy.borrow_mut() = Some(busy);
-
-    // ② 工作线程：真线程；只把结果投递回来
-    let poster = rt.poster();
-    std::thread::spawn(move || {
-        poster.post(id, Report(7));
-    });
-
-    // 下一帧：view 重跑（遮罩是声明式的）⇒ 遮罩层出现在保留树里
-    let stats = app.frame_all();
-    assert!(stats[0].1.view_ran, "忙碌状态变化 ⇒ 重跑 view");
-    {
-        let w = app.window_ctx(id).unwrap();
-        assert!(
-            w.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_some(),
-            "遮罩层已声明"
-        );
-    }
-
-    // 动画：动画帧把**卡片**标脏（只重绘，不重跑 view），并给出下一次唤醒时刻
-    {
-        let ctx = app.window_ctx_mut(id).unwrap();
-        let _ = ctx.track_mut().take_damage(); // 清掉前面的脏区，只看动画帧贡献
-        ctx.animate(Instant::now());
-        let (damage, all) = ctx.track_mut().take_damage();
-        assert!(all || !damage.is_empty(), "有遮罩 ⇒ 动画帧有重绘义务");
-        assert!(ctx.next_wakeup(&rt).is_some(), "遮罩 ⇒ 定时唤醒（spinner）");
-    }
-
-    // 遮罩确实画到了屏幕上：卡片内的 padding 区应是卡片底色（不是窗口底色）
-    {
-        let ctx = app.window_ctx(id).unwrap();
-        let track = ctx.track();
-        let root = track
-            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-            .expect("遮罩层在")
-            .node;
-        let card = track.children(root)[0];
-        let r = crate::layout::rect_of(track, card);
-        let light = Theme::light();
-        assert_eq!(
-            pixel(ctx, (r.x + 10.0) as u16, (r.y + 10.0) as u16),
-            opaque(
-                light.input_background.r,
-                light.input_background.g,
-                light.input_background.b
-            ),
-            "窗口里出现了遮罩卡片（{r:?}）"
-        );
-    }
-
-    // 等结果回来（`frame_all` 会消费本地投递队列 ⇒ 等价于平台层的事件循环）
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
-    while vm.report.get().is_none() && Instant::now() < deadline {
-        app.frame_all();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    app.frame_all();
-
-    // 结果落地（**调用方类型**，一层 downcast）+ 遮罩由调用方收起
-    assert_eq!(vm.report.get(), Some(7), "载荷原样到达 on_external");
-    assert!(!rt.is_busy(id), "调用方收掉了遮罩");
-    {
-        let ctx = app.window_ctx(id).unwrap();
-        assert!(
-            ctx.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_none(),
-            "完成 ⇒ 遮罩层消失"
-        );
-        assert!(
-            ctx.next_wakeup(&rt).is_none(),
-            "遮罩消失且没有聚焦输入框/tooltip ⇒ 回到零唤醒（空闲零功耗）"
-        );
-    }
-}
-
 // ─────────────── 统一时钟：定时器 / 动画帧 ───────────────
 
 use crate::event::Emitter;
@@ -2931,7 +2789,7 @@ fn animation_frames_run_only_while_requested_and_expose_dt() {
     app.frame_all();
     assert_eq!(vm.frames.get(), last, "不请求就不再跑");
     assert!(rt.next_deadline(id).is_none());
-    assert!(app.window_ctx(id).unwrap().next_wakeup(&rt).is_none(), "回到零唤醒");
+    assert!(app.window_ctx(id).unwrap().next_wakeup().is_none(), "回到零唤醒");
 }
 
 #[test]
@@ -3013,264 +2871,70 @@ fn full_repaint_mode_always_redraws_the_whole_window() {
     assert_eq!(st[0].1.render.raster.pixels, 400 * 300, "整窗像素都重画");
 }
 
-/// 快活儿也要看得见遮罩：忙碌段在**两次出帧之间**开始又结束（小文件读盘的真实情形，
-/// 完成消息往往先于下一帧被处理），配了最短可见时间后下一帧仍然画得出遮罩。
+/// ★★ `App::pump` 必须如实报告"要出帧"：**动画请求**也算"有事要出帧"。
+///
+/// ## 为什么这条重要
+///
+/// 平台在 `RedrawRequested` **之外**的唤醒点（`about_to_wait` / `user_event`）
+/// 调 [`App::pump`]，拿返回值当"要不要 `request_redraw`"。
+/// `next_wakeup` 给出定时唤醒之后，若这里判定"没事做"⇒ 不重绘 ⇒ **停帧**：
+/// 回调改了状态却没人画。
+///
+/// 自绘动画（spinner / 波形）走的正是这条路：`on_animation` 里
+/// `request_animation`（配合 `damage_key` 只重绘自己）⇒ `tick` 返回 `true`
+/// ⇒ `pump` 报 `true` ⇒ 平台重绘。**这是"框架内置 spinner"那条老路的通用替代。**
 #[test]
-fn a_fast_busy_section_still_shows_the_overlay() {
-    struct Empty;
-    impl ViewModel for Empty {
-        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
-            v.column(|c| {
-                c.text("主界面");
-            });
-        }
-    }
-
+fn pump_reports_work_when_an_animation_frame_is_due() {
     let rt = Runtime::new();
-    rt.set_busy_min_visible(Duration::from_millis(300));
     let mut app = App::new(rt.clone());
-    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
-    app.frame_all();
-
-    // 忙碌段瞬间开始又结束（中间没有出过帧）
-    let busy = rt.begin_busy(id, "正在打开…");
-    busy.finish();
-
-    // 下一帧：遮罩必须在 —— 没有它用户就什么都看不到
-    app.frame_all();
-    {
-        let ctx = app.window_ctx(id).unwrap();
-        assert!(
-            ctx.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_some(),
-            "最短可见期内遮罩要在"
-        );
-        assert!(ctx.next_wakeup(&rt).is_some(), "还要定时唤醒去收它");
-    }
-
-    // 到点 ⇒ 收掉；下一帧没有遮罩，回到零唤醒
-    assert!(rt.reap_busy(Instant::now() + Duration::from_millis(400)));
-    app.frame_all();
-    {
-        let ctx = app.window_ctx(id).unwrap();
-        assert!(
-            ctx.track().root_by_tag(crate::overlay::BUSY_OVERLAY_TAG).is_none(),
-            "到点 ⇒ 遮罩收起"
-        );
-        assert!(ctx.next_wakeup(&rt).is_none(), "遮罩收掉 ⇒ 回到零唤醒");
-    }
-}
-
-/// ★★ 到点后的**第一帧**就必须把遮罩收掉 —— 不能拖到第二帧。
-///
-/// ## 为什么必须单独钉这一条
-///
-/// 上面那条测试（`a_fast_busy_section_still_shows_the_overlay`）是**手工**调
-/// `rt.reap_busy(..)` 再 `frame_all()` 的 —— 它验证了"收得掉"，却**从没走过
-/// "由帧自己来收"这条真实路径**，于是下面这个缺陷整整漏掉了：
-///
-/// `reap_busy` 原先在 `frame()` 里排在 `take_dirty` **之后**，它标的那笔脏
-/// （`VIEW | PRESENT`）要等**下一帧**才被消费。而遮罩一收掉，`next_wakeup`
-/// 立刻回到 `None`（平台不再有唤醒源）⇒ **那一帧永远不来** ⇒
-/// 遮罩停在屏幕上。
-///
-/// **实测症状（pdfkit）**：打开 PDF 后 loading 遮罩不自动消失，停在最后一次
-/// 进度上报的状态（标题「正在打开…」+ 明细「正在生成预览…」），
-/// 鼠标划过窗口才被顺带重画掉。
-///
-/// 断言写成"**一帧**之后就没有遮罩"，正是为了让"需要第二帧"的实现失败。
-#[test]
-fn busy_overlay_is_reaped_by_the_first_frame_after_the_min_visible_window() {
-    struct Empty;
-    impl ViewModel for Empty {
-        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
-            v.column(|c| {
-                c.text("主界面");
-            });
-        }
-    }
-
-    let rt = Runtime::new();
-    let min = Duration::from_millis(30);
-    rt.set_busy_min_visible(min);
-    let mut app = App::new(rt.clone());
-    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
-    app.frame_all();
-
-    // 忙碌段：开始后立刻结束 ⇒ 遮罩转入"等最短可见时间"（`hide_at`）
-    let busy = rt.begin_busy(id, "正在打开…");
-    busy.finish();
-
-    // 第一帧：还在最短可见期内 ⇒ 遮罩必须在（否则用户什么都看不到）
-    app.frame_all();
-    assert!(
-        app.window_ctx(id)
-            .unwrap()
-            .track()
-            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-            .is_some(),
-        "最短可见期内遮罩要在"
+    let vm = clocked_vm();
+    let id = app.window(
+        WindowConfig::new().size(200.0, 120.0),
+        Clocked {
+            timeouts: Rc::clone(&vm.timeouts),
+            intervals: Rc::clone(&vm.intervals),
+            frames: Rc::clone(&vm.frames),
+            last_dt_ms: Rc::clone(&vm.last_dt_ms),
+            keep_animating: Rc::clone(&vm.keep_animating),
+        },
     );
-
-    // 越过最短可见时间
-    std::thread::sleep(min + Duration::from_millis(20));
-
-    // ★ 只跑一帧 —— 到点那一帧就该收掉
-    app.frame_all();
-    assert!(
-        app.window_ctx(id)
-            .unwrap()
-            .track()
-            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-            .is_none(),
-        "★ 到点后的第一帧就该收掉遮罩；若 `reap_busy` 排在 `take_dirty` 之后，\
-         这帧只会标脏不重跑 view ⇒ 遮罩仍在，而下一帧永远不会来"
-    );
-    assert!(!rt.is_busy(id), "遮罩项已从 Runtime 收掉");
-}
-
-/// ★★ 平台侧"要不要出帧"的判据：**有遮罩时，即使一个脏标志都没有也必须为真**。
-///
-/// 平台在 `RedrawRequested` 之外的唤醒点（`about_to_wait` / `user_event`）调
-/// [`App::pump`]，拿它当"要不要 `request_redraw`"。若判据只看脏标志，
-/// 定时唤醒就成了空转：唤醒到了、判定"没事做"、不重绘 ⇒ `frame()` 不跑 ⇒
-/// `reap_busy` 不跑 ⇒ **遮罩永远收不掉**（上一帧的画面就一直挂着）。
-///
-/// 为什么"没有脏标志"是**常态**：遮罩的 spinner 相位由**挂钟**算，
-/// `WindowCtx::animate` 只把卡片标脏 —— 那笔脏记在 `Track` 里，
-/// **不在 `Runtime` 的脏标志里**（`rt.peek_dirty` 因此为空）。
-///
-/// ★ 这里直接断言 `App::pump` 的返回值，而不是只断言 `WindowCtx::needs_frame` ——
-///   `needs_frame` 只是判据，**接线**（`pump` 有没有用它）才是缺陷所在。
-///   断言入口，删掉 `App::pump` 里那一句就会立刻失败。
-#[test]
-fn pump_reports_work_while_an_overlay_pends_even_without_dirty() {
-    struct Empty;
-    impl ViewModel for Empty {
-        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
-            v.column(|c| {
-                c.text("主界面");
-            });
-        }
-    }
-
-    let rt = Runtime::new();
-    rt.set_busy_min_visible(Duration::from_millis(300));
-    let mut app = App::new(rt.clone());
-    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
     app.frame_all();
 
-    // 前提：干净状态
-    assert!(rt.peek_dirty(id).is_empty(), "前提：此刻没有脏标志");
-    assert!(!app.pump(Instant::now()), "无脏、无遮罩 ⇒ 不需要出帧（空闲零功耗）");
+    // 没有动画请求、没有脏标志 ⇒ 不需要出帧（空闲零功耗）
+    assert!(!app.pump(Instant::now()), "无事可做 ⇒ 不出帧");
 
-    let busy = rt.begin_busy(id, "正在打开…");
-    busy.finish();
-    app.frame_all(); // 消费掉"起遮罩"那笔脏：遮罩已画出来
-
-    // ★ 此刻：脏标志为空，但遮罩还在（等最短可见时间）
-    assert!(
-        rt.peek_dirty(id).is_empty(),
-        "前提：遮罩已画出 ⇒ 脏标志为空（spinner 的脏记在 Track 里）"
-    );
-    assert!(rt.is_busy(id), "遮罩项还在（等最短可见时间到点）");
+    // 动画请求在 ⇒ 必须出帧
+    rt.request_animation(id);
     assert!(
         app.pump(Instant::now()),
-        "★ 有遮罩 ⇒ 必须出一帧：spinner 要转、到点要收尾"
+        "★ 有动画帧到期 ⇒ 必须报「要出帧」，否则 RAF 停摆"
     );
+    assert_eq!(vm.frames.get(), 1, "on_animation 真的跑了");
 
-    // 遮罩收掉 ⇒ 回到"不需要出帧"
-    rt.reap_busy(Instant::now() + Duration::from_millis(400));
-    app.frame_all();
-    assert!(!app.pump(Instant::now()), "遮罩与脏都没了 ⇒ 回到空闲");
+    // 动画停了（不再 request）⇒ 又回到"不需要出帧"
+    vm.keep_animating.set(false);
+    app.pump(Instant::now()); // 消费掉上一帧留下的请求
+    assert!(!app.pump(Instant::now()), "★ 动画结束 ⇒ 回到空闲");
 }
 
-/// ★★★ 端到端复刻用户报告：**没有任何输入事件**，只靠"下一次唤醒"驱动，
-/// 遮罩必须自己消失。
+/// 整窗图片（PDF 预览那类）不得盖住浮层：**后声明的 Modal 层**必须压在图上。
 ///
-/// 上面两条各自只钉住一半（`frame` 的次序 / `pump` 的判据）。这一条复刻平台的
-/// 事件循环把两半**合起来**跑：
+/// ## 症状来源
 ///
-/// ```text
-/// about_to_wait   →  App::pump()        （非渲染工作 + 要不要出帧）
-/// RedrawRequested →  App::frame_all()   （真的一帧）
-/// ControlFlow::WaitUntil(now + SPIN_PERIOD)  →  sleep
-/// ```
+/// 光栅层原先把图片 op 统一放到批次末尾 blit（"图片总在最上层"），
+/// 于是预览图盖住了 Modal 内容 —— 用户"看不到进度 modal"。
 ///
-/// **不加任何鼠标/键盘事件**。任意一半缺失，遮罩都会一直挂在屏幕上 ——
-/// 这正是 pdfkit「打开 PDF 后 loading 遮罩不自动消失」的缺陷
-/// （遮罩停在最后一次进度上报的状态：标题「正在打开…」+ 明细「正在生成预览…」）。
-///
-/// 平台事件循环本身要 winit 窗口、单测里跑不起来，所以这里做的是**语义复刻**：
-/// 它验证不了平台那 3 行接线，但能验证"接线对了之后，遮罩确实会自己消失"。
+/// ★ 这条钉的是**光栅层的层序**，与"遮罩由谁提供"无关：
+/// vehicle 换成**应用自己声明**的 Modal 层（`modal_tagged`），断言与因果不变。
 #[test]
-fn overlay_clears_from_pump_and_frame_alone_with_no_other_events() {
-    struct Empty;
-    impl ViewModel for Empty {
-        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
-            v.column(|c| {
-                c.text("主界面");
-            });
-        }
+fn an_app_declared_modal_covers_a_full_window_image() {
+    /// 应用自己定的层标签（框架不再预置 busy 遮罩的 tag）
+    const LAYER_TAG: u64 = 0x7465_7374_5f6d_6f64;
+
+    struct Pic {
+        open: Signal<bool>,
     }
 
-    let rt = Runtime::new();
-    // 与 pdfkit `run_windowed` 同一个量级（它用 400ms）
-    let min = Duration::from_millis(250);
-    rt.set_busy_min_visible(min);
-    let mut app = App::new(rt.clone());
-    let id = app.window(WindowConfig::new().size(400.0, 300.0), Empty);
-    app.frame_all();
-
-    // 点「打开」：起忙碌任务（`spawn_task_busy("正在打开…", ..)`），
-    // 小文件 ⇒ 任务瞬间结束，遮罩转入"等最短可见时间"
-    let busy = rt.begin_busy(id, "正在打开…");
-    busy.finish();
-
-    let overlay_gone = |app: &App| {
-        app.window_ctx(id)
-            .unwrap()
-            .track()
-            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-            .is_none()
-    };
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut frames = 0u32;
-
-    // ★ 先出一帧把遮罩**真的画出来** —— 否则下面的循环一开头就会读到
-    //   "层根不存在"（它还没被声明过）⇒ 判定"已消失"⇒ 测试假通过。
-    //   （写这条测试时就是这么栽的：变异后 frames=0 却"通过"了，
-    //   靠最后那句 `frames >= 1` 才暴露。）
-    app.frame_all();
-    assert!(!overlay_gone(&app), "最短可见期内遮罩必须已经画出来");
-
-    loop {
-        if app.pump(Instant::now()) {
-            app.frame_all();
-            frames += 1;
-        }
-        if overlay_gone(&app) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "★ 遮罩没有自动消失（跑了 {frames} 帧）。无输入事件时平台若不再出帧，\
-             `Runtime::reap_busy` 就永不执行 —— 遮罩会一直停在屏幕上"
-        );
-        // 模拟 `ControlFlow::WaitUntil(now + SPIN_PERIOD)`（无事件，纯定时唤醒）
-        std::thread::sleep(crate::overlay::SPIN_PERIOD);
-    }
-    assert!(frames >= 1, "至少出过一帧才能撤掉遮罩");
-    assert!(rt.peek_dirty(id).is_empty(), "收尾后脏标志应被本帧消费掉");
-}
-
-/// 整窗图片（PDF 预览那类）不得盖住浮层：遮罩是**后**声明的 Modal 层，必须压在图上。
-///
-/// 症状来源：光栅层原先把图片 op 统一放到批次末尾 blit（"图片总在最上层"），
-/// 于是预览图盖住了 loading 遮罩 —— 用户"看不到进度 modal"。
-#[test]
-fn busy_overlay_covers_a_full_window_image() {
-    struct Pic;
     impl ViewModel for Pic {
         fn view(self: &Rc<Self>, v: &mut ViewBuf) {
             // 整窗一张纯红图（2×2 拉伸铺满）
@@ -3283,28 +2947,40 @@ fn busy_overlay_covers_a_full_window_image() {
                 ],
             }))
             .expand(true);
+
+            if self.open.get() {
+                v.modal_tagged(LAYER_TAG, |m| {
+                    m.center();
+                    m.container(|card| {
+                        card.width(200.0);
+                        card.padding(20.0);
+                        card.background(Theme::light().input_background);
+                        card.layout(|l| l.flex_shrink = 0.0);
+                        card.text("正在打开…");
+                    });
+                });
+            }
         }
     }
 
     let rt = Runtime::new();
     let mut app = App::new(rt.clone());
-    let id = app.window(WindowConfig::new().size(400.0, 300.0), Pic);
+    let vm = Rc::new(Pic {
+        open: Signal::new(&rt, false),
+    });
+    let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
     app.frame_all();
     {
         let ctx = app.window_ctx(id).unwrap();
         assert_eq!(pixel(ctx, 200, 150), opaque(255, 0, 0), "先确认整窗都是图");
     }
 
-    // 忙碌遮罩压上来：卡片底色必须出现在图上（旧实现这里还是红的）
-    let busy = rt.begin_busy(id, "正在打开…");
+    // 声明一个 Modal 层压上来：卡片底色必须出现在图上（旧实现这里还是红的）
+    vm.open.set(true);
     app.frame_all();
     {
         let ctx = app.window_ctx(id).unwrap();
-        let root = ctx
-            .track()
-            .root_by_tag(crate::overlay::BUSY_OVERLAY_TAG)
-            .expect("遮罩层在")
-            .node;
+        let root = ctx.track().root_by_tag(LAYER_TAG).expect("层在").node;
         let card = ctx.track().children(root)[0];
         let r = crate::layout::rect_of(ctx.track(), card);
         let light = Theme::light();
@@ -3315,24 +2991,58 @@ fn busy_overlay_covers_a_full_window_image() {
                 light.input_background.g,
                 light.input_background.b
             ),
-            "遮罩卡片压在图片之上"
+            "Modal 卡片压在图片之上"
         );
     }
-    busy.finish();
 }
 
-/// 忙碌遮罩是 Modal 层 ⇒ 下层的按钮点不到（交互被挡住）
+/// **声明的 Modal 层阻断下层交互**（层语义，与"遮罩由谁提供"无关）。
 #[test]
-fn busy_overlay_blocks_input_to_the_content_below() {
+fn a_declared_modal_blocks_input_to_the_content_below() {
+    /// 应用自己定的层标签
+    const LAYER_TAG: u64 = 0x7465_7374_5f6d_6f64;
+
+    struct Page {
+        count: Signal<i32>,
+        open: Signal<bool>,
+    }
+
+    impl ViewModel for Page {
+        fn view(self: &Rc<Self>, v: &mut ViewBuf) {
+            let me = Rc::clone(self);
+            v.column(|c| {
+                c.text("Counter");
+                c.text(self.count.get().to_string());
+                c.row(|r| {
+                    r.button("+1").on_tap(move || me.count.set(me.count.get() + 1));
+                });
+            });
+
+            if self.open.get() {
+                v.modal_tagged(LAYER_TAG, |m| {
+                    m.center();
+                    m.container(|card| {
+                        card.width(200.0);
+                        card.padding(20.0);
+                        card.background(Theme::light().input_background);
+                        card.layout(|l| l.flex_shrink = 0.0);
+                        card.text("后台任务进行中…");
+                    });
+                });
+            }
+        }
+    }
+
     let rt = Runtime::new();
     let mut app = App::new(rt.clone());
-    let vm = Rc::new(Counter {
+    let vm = Rc::new(Page {
         count: Signal::new(&rt, 0),
+        open: Signal::new(&rt, false),
     });
     let id = app.window_erased(WindowConfig::new().size(400.0, 300.0), erased(Rc::clone(&vm)));
     app.frame_all();
 
-    // `Counter` 的 view 结构固定：内容根第 3 个子节点是个 row，里面第 1 个是「+1」按钮
+    // `Page` 的 view 结构固定：内容根第 3 个子节点是个 row，里面第 1 个是「+1」按钮
     let button = {
         let w = app.window_ctx(id).unwrap();
         let root = w.content_root().unwrap();
@@ -3343,17 +3053,17 @@ fn busy_overlay_blocks_input_to_the_content_below() {
     tap_node(&mut app, &rt, id, button);
     assert_eq!(vm.count.get(), 1, "平时点得到");
 
-    // 遮罩起来：同样点一下 ⇒ 下层按钮收不到
-    let busy = rt.begin_busy(id, "后台任务进行中…");
+    // 声明 Modal 层：同样点一下 ⇒ 下层按钮收不到
+    vm.open.set(true);
     app.frame_all();
     tap_node(&mut app, &rt, id, button);
-    assert_eq!(vm.count.get(), 1, "遮罩挡住下层交互");
+    assert_eq!(vm.count.get(), 1, "Modal 挡住下层交互");
 
-    // 收起遮罩 ⇒ 恢复交互
-    busy.finish();
+    // 收起 ⇒ 恢复交互
+    vm.open.set(false);
     app.frame_all();
     tap_node(&mut app, &rt, id, button);
-    assert_eq!(vm.count.get(), 2, "遮罩消失后恢复交互");
+    assert_eq!(vm.count.get(), 2, "Modal 消失后恢复交互");
 }
 
 /// 跟随系统：OS 深色上报 ⇒ 重跑 view + 窗口底色跟随（未显式指定底色时）

@@ -14,11 +14,15 @@
 //!
 //! 如果这些原语不够用，**这个文件根本编译不过** —— 边界的把关交给编译器。
 //!
-//! ## 对照：库当前内置的那一套（本文件刻意不用）
+//! ## 曾经的对照：库内置过的那一套（已移除）
 //!
-//! `Runtime::begin_busy` / `BusyToken` / `BusyItem` / `set_busy_min_visible` /
-//! `overlay::BUSY_OVERLAY_TAG` / `WindowConfig::auto_busy_overlay` ——
-//! 它们把同一个组件钉进了 `RuntimeInner`、`WindowCtx::frame` 与 `next_wakeup`。
+//! 以前库里有 `Runtime::begin_busy` / `BusyToken` / `BusyItem` /
+//! `set_busy_min_visible` / `overlay::BUSY_OVERLAY_TAG` /
+//! `WindowConfig::auto_busy_overlay` —— 同一个组件被钉进了
+//! `RuntimeInner`（3 字段）、`Runtime`（13 方法）、`WindowCtx::frame`（每帧收尾）、
+//! `next_wakeup`（被迫借 `&Runtime`，唯一用途就是问"有没有遮罩"）。
+//!
+//! 现在它全归应用 —— **本文件就是那个"应用"**，且只用公开 API。
 
 use std::cell::Cell;
 use std::rc::Rc;
