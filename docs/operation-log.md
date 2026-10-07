@@ -2357,3 +2357,2285 @@ liepdf `cargo test` 48 全绿 + `cargo clippy --all-targets` 0 警告。
 
 验证：lieui `cargo test --lib` 369 全绿 + clippy 0 警告 + 示例编译通过；
 liepdf `cargo test` 48 全绿 + clippy 0 警告（纯重构，行为零变化）。
+
+---
+
+## 2026-10-07 · S0 门禁与测试地基（H1/H2/H3/H8）—— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 主线 H。
+>本批只做**门禁与机械统一**，零行为变更，为后续 S1–S5 提供可复现的验证环境。
+
+### 决策
+
+1. **格式统一单独成批**（不与功能改动混在同一批）。理由：rustfmt 会碰 39 个文件，
+   若与 S1 的行为修复混在一个 diff 里，真正的语义变更会被机械噪声淹没。
+2. **`rustfmt.toml` 放宽到 `max_width = 120`，而不是让 rustfmt 默认改写全库风格。**
+   现状是作者手写的**紧凑单行**风格（全库最长行 150 字符，`app.rs`），
+   rustfmt 默认 100 宽会把它展开成多行（315 处差异）。实测配置选择：
+
+   | 配置 | 差异处数 |
+   |---|---|
+   | 默认（100 宽） | 315 |
+   | **`max_width = 120`（采用）** | 412 |
+   | `max_width = 120` + `use_small_heuristics = "Max"` | 738 |
+
+   `use_small_heuristics = "Max"` 让 rustfmt 更激进地合并成单行，反而把差异推高到 738，故**保持默认**。
+3. **lint 门禁只开 `clippy::all`，不开 pedantic/nursery**。实测全库 clippy 建议 15 条
+   **全部落在 `all` 级别**，可在单个批次内清零；pedantic 会一次性引入上百条风格噪声，
+   不适合作为增量门禁。后续要收紧时单独开批次逐条评估。
+4. **lint 门禁用 `[workspace.lints]` +成员 `[lints] workspace = true` 继承**，
+   而不是逐 crate 重复定义（`[lints]` 不随 workspace 自动继承，必须显式声明，否则漏一个 crate 就静默失效）。
+5. **MSRV job 先标 `continue-on-error: true`**。本仓库声明 `rust-version = "1.88"`，
+   但上游依赖（vello_cpu 0.3 / parley 0.11 / softbuffer 0.4 / winit 0.30）各自的 MSRV
+   **尚未逐一核对**，可能高于 1.88。本机只有 1.92 / 1.97，无法本地验证 1.88。
+   与其写一个必然红的 job，不如先留骨架 + 写明原因。
+6. **`deny.toml` 按 cargo-deny 各版本的公共子集书写**。本机装的是旧版，CI 用
+   `taiki-e/install-action` 装最新版，两边都要能解析。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `rustfmt.toml` | **新增** | `max_width = 120` + `newline_style = "Unix"`，附"为什么不用默认 / 不用 Max heuristics"的实测数据 |
+| `rust-toolchain.toml` | **新增** | `channel = "stable"` + `clippy`/`rustfmt` 组件。**不锁精确版本**：精确锁会在每次 Rust 小版本更新时强制全员同步，与 MSRV 声明的意图冲突 |
+| `deny.toml` | **新增** | 许可证白名单 + `multiple-versions = "warn"`（目标：逐步收紧到 deny）；禁未知 registry/git |
+| `.github/workflows/ci.yml` | **新增** | 5 个 job：`fmt` / `clippy` / `test`(Linux+Windows 矩阵) / `msrv`(暂 continue-on-error) / `audit` |
+| `Cargo.toml` | 修改 | 新增 `[workspace.lints.rust]` `unexpected_cfgs = "deny"`、`[workspace.lints.clippy]` `all = "deny"`；根 package 加 `[lints] workspace = true` |
+| `crates/{lieui-geom,lieui-text,lieui-layout}/Cargo.toml` | 修改 | 各加 `[lints] workspace = true`（缺任一个则该 crate 逃过门禁） |
+| 全库 39 个 `.rs` | 格式化 | `cargo fmt --all`：1370 insertions / 1816 deletions（净 −446 行），纯机械无语义变更 |
+| `src/align.rs` | 修 clippy | `ComputedLayout::default()` 后逐字段赋值 → struct literal + `..Default::default()` |
+| `src/app.rs` | 修 clippy | 删冗余的 `let page = page;`（2021 edition 的 redundant redefinition） |
+| `src/app.rs` / `src/track.rs` / `src/view.rs` | 修 clippy | 12 处由 `cargo clippy --fix` 自动修复（`assert_eq!(x, true/false)` → `assert!`、useless `vec![]` 等） |
+
+### 验证
+
+- **格式化前基线**：`cargo test --workspace` = **389 passed / 0 failed**
+  （369 + 6 + 4 + 10，四份审计一致认定 389，此处实测确认）。
+- **格式化后**：`cargo test --workspace` = **389 passed / 0 failed** ⇒ 纯机械无语义变更。
+- **`cargo fmt --all --check`**：0 处差异（幂等）。
+- **`cargo clippy --workspace --all-targets`**（在 `all = "deny"` 下）：**exit 0，零警告**。
+- **`cargo deny check licenses`**：**exit 0**（详见下方"发现"）。
+- **`cargo deny check bans`**：exit 0（`multiple-versions = "warn"` 不阻塞）。
+- **`cargo build --examples`**：随 CI 门禁纳入（examples 内含像素级断言）。
+
+### 顺带发现（已处理 / 已记录）
+
+1. **许可证白名单需含 `BSL-1.0`**：`arboard → clipboard-win 5.4.1` 与 `error-code 3.4.0`
+   用 Boost Software License 1.0（OSI 批准的 permissive，与 MIT OR Apache-2.0 可并存）。
+   已加入白名单并注明来源，避免后来人以为是误配而删掉。
+2. **`Unicode-3.0` 不是合法 SPDX 标识符**（`unicode-ident` 的正确写法是 `Unicode-DFS-2016`），
+   写错会让 cargo-deny 直接拒绝加载配置。
+3. **本机 cargo-deny 是旧版**，在 advisory-db 查询阶段自身 panic
+   （`called Option::unwrap() on a None value`）——**是工具版本问题，不是配置问题**：
+   `licenses` / `bans` 两个子检查都能正常跑完。CI 装最新版不受影响。
+
+### 遗留
+
+- **`msrv` CI job 未真正验证过 1.88**（`continue-on-error: true`）。
+  **待办**：核对 vello_cpu / parley / softbuffer / winit / arboard 各自的 `rust-version`，
+  确认 1.88 真的能编译后去掉该标记。否则"声明了 MSRV 但从没有 CI 真跑过"等于没有承诺。
+- **`multiple-versions`仍是 `warn`**：当前树里有传递重复（`bitflags` / `bytemuck` 等，
+  Wayland 链路还有 `wayland-protocols` 的多个版本）。收紧到 `deny` 前需逐条用
+  `skip` / `skip-tree` 精确豁免。**目标是把"同一语义出现两份实现"从"没人注意"变成"构建失败"**
+  —— 这直接对应 `9b00f0a` 那次 skrifa 双份字体引擎的事故。
+- **S0 剩余未做**：H5（`lieui-layout` 特征测试矩阵，当前仍只有 4 条 smoke）、
+  H6（`tests/api_contract.rs`）、H7（doc test 去 `ignore`，当前非 ignore 代码块为 0）、
+  以及像素回归助手扩展到"删除 / 阴影 / 图片"三例（与 S1 的 A2 一起做）。
+  其中 **H5 必须在 S3（布局重构）之前完成**，否则 D-a/D-b 是裸奔。
+- **`rust-toolchain.toml` 写的是 `channel = "stable"`**：本机 stable 是 1.97.1，
+  远高于 MSRV 1.88。因此 MSRV 只能靠 CI 的独立 job 兜底，不能靠本地工具链。
+---
+
+## 2026-10-07 · S1 正确性 P0 —— A2 脏区登记 / A3 关闭回调落树 —— ✅ 完成（本批 2/7）
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 A。
+> 本批只做 A2、A3 两项；A1 / A4 / A5 / A6 / A7 见「遗留」。
+
+### 决策
+
+1. **A2 排在本批第一位**（计划 §五硬约束②：*A2 必须先于其它任何像素测试*）。
+   理由不是优先级，而是**它会改变所有后续改动的测试基线** ——修复前，"删除节点"这件事
+   本身就会留残影，任何在此之前写的像素测试都可能把**残影误判为预期结果**。
+2. **两处修复各自补了变异测试（mutation test）**，即"临时把修复改回原样，确认新测试确实失败"。
+   理由：像素级断言很容易写成"永远通过"的空测试（我见过断言写错颜色值、断言采样点落在
+   背景区之类的情形）。**没验证过"无修复时会失败"的测试，等于没有测试。**
+3. `destroy` 的登记放在 `detach` **之前**：`damage_bounds` 要沿祖先链取变换，节点释放后取不到。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/track.rs` `destroy` | 修改（D2） | 遍历 `descendants(id)`，对每个节点 `damage_bounds` → `damage_rect`，**在 `detach` 之前**完成 |
+| `src/track.rs` `damage_bounds` | 修改（D57） | 祖先链中途 `get(c)` 返回 `None` 时，原来的 `?` 会**整条放弃**脏区登记；改为 `break`（带着已累积的变换继续）。症状同样是残影，但触发路径完全不同，必须一起修 |
+| `src/app.rs` `close_requested` | 修改（D4） | 补`if !cx.cmds().is_empty() { apply_cmds(...) }`，与 `external` / `tick` 走同一套收尾 |
+| `src/render/mod.rs` | 新增测试 | `destroy_registers_damage_for_removed_subtree` —— 像素级回归 |
+| `src/app.rs` | 新增测试 | `close_request_applies_queued_commands` —— 命令落树回归 |
+
+### 验证
+
+**A2 变异测试**（临时禁用登记后跑新测试）：
+
+```
+panicked at src\render\mod.rs:301:
+  destroy 必须登记被删子树的旧矩形，实际脏区：[Rect { x: 0.0, y: 0.0, width: 50.0, height: 120.0 }]
+test result: FAILED. 0 passed; 1 failed
+```
+
+⇒ 修复前脏区**只有蓝箱那一块**（`x 0..50`），被删红箱占的`x 50..100` 完全不在脏区内
+⇒ 证实残影真实发生，且新测试确实能抓住它。
+（该测试同时刻意制造了"同帧存在其它脏区"这个触发条件——否则渲染层"脏区为空 ⇒ 按整窗处理"
+的兜底会让 bug 测不出来。）
+
+**A3 变异测试**（临时禁用落树后跑新测试）：
+
+```
+panicked at src\app.rs:1773:
+  关闭回调里的 cx.damage_all() 必须落树（修复前这里恒为空）
+test result: FAILED. 0 passed; 1 failed
+```
+
+**恢复修复后的完整门禁**：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **371 passed / 0 failed**（389 → 371+6+4+10，新增 2 条） |
+| `cargo clippy --workspace --all-targets`（`all = "deny"`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 遗留（本批未做，按A1 → A7 顺序）
+
+- **A1（`D1` `D10`）**：`Tapped` 不校验按下/抬起的按键配对 —— **数据破坏级**（右键按下 + 左键抬起
+  会合成 `Tapped`，触发勾选/提交/删除）。计划已注明**先只做按键配对**，位移/时长阈值需要改
+  `input::step` 的签名（纯函数、无时钟来源），留到有测试支撑时再做。
+- **A4（`D8`）**：`view()`内 `set` 的断言去掉 `cfg!(debug_assertions)` + `begin/end_view` 改 RAII 守卫。
+- **A5（`D9`）**：定时器回调内 `cancel()` 无效、关窗后成孤儿。
+- **A6（`D7`）**：`run()` 之前 `spawn_task` 永久静默挂起。
+- **A7（`D33` `D58` `D59` `D61` `D62`）**：阴影超脏区 / `clear_layout_flags` 吞脏标 /
+  `window_sizes` 泄漏 / Wheel 绕过捕获 / spinner 用 `SystemTime`。
+- **像素回归助手还差两类**（计划要求扩展到"删除 / 阴影 / 图片"三例）：本批完成了**删除**例，
+  **阴影**（`D33`）与**图片 clip**（`D3`，需先修 C3）待补。
+---
+
+## 2026-10-07 · S1 正确性 P0 —— A1 点击按键配对 + 按下态泄漏 —— ✅ 完成（本批 3/7）
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 A1。
+> 本批修完全部 P0 中**唯一的数据破坏级**缺陷（D1）+ 一个状态泄漏（D10）。
+
+### 决策
+
+1. **`Track.pressed` 从 `Option<NodeId>` 升级为 `Option<PressState>`**，
+   `PressState { node, pointer, button, pos }`。
+   **为什么必须多记 `button`**：`Tapped` 合成要校验"按下与抬起是同一按键"。
+   只记节点的话，**右键按下 + 左键抬起落在同一节点会被判成左键点击** ⇒ 触发勾选 / 提交 / 删除。
+   `pointer` / `pos` 是**为后续阈值预留**，本次不消费（见下条）。
+2. **只做按键配对，不加位移 / 时长阈值**（计划 A1 的"分两步"）。
+   原因：`input::step(&mut Track, InputEvent) -> InputStep` 是**纯函数、拿不到时钟**，
+   加时间阈值要改签名并穿透全部调用点。先堵住数据破坏级缺陷，阈值另开批次。
+3. **抽出 `clear_pressed(track)` 供 `Down` / `Up` / `Cancel` 三处共用**。
+   此前三处各自内联同样的"清整条链"逻辑，其中 `Down` 处**漏了**（D10 的成因）。
+   共用后"清法不一致"这个类别不再可能发生。
+4. **配对校验不牵连右键菜单**：额外补了一条正向测试（右键按下 → 右键抬起仍合成 `RightTapped`），
+   避免"修 D1 时把右键功能一起堵掉"这种过度修复。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/track.rs` | 新增 `PressState` + 改字段 | `pub pressed: Option<PressState>`；`PressState` 放在模块级（**不要放进 `Track` struct 里**，第一版误放导致 `structs are not allowed in struct definitions`） |
+| `src/track.rs` | 改导入 | `use crate::event::{HandlerSlot, PointerButton, PointerId}`（`PointerButton` 是 `Copy + PartialEq`，配对可直接 `==`） |
+| `src/input.rs` `Down` | 修改（D1 + D10） | 记录 `PressState { node, pointer, button, pos }`；**先 `clear_pressed`** 再设新按下态 |
+| `src/input.rs` `Up` | 修改（D1） | 点击合成条件加 `press.button == button` |
+| `src/input.rs` | 新增 `clear_pressed` | 取代三处重复的内联清链逻辑 |
+| `src/input.rs` | 测试迁移 | `assert_eq!(t.pressed, Some(kids[1]))` → `t.pressed.map(|p| p.node)`，并追加按键断言 |
+| `src/input.rs` | 新增 3 条测试 | `cross_button_release_does_not_synthesize_tapped`（D1）、`right_button_press_and_release_still_taps`（防过度修复）、`second_down_clears_previous_pressed_chain`（D10） |
+| `src/lib.rs` | 修改 | `pub use track::...PressState`（`Track::pressed` 是 pub字段，类型必须导出） |
+
+### 验证
+
+**D1 变异测试**（去掉 `press.button == button` 后）：
+
+```
+panicked at src\input.rs:579:
+  按键不配对时不得合成点击（否则右键按下会被当成左键点击）
+test result: FAILED. 15 passed; 1 failed
+```
+
+⇒ 修复前**右键按下 + 左键抬起确实会合成 `Tapped`**，数据破坏级缺陷真实存在。
+
+**D10 变异测试**（去掉 `Down` 里的 `clear_pressed` 后）：
+
+```
+panicked at src\input.rs:655:
+  上一次按下的节点不应残留 pressed 视觉
+test result: FAILED. 0 passed; 1 failed
+```
+
+**完整门禁**：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **374 passed / 0 failed**（371 → 374，新增 3 条） |
+| `cargo clippy --workspace --all-targets`（`all = "deny"`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 当前 P0 进度
+
+| 计划项 | 缺陷 | 状态 |
+|---|---|---|
+| A1 | D1（点击按键配对）、D10（按下态泄漏） | ✅ 本批完成 |
+| A2 | D2（destroy 不登记脏区）、D57（damage_bounds 静默放弃） | ✅ 上一批完成 |
+| A3 | D4（close_requested 丢Cmd） | ✅ 上一批完成 |
+| A4 | D8（release 下 view() 内 set 静默自激 + panic 毒化） | ⏳ 待做 |
+| A5 | D9（定时器取消失效 / 关窗孤儿） | ⏳ 待做 |
+| A6 | D7（run() 前 spawn_task 静默挂起） | ⏳ 待做 |
+| A7 | D33 / D58 / D59 / D61 / D62 | ⏳ 待做 |
+
+**测试总数389 → 374（lib）+ 6+ 4+ 10（子 crate 与集成）= 394**，新增 5 条回归测试，
+其中 **5 条全部经过变异验证**（确认"无修复时会失败"）。
+
+### 遗留
+
+- **位移 / 长按阈值**（A1 第二步）：需给 `input::step` 传入时钟，改签名。
+  `PressState` 的 `pos` / `pointer` 已预留好，届时只需补判定。
+- **A4 未做**：`assert_not_in_view` 仍是 `cfg!(debug_assertions)`（release 下静默自激），
+  `begin_view/end_view` 仍非 RAII（`view()` panic 后 `in_view` 永久污染）。**这是 P0 里剩下的最大一项。**
+- **D11 / D13（焦点）**、**D6（Modal 内Popup 的 z 序）** 按计划在 S4，不在本批。
+---
+
+## 2026-10-07 · S1 正确性 P0 —— A4 view() 值守 RAII + always-on 断言 —— ✅ 完成（本批 4/7）
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 A4。
+
+### 决策
+
+1. **`begin_view()` 改为返回 RAII 守卫**，删除手写的 `end_view()`。
+   触发原因不是风格偏好，而是**真实缺陷**：`view()` 是用户代码，它 panic 时
+   `end_view()` 永不执行 ⇒ `in_view` 永久停在 `Some(..)` ⇒ 此后该窗口所有
+   `Signal::set` 都被 `assert_not_in_view` 拦下，**Runtime 被永久毒化**。
+2. **`assert_not_in_view` 去掉 `cfg!(debug_assertions)` 门禁，改always-on**。
+   代价只是读一个 `Cell<Option<WindowId>>`；换来release 下也能 fail-fast，
+   而不是变成"每帧 view → set → 再 view"的**永久满帧自激**（100% CPU、不报错、无日志）。
+   设计 §四本就把这条列为"违反会 panic 或死循环"的硬纪律。
+3. **`ViewGuard` 放在模块级而非 `impl Runtime` 内**（第一版误放进 impl 块，
+   编译报 `structs are not allowed in struct definitions`）。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/reactive.rs` | 新增 `ViewGuard` + `Drop` | 守卫持有 `&Cell<Option<WindowId>>`，`Drop` 时置 `None` |
+| `src/reactive.rs` `begin_view` | 改签名 | `-> ViewGuard<'_>`；**删除 `end_view()`**（原带 `#[allow(dead_code)]`，实际生产在用） |
+| `src/reactive.rs` `assert_not_in_view` | 修改（D8） | 去掉 `cfg!(debug_assertions)` |
+| `src/app.rs` `frame` | 修改 | `let _view_guard = rt.begin_view(self.id);` … `drop(_view_guard);` 替代成对调用 |
+| `src/reactive.rs` | 测试升级 | **已有的 `set_inside_view_panics` 带 `#[cfg(debug_assertions)]` ���— 移除该门禁并改 RAII 形式**（测试本身只在 debug 存在，正是 D8 的证据） |
+| `src/reactive.rs` | 新增测试 | `view_guard_recovers_after_panic` |
+
+### 验证
+
+**A4 变异测试**（把 `ViewGuard::drop` 改成空操作，精确模拟"`end_view()` 未被调用"）：
+
+```
+panicked at src\reactive.rs:682:
+  panic 后 in_view 必须被守卫释放，否则 Runtime 被永久毒化
+test result: FAILED. 0 passed; 1 failed
+```
+
+> 变异设计说明：第一次尝试的变异（把 `let _guard = ...` 改成先 panic 再 `drop`）是**无效变异** ——
+> Rust 的 RAII 语义保证 panic 展开时仍会调用 `Drop`，测试照样通过。
+> 正确做法是直接把 `Drop` 实现清空，才能模拟原代码"手写 `end_view()` 未执行"的真实情形。
+
+**完整门禁**：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **375 passed / 0 failed**（374 → 375，新增 1 条；改造前基线 369） |
+| `cargo clippy --workspace --all-targets`（`all = "deny"`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 本轮（2026-10-07）总进度
+
+**已完成 S0 全量 + S1 的 A1–A4。**
+
+已修复并经变异验证的缺陷（6 项）：
+
+| 缺陷 | 严重度 | 症状 | 修复 |
+|---|---|---|---|
+| **D1** | P0 数据破坏 | 右键按下 + 左键抬起 ⇒ 合成 `Tapped` ⇒ 触发勾选/提交/删除 | `Track::pressed`升级为 `Option<PressState>`，`Up` 校验按键配对 |
+| **D2** | P0 视觉 | 同帧有其它脏区时，删除节点留残影 | `destroy` 登记旧矩形 + 像素回归测试 |
+| **D4** | P0 静默失效 | 关闭回调里的 `cx.damage/focus/scroll_to` 全部无效 | `close_requested` 补 `apply_cmds` |
+| **D8** | P0 自激/毒化 | release 下 `view()` 内 `set` 满帧自激；`view()` panic 后 Runtime 永久毒化 | 值守改 RAII + 断言 always-on |
+| **D10** | P1 状态泄漏 | 二次按下不清理旧链 ⇒旧节点永久残留 pressed 视觉 | 抽出 `clear_pressed`，`Down`/`Up`/`Cancel` 共用 |
+| **D57** | P0 残影 | `damage_bounds` 祖先链断裂即静默放弃整条脏区登记 | `?` 改 `break`，带已累积变换继续 |
+
+门禁与基建：`rustfmt.toml` / `rust-toolchain.toml` / `[workspace.lints]`（clippy `all = "deny"`，
+15 条清零）/ `.github/workflows/ci.yml`（5 job）/ `deny.toml`（许可证白名单，发现 `BSL-1.0` 来自
+`arboard → clipboard-win`）。
+
+测试：改造前 389 → 现在 **395**（lib 375 + 6 + 4 + 10），**新增 6 条回归测试，全部做过变异验证**
+（确认"修复回退后测试确实失败"—— 这是本轮坚持的验证标准，见 `refactor-plan` §四·主线 A 的配套要求）。
+
+### 下一步（S1 剩余）
+
+- **A5（D9）**：定时器回调内 `cancel()` 无效；关窗后成孤儿（先出表 → 执行 → 无条件 reschedule）。
+- **A6（D7）**：`run()` 之前 `spawn_task` 永久静默挂起（waker 快照过期 + 本地队列 GUI 模式不 drain）。
+  **建议先加诊断**，让"静默"变成"可报错"——这类"卡住且不吭声"的缺陷最难被用户报告。
+- **A7（D33/D58/D59/D61/D62）**：阴影超脏区 / `clear_layout_flags` 吞脏标 / `window_sizes` 泄漏 /
+  Wheel 绕过捕获 / spinner 用 `SystemTime`。
+- 之后进入 **S2**：主线 B（帧调度，**含 `request_redraw` 闭环**，计划已标注需先做 spike）→ C1/C2/C3 → F1/F3。
+---
+
+## 2026-10-07 · S0 剩余项 —— 测试体系重建（H5/H6/H7）—— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 H5/H6/H7 + §五 S0。
+> 本批把测试数**389 → 437**，且**没有一条新测试是"重跑旧断言"**。
+
+### 决策
+
+1. **不把内嵌测试外移。** audit-3 建议把 `app.rs` 的 3368 行测试搬到 `app/tests.rs`。
+   **本批拒绝采纳**：内嵌测试能访问 `pub(crate)` 私有字段（`flags`/`damage`/`computed` 等），
+   外移后这些测试只能改测`pub` 面，**覆盖率会净下降**。
+   真正缺的不是"把测试搬出去"，而是**"没有测试的层"** —— 那是黑盒契约层（H6）。
+   文件臃肿问题留给 S5 的 G4（结构重构）用"按职责拆模块 + 测试随模块走"解决。
+
+2. **特征测试按"语义域"拆文件，不做一个大矩阵。**
+   `tests/feature_flex.rs`（尺寸协商）+ `tests/feature_position.rs`（定位与流）。
+   理由：新增测试时容易判断"该放哪"，且两组的失效模式不同（前者挂死循环，后者错位）。
+
+3. **已知缺陷用 `#[ignore = "KNOWN BUG ..."]` 显式标注，而不是写"钉住缺陷"的断言。**
+   后者有个致命问题：修复 bug 后测试会失败，容易被误当成"测试坏了"而顺手删掉。
+   `#[ignore]` 则是"清单里明写这一条坏了"，`cargo test` 输出直接可见。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `crates/lieui-layout/tests/feature_flex.rs` | **新增** 17 条 | grow/shrink/basis/min-max clamp/align/self/shrink 冻结循环/收敛守卫 + 2 条 KNOWN BUG |
+| `crates/lieui-layout/tests/feature_position.rs` | **新增** 17 条 | absolute 四向/margin 叠加/padding/border/RTL/reverse/justify/wrap/gap + 索引契约 + 1 条 KNOWN BUG |
+| `tests/api_contract.rs` | **新增** 9 条 | 主 crate 第一个黑盒契约测试（仅 `pub` API） |
+| `crates/lieui-layout/src/style.rs` | 文档 | 警示`CSSDirection` 只有前 6 个变体可索引样式数组 |
+| `src/lib.rs` | 文档 | 第一个**可编译** doc test（`no_run`），示例同时充当 API 形状守卫 |
+
+### 关键产出 1：`lieui-layout` 从 4 条 smoke → 36 条特征测试
+
+覆盖审计点名的**全部零覆盖区**：absolute、shrink 冻结循环、wrap 多行、min/max clamp、RTL、gap。
+其中两条收敛守卫特别重要：
+
+- `shrink_stops_at_basis_and_reallocates_remainder` —— `resolve_flexible_lengths`（`:603` 的`while`）
+  **没有迭代上限**（D48），一旦震荡挂死 UI 主线程。这是该路径唯一的测试。
+- `pathological_inputs_terminate_with_finite_results` —— 用 min>max / shrink-min 冲突 / 零尺寸
+  四组刁钻输入验证"必须终止且产出有限值"，是**挂死风险的兜底**。
+
+### 关键产出 2：新发现一个四份审计都漏掉的 API 陷阱
+
+> **`CSSDirection` 有 10 个变体，但样式数组只有 6 个槽位**（`K_CSS_PROPS_COUNT = 6`）。
+
+`All`(8) / `Horizontal`(6) / `Vertical`(7) / `None`(9) **拿去索引 `padding`/`margin`/`border`/`position`
+会越界 panic**。这四个变体与 `FlexStyle` 的数组**都是 `pub`**，看起来"枚举多长数组就多长"。
+
+- 常量索引会被编译器抓成 `unconditional_panic`（我在写测试时立刻撞到）；
+- 但 `dir as usize` 是**运行时炸弹**。
+- 已核查生产代码**未踩到**（`src/view.rs:976` 用 `for i in 0..4`）；
+- 处理：① `style.rs` 顶层加警示文档；② 加契约测试 `only_first_six_css_directions_are_indexable` 钉住。
+
+### 关键产出 3：`lieui-layout` 的三条 DSL 真实约束被钉进契约测试
+
+写 `api_contract.rs` 时连续撞上三条**只以 `panic!` 表达**的约束（不是编译错误）：
+
+1. **`view()` 顶层只能声明一个内容根**（`view.rs:219`）—— 第二个顶层容器直接 panic；
+2. **`keyed_list` 必须在容器闭包内**（`view.rs:560`）；
+3. **`keyed_list` 会"接管"该容器**（`view.rs:208`）—— 接管后不能往同一容器再加子节点，
+   所以两个列表必须各自独占一个容器。
+
+这三条都写进了测试注释。**顺带印证 D45**：`padding`/`gap` 返回 `()` 而非 `Self`，
+所以 `c.padding(8.0).gap(4.0)` 这种写法编译不过 —— 契约测试里只能用两条语句。
+
+### 修正：审计对 D44 的影响面判断偏大
+
+审计说 `layout()` 永久改写 `style.flex_basis` 且不恢复（D44）。**实测范围窄得多**：
+
+> 所有递归调用**全部走 `layout_impl`**（`:472/:623/:675/:853`），只有**根节点**走 `layout()`
+> ——而 `flex_basis` 的写入与 `dim` 的恢复都只在 `layout()` 里。
+> 所以**只有根节点被污染**，子节点不受影响。
+
+影响评估：框架当前每次布局都重建临时 FlexNode 树（`layout.rs:94`），根节点是新的，**今天不触发**。
+但 S3 的 D-a 要做"FlexNode 持久缓存复用" —— 那时根节点会被复用，污染才变成真 bug。
+**结论不变（仍需在 D-a 之前修），但优先级可降，且不必按"影响整棵树"去设计修复。**
+
+### 门禁立刻拦住了本批自己写的代码
+
+`[lints.clippy] all = "deny"` 在本批生效，当场抓到 `feature_flex.rs` 里我写的
+`type_complexity`（复杂类型）与无用 `mut` —— 已修。
+**这是门禁第一个"抓到作者本人"的实例**，也是它最实在的价值证明。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **12 个测试二进制全 ok**，合计 **437** 条（起点 389，**+48**） |
+| ├ 主 crate lib | 375 |
+| ├ `tests/api_contract.rs`（新） | 9 |
+| ├ `crates/lieui-layout` | 4 → **36**（16 + 16 + 4，2 条 KNOWN BUG ignored） |
+| ├ `crates/lieui-text` / `lieui-geom` | 10 / 6 |
+| └ doc test | **1 passed**（`lib.rs` 示例真正编译），19 ignored |
+| `cargo clippy --workspace --all-targets` | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 遗留
+
+- **H7 只做了 `lib.rs` 一处**（19 处仍 `ignore`）。下一步按"用户会先读到的顺序"推进：
+  `view.rs` → `custom.rs` → `theme.rs` → `app.rs`。
+  注意 doc test 会**编译**，改之前必须核对真实签名（本批已踩：`progress` 收`usize` 不收 `u32`）。
+- **像素回归助手还差两类**：阴影超脏区（D33）、图片 clip（D3，需先修 C3）。
+- **`damage_bench.rs` 的断言仍只在 `main()` 里**，`cargo test` 不执行。
+  计划 C0 要求的"量化基准"应改为**确定性指标**（批次数 / 光栅像素数 / 帧调用次数）进 `cargo test`，
+  时间类指标继续留在 example 里 —— 这是把"性能回归"变成"可断言"的关键一步，尚未做。
+---
+
+## 2026-10-07 · S2 前置 —— C0 把性能回归变成可断言测试 —— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 C 的 C0 步骤。
+
+### 决策
+
+1. **只断言确定性指标，不把时间指标搬进 `cargo test`。**
+   可断言的五个字段全是 `pub` 的：`FrameStats::damage.len()`（碎片数）、
+   `RenderStats::raster.{batches, pixels, rasterized}`、`FrameStats::is_idle()`。
+   时间（ms/µs）受机器/编译模式/CPU 调度影响，属于 `examples/damage_bench.rs` 的职责。
+   **分工**：测试守"算法有没有退化"，example 报"退化成什么样"。
+
+2. **把 `Page` 从 `v.column` 改成 `v.scroll` 包裹。**
+   原因见下 —— 原来的基准**根本没有滚动容器**，等于从未测过"滚动脏区"这条最关键路径。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `tests/perf_regression.rs` | **新增** 8 条 | 空闲帧不���栅化 / 标脏后恢复光栅 / 局部远小于整窗 / 整窗脏覆盖全窗口 / 滚动碎片基线 / 标脏 30 节点基线 / 2 条 `#[ignore]` 记录 D21、D22 |
+| `docs/refactor-plan.md` | 更新 | D21 条目补实测数据并**重新定性**；C2 段落补C0 实测表 |
+
+### 关键产出：实测把 D21 从"滚动问题"重新定性为"普遍失效"
+
+实测基线（1280×720，`-- --nocapture` 可复现）：
+
+| 场景 | 脏区碎片 | 批次 | 光栅像素 |
+|---|---|---|---|
+| 50 行滚动一次（dy=20） | **302** | 1 | 921600 = **整窗** |
+| 标脏 30 个节点 | **30** | 1 | 921600 = **整窗** |
+| 标脏 1 个按钮（深埋） | 1 | 1 | 远小于 2% 窗口 ✅ |
+| 空闲帧 | 0 | 0 | 0，`rasterized == false` ✅ |
+
+**这比审计的估计严重得多**：审计说"嵌套滚动一次产出 20+ 块"，
+实测**一次滚动产生 302 个碎片**；而且"标脏 30 个节点"（一次普通批量状态变更）**也退化成整窗**。
+
+⇒ 碎片阈值 8 的真实含义是：**任何 ≥9 节点变化都退化为整窗光栅 + 全树 Scene 重建**。
+这不是"滚动场景拿不到脏区红利"，而是**除单控件交互外几乎都拿不到**。
+已同步修正 `refactor-plan` 的 D21 与 C2。
+
+**顺带修正另一处基准缺陷**：`examples/damage_bench.rs` 的 `Page` 用 `v.column` 且**无滚动容器**，
+所以它引以为傲的"局部49µs vs 整窗 4.6ms"全部来自**单个按钮标脏**（碎片 = 1），
+从未覆盖滚动。新测试补上了这条路径。
+
+### 两条 `#[ignore]` 的定位
+
+- `scrolling_list_produces_more_than_eight_fragments` —— 断言"当前退化为整窗"，
+  C2 修好后**这条断言会失败**，正是提醒把它改成正断言并去掉 `ignore` 的信号。
+- `local_present_should_not_copy_full_rows`（D22）—— 占位。
+  `present_with_damage` 在 `#[cfg(feature = "winit")]` 平台层内且需真实 surface，
+  **`cargo test` 里无法断言**。因此给 C1 留了明确要求：
+  **必须先把"按行拷贝宽度"抽成可测的纯函数**（如 `copy_rows(pixmap, buf, rects)`），
+  否则这条永远测不了。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --test perf_regression` | 6 passed / 2 ignored |
+| `cargo test --test perf_regression -- --ignored` | **2 passed**（确认 D21 现状断言成立） |
+| `cargo test --workspace` | **13 个测试二进制全 ok** |
+| `cargo clippy --workspace --all-targets`（CI 用 `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 本批修正的一处自身问题
+
+`full_repaint_covers_the_whole_window` 之外，`idle_frame_does_not_rasterize` 有个未使用的 `id`绑定
+（clippy warning，因为 CI 用 `-D warnings` 会失败）—— 已修为 `_id`。
+这是 `[lints]` 门禁在本批第二次生效（第一次是抓 `feature_flex.rs` 的 `type_complexity`）。
+
+### 遗留
+
+- **C0 的数据已就位，下一步就是 C2**（碎片合并）。验收标准现在有了明确数字：
+  滚动 302 碎片 → 合并后应 ≤ 4（计划里的C2 目标）。
+- **C1（矩形上屏）需要先做一次重构**：把行拷贝抽成纯函数，否则无法测试。
+  这是 D22 能否被回归保护的**前置条件**。
+- S1 剩余（A5 定时器 / A6 任务 waker / A7 杂项）仍未做。
+---
+
+## 2026-10-07 · S1 正确性 P0 —— A5 定时器取消 / A6 任务唤醒器 —— ✅ 完成（本批 6/7）
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 A5 / A6。
+> 完成后 S1 只剩 A7（5 项杂项）。
+
+### 决策
+
+1. **A5 采用"双检查"而不是"回调在表内执行"。**
+   根因是 `take_due_timers` 用 `remove` 把定时器**移出表**再执行回调（为了回调里能安全地
+   再设定时器）。改执行模型会牵动整条时序，所以改为在**放回之前**加两道检查：
+   ① 回调执行期间被 `cancel()` ⇒ 丢弃；② 所属窗口已注销 ⇒ 丢弃。
+   第② 条是**独立于用户行为**的兜底：没有它，关窗时正在执行的周期定时器会变成
+   "永不触发却一直持有闭包捕获"的孤儿。
+   为此给 `RuntimeInner` 加了 `cancelled_timers: RefCell<HashSet<u64>>`，
+   且**只在"回调执行期间取消"这种罕见情况**才进集合（普通 `cancel()` 走 `retain` 即可），
+   `reschedule_timer` 消费后立即移除 ⇒ 集合始终很小。
+
+2. **A6 选了比原计划更小的修法。**
+   计划里写的是"让 `TaskCtx` 在 post 时查询当前 slot"（需要把
+   `RuntimeInner.waker` 从 `RefCell<WakerSlot>` 改成 `Arc<Mutex<..>>`，
+   并波及 `event.rs` 的 `Emitter` + 10 余处测试）。
+   实测发现 `WakerSlot::Local` 持的是 **`Arc<LocalQueue>`（共享！）**，
+   于是给 `LocalQueue` 加一个 `forward: Mutex<Option<Arc<dyn Waker>>>`，
+   `set_waker` 时把平台 waker 装进**旧的**队列即可 ——
+   **改动 3 处、零结构变更**，且同样根治。
+
+3. **顺手改掉了一条"错误的正确"注释。**
+   `App::frame_all` 的文档写着"有平台时队列恒空 ⇒ 零开销"。
+   那个假设**恰恰是 bug 的来源**（有平台时并不恒空，因为快照可能还是 `Local`）。
+   已改为说明真实情况并指向修复。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/reactive.rs` | 新增字段 | `cancelled_timers: RefCell<HashSet<u64>>` |
+| `src/timer.rs` `TimerHandle::cancel` | 修改 | 表里找不到（= 正在执行）时**打取消标记** |
+| `src/timer.rs` `reschedule_timer` | 修改 | 放回前查①取消名单、②窗口是否仍注册 |
+| `src/timer.rs` `cancel_timers_of` | 修改 | 先把该窗口所有定时器 id 记入名单再删表 |
+| `src/task.rs` `LocalQueue` | 修改 | 新增 `forward` 转发器；`push` 有平台就转发；新增 `attach_platform` |
+| `src/task.rs` `Runtime::set_waker` | 修改 | 把平台 waker 装进**旧**本地队列并转交积压消息 |
+| `src/platform/mod.rs` `Runner::tick` | 修改 | 补`take_pending_external` drain（平台层此前完全没做） |
+| `src/app.rs` | 文档 | 修正"有平台时队列恒空"的错误假设 |
+| `src/timer.rs` | 新增 2 条测试 | 回调内取消自己/ 关窗不孤儿 |
+| `src/task.rs` | 新增 2 条测试 | 旧快照转发 / 积压消息转交 |
+
+### 教训：A5 的测试**第一版是假通过**，靠变异测试抓出来
+
+第一次写 `cancel_inside_own_callback_stops_interval_timer`，我在测试里这样执行回调：
+
+```rust
+(due[0].take_cb().unwrap())(&mut cx);
+rt.reschedule_timer(due.remove(0), now);
+```
+
+结果 `reschedule_timer` 里`take_cb()` 返回 `None` ⇒ 命中"回调被 take 走后没还回来
+（不该发生）"分支提前 return ⇒ **定时器当然不会回表**，断言恒成立 ——
+**测的其实不是取消逻辑，而是"cb 不在了"**。
+
+生产路径（`WindowCtx::tick`）是 `cb(&mut cx); timer.cb = Some(cb);` **会把 cb 还回去**，
+所以真实 bug 并不存在"cb 丢失"，而是我的测试没有复现生产写法。
+
+**去掉"取消名单"检查后测试仍然通过** —— 这个"变异没让测试变红"的现象才暴露了问题。
+修正：测试里照 `WindowCtx::tick` 的做法**把 cb 还回去**（新增 `run_one` helper），
+之后再去掉任一检查，对应测试立刻失败：
+
+| 变异 | 失败的测试 |
+|---|---|
+| 移除①取消名单 | `cancel_inside_own_callback_stops_interval_timer`（`timer_count` 1≠0） |
+| 移除②窗口检查 | `closing_window_does_not_orphan_the_executing_interval_timer`（1≠0） |
+
+> **结论**：变异测试不只用来验证"测试能抓 bug"，也用来验证**"测试本身没在测别的东西"**。
+> 一个断言恒成立的测试比没有测试更危险——它给人虚假的安全感。
+> 这条已写进 `refactor-plan` §四·主线 A 的配套要求。
+
+### 教训：第二个测试也犯了"前置断言把自己要验的东西清掉"的错
+
+`set_waker_forwards_already_queued_messages` 里我写了
+`assert_eq!(rt.take_pending_external().len(), 2, "前置条件：两条都在本地队列里")`
+作为前置检查 —— 而 `take_pending_external` 是**取走**，把待验证的消息清空了，
+于是 `set_waker` 之后当然转交不到。已去掉该前置断言，并在注释里写明"不要在这里 drain"。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok**；lib **379**（375 → 379，新增 4 条） |
+| ├ A5 变异 | 两道检查分别移除 → 对应测试**各自失败** |
+| ├ A6 变异 | 移除转发 → **2 条同时失败**（16 passed → 14 passed / 2 failed） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+测试总数 **389 → 447**（+58）。
+
+### S1 剩余
+
+- **A7（`D33` `D58` `D59` `D61` `D62`）**：阴影模糊超出脏区 / `clear_layout_flags` 吞脏标 /
+  `window_sizes` 永不清理 / Wheel 绕过指针捕获 / spinner 用 `SystemTime`（非单调时钟）。
+  五项都是小改动，可一次做完。
+---
+
+## 2026-10-07 · S1 正确性 P0 —— A7 杂项五项 —— ✅ 完成，**S1 收尾**
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 A7。
+> 至此 S1（A1–A7）全部完成，P0 表里的 8 项**全部修复并经变异验证**。
+
+### 变更清单（五项，各自独立）
+
+| 缺陷 | 修改 | 回归测试 |
+|---|---|---|
+| **D33** 阴影超出脏区 | `Node::paint_bounds` 在有阴影时按 `spread + blur * 1.5`（高斯 3σ）**四边保守外扩** | `paint_bounds_covers_shadow_blur_reach` + `paint_bounds_is_not_inflated_without_shadow`（确认无阴影时零扩张，保住"精确脏区"收益） |
+| **D58** 布局期间脏标被吞 | `Node` 加 `layout_epoch` + `Track` 加 `layout_epoch`；`mark_layout_dirty` 记录当轮纪元；`clear_layout_flags` **只清 `epoch < 当前`**；`layout()` 动手前 `begin_layout_epoch()` | `flags_raised_during_the_layout_round_survive_clear`（三轮：消费 → 本轮新提应保留 → 下一轮应消费） |
+| **D59** `window_sizes` 泄漏 | `unregister_window` 里一并`retain` 掉尺寸记录 | `unregister_window_clears_the_recorded_size` + `unregistering_one_window_keeps_the_other_size`（确认不是"清空全部"） |
+| **D61** Wheel 绕过捕获 | `let _ = pointer; hit::hit_path(…)` → `hit::hit_path_for(track, pointer, pos)` | `wheel_is_routed_through_pointer_capture` + `wheel_without_capture_follows_hit_chain`（确认不是"总发给捕获者"） |
+| **D62** spinner 用挂钟 | `Spinner` 加 `started: Instant`；相位改用 `self.started.elapsed().as_millis()` | 由既有 overlay 测试覆盖（相位单调性本质难断言，见遗留） |
+
+### 关键决策
+
+1. **D58 用epoch 而不是"清两轮"。**
+   先考虑过"清完再扫一遍、仍脏则重新冒泡"，但那样无法区分"刚标的"与"上一轮漏的"。
+   epoch 方案语义精确：标记带**提出时刻**，清理只动"本轮之前"的。
+   代价是 `Node` 多一个 `u32`（4 字节 × 节点数）。
+   `overflow_add` 而非 `+=` —— 42 亿轮后才回绕，且回绕语义仍是"旧的更小"，方向安全。
+
+2. **D33 选四边外扩而非只按 offset 方向。**
+   `offset_x/offset_y` 已知，但**模糊半径与 spread 在四周对称**；只朝 offset 方向扩会让
+   反方向的模糊边缘仍落在脏区外。四边扩多标一点，换来"不会漏"。
+
+3. **D33 必须配一条"无阴影时不扩张"的测试。**
+   否则将来有人把 `paint_bounds` 改成"永远外扩一点"，脏区红利会被静默吃掉，
+   而所有阴影相关测试仍然全绿。
+
+### 变异验证（逐项确认测试真能抓到）
+
+| 变异 | 结果 |
+|---|---|
+| `unregister_window` 去掉 `window_sizes` 清理 | **2 条 D59 测试失败** |
+| `clear_layout_flags` 去掉 epoch 判断（`if true`） | **D58 测试失败** |
+| Wheel 改回 `hit_path` | **D61 测试失败**（实际路由到 `kids[0]` 而非捕获者 `kids[1]`） |
+
+**门禁第三次抓到作者本人**：`ShadowSpec` 与 `lieui_geom::Size` 两个未使用导入
+（CI 用 `-D warnings`，会直接失败）。已清理。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok**；lib **386**（379 → 386，新增 7 条） |
+| `cargo clippy --workspace --all-targets` | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+测试总数 **389 → 454**（+65）。
+
+## S1 阶段总结
+
+| 批次 | 内容 | 结果 |
+|---|---|---|
+| A1 | 点击按键配对（`PressState`）+ 按下态泄漏 | D1 D10 |
+| A2 | `destroy` 登记旧矩形 + `damage_bounds` 不再静默放弃 | D2 D57 |
+| A3 | `close_requested` 落Cmd | D4 |
+| A4 | `view()` 值守 RAII + 断言 always-on | D8 |
+| A5 | 定时器取消双检查 + 关窗不孤儿 | D9 |
+| A6 | waker 转发 + 平台层 drain 本地队列 | D7 |
+| A7 | 阴影脏区 / epoch / 尺寸泄漏 / Wheel 捕获 / 单调时钟 | D33 D58 D59 D61 D62 |
+
+**P0 表 8 项（D1 D2 D3 D4 D7 D8 D57 + D5 待S4）全部修复**，每项都有变异验证过的回归测试。
+唯一未修的是 **D3（图片绕过裁剪栈）** ——它属S2 的 C3（需要先做 clip 栈），
+当前状态是**代码注释已自述该限制**，行为已知。
+
+### 下一步：S2（帧与脏区）
+
+按计划顺序：**主线B（帧调度）→ C1（矩形上屏）→ C2（碎片合并）→ C3（图片 clip）**。
+
+⚠️ **主线 B 必须先做 spike**：它是唯一"设计意图正确但改法不完整就会引入新故障"的地方 ——
+漏掉 `request_redraw` 闭环会把"帧跑 3 次"换成"定时器和动画停帧"。
+C0 已为其备好量化验收指标（`tests/perf_regression.rs` 里的
+`idle_frame_does_not_rasterize` / `marking_damage_reenables_rasterization`）。
+---
+
+## 2026-10-07 · S2 · 主线 B 帧调度收敛到单一入口（spike → 落地）—— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 B。
+> 这是全计划里唯一一个"设计意图正确但**改法不完整就会引入新故障**"的主线，
+> 所以先做 spike 验证闭环可行，再落地。
+
+### 决策
+
+1. **不按 v1.0 计划里的 `WindowCtx::last_frame: Instant` 闸门做**，改为**拆分职责**：
+   - `tick()`（平台层）= 完整帧，**只在 `RedrawRequested` 调用**；
+   - 新增 `pump()` = **只消费**定时器 / 动画帧 / 本地投递，**不渲染**，返回"是否有窗口做了事"。
+   理由：闸门方案只是"少跑几次"，而职责拆分**同时**解决了"timer 被 frame 次数放大"
+   和"帧跑 3 次"两个问题，且不引入新的时间状态。
+
+2. **闭环 = `pump()` 的返回值驱动 `request_redraw`。**
+   `WindowCtx::tick` 改成返回 `bool`（消费了定时器 / 动画帧 / 产生了命令 / tooltip 会话变化）。
+   `about_to_wait` 与 `user_event` 变成：
+   ```
+   if self.pump(now) { self.request_redraw_all(); }
+   ```
+   **漏掉这一环的后果**：定时器回调改了状态但没人重绘 ⇒ **停帧**（回调在跑、画面不动）。
+   这正是 v1.0 计划遗漏、我在评审里标为"唯一功能性风险"的那一环。
+
+3. **`update_tooltip` 也改成返回 `bool`**（tooltip 浮出 / 收回都改了树，需要重绘），
+   否则"悬停后等tooltip 出现"会停帧。
+
+4. **抽出 `schedule_wakeup(el)`** 供 `tick` 与 `about_to_wait` 共用，
+   避免两处各算一份"下一个唤醒时刻"（那正是"过期真相"的来源）。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/app.rs` `WindowCtx::tick` | **返回类型 `()` → `bool`** | 定时器到期 / 动画帧消费 / 有命令 / tooltip 变化 ⇒ true |
+| `src/app.rs` `update_tooltip` | **返回类型 `()` → `bool`** | 浮出或收回了 tooltip 层 ⇒ true |
+| `src/platform/mod.rs` `Runner::tick` | 语义收窄 | 成为 `RedrawRequested` 的**唯一**完整帧入口 |
+| `src/platform/mod.rs` `Runner::pump` | **新增** | 只消费定时器/动画/本地投递，返回"是否有工作" |
+| `src/platform/mod.rs` `request_redraw_all` | **新增** | pump 有产出时请求全部窗口重绘 |
+| `src/platform/mod.rs` `schedule_wakeup` | **抽出** | `tick` 与 `about_to_wait` 共用 |
+| `src/platform/mod.rs` `about_to_wait` | **改写** | 不再跑完整帧；`pump` + 条件 redraw + drain_requests + schedule_wakeup |
+| `src/platform/mod.rs` `user_event` | **改写** | 两个分支都改成 `pump`（不再 `tick`）|
+| `src/platform/mod.rs` `resumed` | 保持 | 首帧仍走完整 tick（正确：需要出画面） |
+
+### 验证
+
+**变异测试（关键）**：让 `WindowCtx::tick` 恒返回 `false`（即"pump 认为什么都没发生"）：
+
+```
+panicked at src\app.rs:5426:
+  定时器到期时tick 必须返回 true，否则 pump 后没人 request_redraw ⇒ 停帧
+test result: FAILED. 0 passed; 1 failed
+```
+
+⇒ 精确复现了"漏掉闭环 = 停帧"这个失败模式，测试有效。
+
+新增 2 条回归测试：
+- `tick_reports_true_when_a_timer_fires` —— 三段：无定时器 ⇒ false；定时器到期 ⇒ **true**；一次性消费后 ⇒ false。
+- `timer_callback_that_writes_state_marks_the_window_dirty` —— 定时器回调 `damage_all` 后该窗口确实被标脏
+  （"画面会更新"的直接保证，而不只是"tick 返回了 true"）。
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok**；lib **388**（386 → 388） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 已知限制（诚实记录）
+
+1. **平台层的"帧次数 3 → 1"无法在 `cargo test` 里直接断言** ——
+   它需要真实 `winit` 事件循环。已能断言的是**闭环的前提**（`tick` 的返回值语义）。
+   真机验证方式：`LIEUI_TRACE=1` 下观察 `[lieui] ...` 输出的次数，
+   或在 `damage_bench` 里加计数器。
+2. `about_to_wait` 现在会`drain_requests`（开窗 / 关窗请求）——
+   因为它不再走 `tick`，必须自己做这件事，否则关窗按钮点了没反应。
+   这条路径新增了，需要真机点一次关窗按钮验证。
+3. **`resumed` 仍走完整 `tick`**（正确：那时还没有画面，必须出首帧）。
+
+### 下一步
+
+**C1（矩形上屏，`D22`）**：改 `platform/mod.rs:485-497` 为按列拷贝。
+前置条件（C0 时记录的）：**必须先把"行拷贝宽度"抽成可测的纯函数**，
+否则 `local_present_should_not_copy_full_rows` 这条 `#[ignore]` 永远测不了。
+---
+
+## 2026-10-07 · S2 · C1 局部上屏只拷矩形内像素（D22）—— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 C1。
+> C0 时留的前置条件（"必须先抽出可测的纯函数"）已在本批满足。
+
+### 决策
+
+1. **先抽纯函数、再改调用点**，而不是直接改内联循环。
+   理由：`present_with_damage` 在 `#[cfg(feature = "winit")]` 平台层内且需要真实 `surface`
+   ⇒ **改完无法写测试**。抽出 [`copy_damage_rects`] 后，"拷贝量∝ 脏区面积"这条不变量
+   才落进 `cargo test` 的保护范围。
+
+2. **顺带把 `perf_regression.rs` 里那条 `#[ignore]` 换成真实断言。**
+   那条占位注释明确写了"修 C1 时应把行拷贝宽度抽成可测的纯函数"——
+   前置条件既已满足，占位就该兑现，否则会变成"忘了回来的债"。
+
+3. **越界一律静默裁剪，不 panic**（与 `pack_xrgb` 的 `min` 语义一致）：
+   窗口被最小化、或脏区超出表面尺寸是常态，不是错误。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/platform/mod.rs` | **新增 `copy_damage_rects`** | 纯函数：按**矩形**（含 x/width）拷贝，返回拷贝像素数；越界 clip；`stride == 0` 早退 |
+| `src/platform/mod.rs` `present` | 修改（D22） | 局部路径由"内联整行拷"改为调用该纯函数 |
+| `src/platform/mod.rs` | 新增 4 条测试 | 见下|
+| `tests/perf_regression.rs` | `#[ignore]` → 真实断言 | `local_present_copies_proportionally_to_damage_area`（端到端面积关系护栏） |
+
+### 量化效果（测试里钉住了）
+
+一个 **40×20** 的脏区，在 1280 宽的窗口上：
+
+| | 拷贝像素数 |
+|---|---|
+| 旧行为（整行拷） | 20 × 1280 = **25 600** |
+| 修复后 | 40 × 20 = **800** |
+| **倍数** | **32×** |
+
+`old_behaviour_would_copy_the_whole_row` 这条测试把这个倍数关系直接断言下来
+（`old / new == 5`，在 200 宽的窗口上），让"修了之后省了多少"有据可查。
+
+### 变异验证
+
+把 `w` 退回 `stride`（= 旧行为）后，**4 条测试同时失败**：
+
+| 测试 | 失败信息 |
+|---|---|
+| `copy_damage_rects_only_touches_the_rect` | 拷贝量 4000 ≠ 800 |
+| `copy_damage_rects_sums_multiple_rects` | 1152 ≠ 164 |
+| `copy_damage_rects_clips_out_of_bounds` | 64 ≠ 4 |
+| `old_behaviour_would_copy_the_whole_row` | 4000 ≠ 800 |
+
+### 顺带修正一处 API 假设
+
+测试里发现 **`softbuffer::Length` 是 `NonZeroU32` ⇒ 长度 0 无法表达**
+（`w.into()` 不成立）。既有 `softbuffer_damage` 里已用 `.max(1)` 兜底（其 `nz`），
+本批测试 helper 对齐该约定，并把"零尺寸"断言改成记录**已入档的行为**（夹成 1）
+而不是臆测"零尺寸不拷"。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| **`cargo check --no-default-features`** | exit 0（纯库形态未被破坏；新测试已加 `#[cfg(feature = "winit")]`） |
+
+### `perf_regression` 剩余的 1 条 `#[ignore]`
+
+`scrolling_list_produces_more_than_eight_fragments`（**D21**）——
+等 C2（碎片合并）修完后改成正断言。基线数字已在C0 记录：**滚动一次 302 碎片**。
+
+### 下一步：C2（碎片合并）
+
+C0 的数据已就位（302 碎片 / 标脏 30 节点也退化整窗），验收标准明确：
+**合并后 ≤ 4 块**。做法是在 `damage_batches` 判定退化**之前**先做矩形合并
+（相交或间距 < GAP 求并），策略由 `damage_bench` 的三种实现对比选定，
+不硬编码 45% / 8 两个魔数。
+---
+
+## 2026-10-07 · S2 · C2 脏区合并（D21）—— ✅ 完成，**并纠正我自己的一个错误结论**
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 C2。
+
+### ⚠️ 先纠正：C0 阶段我给出的 D21 定性是**错的**
+
+C0 我看到"滚动一次 302 碎片 ⇒ 退化为整窗"，就写下"这不是滚动场景的优化，而是**任何 ≥9 节点变化都普遍失效**"，
+并据此把它当成P0 级问题汇报。**这个推论是错的**，本批动手时才发现：
+
+> **滚动 20px 时，窗口内每一行都位移了 ⇒ 脏区本就覆盖整个视口。**
+> 此时退化为整窗**是正确的**——按 302 个碎片分别光栅的总面积是窗口的 8.4 倍（碎片高度重叠）。
+
+我犯的错是：**只看了"退化了"这个事实，没验证"退化是否真的更差"**。
+`damage_batches` 的面积判据（> 45% ⇒ 整窗）在这里正确地拦住了 8.4 倍的光栅量。
+
+C0 的数据没错，但**我的解读错了**。这也说明：光有指标不够，还必须问"这个指标意味着什么"。
+
+### 修正后的D21 定性
+
+退化整窗在两种情况下是**正确**的：
+1. 脏区**总面积**接近窗口（如滚动）⇒ 整窗更划算；
+2. 碎片**高度重叠**（滚动、连续动画）⇒ 应先合并。
+
+退化整窗在一种情况下是**纯浪费**：
+- 碎片多**且分散**、总��积很小 ⇒ 旧判据 `out.len() > 8` 让它们白白整窗。
+
+**实测（修后，1280×720）**：
+
+| 场景 | 碎片 | 批次 | 光栅像素 | 判定 |
+|---|---|---|---|---|
+| **分散 10 个按钮** | 10 | **5** | **7 546**（0.8%） | ✅ 局部，**省 122 倍** |
+| 集中 30 节点 | 30 | 1 | 921 600（整窗） | ✅ 整窗正确（面积确实过半） |
+| 滚动 50 行 | 302 | 1 | 921 600（整窗） | ✅ 整窗正确（脏区本就覆盖全视口） |
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/render/raster.rs` | **新增 `merge_rects`** | 相交或间隙 ≤ `MERGE_GAP`(2px) 的矩形求并。**不做"全部并成一个"**（那正是 `damage_batches_union` 的问题，会让分散更新退化） |
+| `src/render/raster.rs` | 判据调整 | `MAX_BATCHES` 8 → **32**；阈值提为具名常量 `MAX_BATCHES` / `AREA_FALLBACK_RATIO`；面积在**合并之后**统计 |
+| `src/render/raster.rs` |既有测试更新 | `batches_dedupe_and_clamp` → 更名 `batches_dedupe_and_merge_adjacent`，断言从"2 块"改为"1 块"（旧断言假设"只去重完全相同的"，与C2 的合并语义冲突） |
+| `src/render/raster.rs` | 新增 8 条测试 | 合并的相交/间隙/远离/面积守恒/幂等/传递闭包/空与单元素 + 判据测试 |
+| `tests/perf_regression.rs` | 测试重写 | `marking_many_nodes…` 改成"集中 vs 分散"**成对**测试 |
+
+### 关键设计点
+
+1. **`merge_rects_never_shrinks_total_area`** 是本改动的**安全护栏**：
+   合并只会让重画面积**变大或不变**（并集 ⊇ 各部分）⇒ "少画"这个风险不存在，**绝不会漏画**。
+2. **不合并远离的矩形**（`merge_rects_keeps_distant_rects_apart`）——
+   否则就退化成 `damage_batches_union`，分散更新又被包成一个大盒。
+3. **传递闭包**（`merge_rects_transitively_merges_a_chain`）：a~b 相交、b~c 相交 ⇒ 三者并成一块。
+   贪心必须满足这个，否则碎片数压不下去。
+4. **测试场景成对**（集中 vs 分散）—— 集中那个是**镜像护栏**：
+   防止将来有人"为了不整窗而整窗"（把面积判据也调到永不fallback）。
+
+### 变异验证
+
+禁用合并逻辑（`if near` ⇒ `if false`）后，**5 条测试同时失败**：
+
+| 测试 | 失败原因 |
+|---|---|
+| `merge_rects_unions_overlapping_rects` | 相交未合并 |
+| `merge_rects_unions_nearby_rects_within_gap` | 间隙 ≤ GAP 未合并 |
+| `merge_rects_transitively_merges_a_chain` | 链式未合并 |
+| `batches_dedupe_and_merge_adjacent` | 接触的未合并 |
+| **`batches_fall_back_to_the_full_window_when_damage_is_large_or_fragmented`**（既有） | 它记录的正是**"碎片多就整窗"的旧行为** |
+
+最后一条是意外收获：那个既有测试**恰好钉住了旧行为**，所以 C2 一改就报红——
+说明"退化整窗"这条路径原本也是有测试的（只是没人意识到它同时挡住了正确行为）。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 下一步：C3（图片走裁剪栈，`D3`）
+
+`raster.rs:480` 自述"图片 blit 不参与 `PushClip` 裁剪栈" ⇒ 滚动/圆角裁剪内的图片**溢出到裁剪区外**。
+做法：在 `rasterize` 的 op 循环里维护一个软件 clip 栈，`blit_image` 接收当前 clip 并对 dst 求交。
+顺带把最近邻换成双线性（当前每像素 12 次整数运算）。
+
+同时可把 `scrolling_list_produces_more_than_eight_fragments` 那条 `#[ignore]` 删掉了——
+它记录的前提（"滚动必然退化整窗"）经核实是**正确行为**，不是待修的 bug。
+---
+
+## 2026-10-07 · S2 · C3 图片参与裁剪栈（D3）—— ✅ 完成，**P0 表收官**
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 C3。
+
+### 关键产出：修D3 时顺带拆掉一个**潜伏的 panic**
+
+写完 C3 的像素测试后第一次运行，直接 panic：
+
+```
+panicked at vello_common-0.3.0/src/clip.rs:307:
+  clip stack underflowed
+```
+
+**根因**：`flush_segment`（图片边界处调用）里的 `ctx.reset()` 会**清空 vello 的裁剪栈**，
+而 `PopClip` 是按 op 顺序到来的 ⇒ reset 之后遇到 `PopClip` 就 underflow。
+
+**为什么此前没炸**：只有"裁剪区内有图片"才会走到 `flush_segment`，
+而在此之前图片**根本不受裁剪约束**（这正是 D3），于是这个组合从未被触发过。
+**修D3 的第一步就把它暴露出来了** —— 两个缺陷叠在同一条路径上。
+
+修法：`flush_segment` 增加 `clip_stack` 参数，`reset()` 之后按软件栈**重建一层**
+（栈顶已是各层交集，一层就够）。这让"图片分段渲染"与"vello 裁剪栈"保持一致。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/render/raster.rs` `rasterize` | 修改（D3） | op 循环里并行维护**软件裁剪栈**；`Op::PushClip`/`PopClip` 从"直接 submit"改为"先维护栈再 submit"；`Op::Image` 拿栈顶与目标矩形求交 |
+| `src/render/raster.rs` `flush_segment` | 修改 | 新增 `clip_stack` 参数；`reset()` 后重建一层 vello 裁剪 |
+| `src/render/mod.rs` | 新增 2 条像素测试 | `image_is_clipped_by_its_container` / `unclipped_image_still_renders` |
+| `tests/perf_regression.rs` | `#[ignore]` → 正断言 | 删掉那条**基于错误前提**的 D21 占位（见 C2 日志的更正），改成 `scrolling_falls_back_to_full_window_and_that_is_correct` |
+
+### 设计要点
+
+1. **软件栈每个元素是"到该层的交集"**，不是单个 clip 矩形 ——
+   这样嵌套裁剪天然取交集，且 `flush_segment` 重建时只需推**栈顶一个**。
+2. **栈空 ⇒ 用批次边界**（"不额外裁剪"），而不是"不裁剪" ——
+   批次画布本身就是边界，图片超出批次部分本来就不会被拷回。
+3. **整块被裁掉 ⇒ 直接跳过** `blit_image`，省掉一次采样循环。
+4. **两条测试成对**（`clipped` / `unclipped`）—— 后者确认前一条不是"把图片整个干掉了"。
+
+### 变异验证
+
+把clip 改成 `batch_bounds`（= 图片不参与裁剪）后，像素测试**精确抓到溢出**：
+
+```
+panicked at src\render\mod.rs:177:像素不匹配：PremulRgba8 { r: 255, g: 0, b: 0, a: 255 }
+  left: (255, 0, 0, 255)      ← 裁剪外竟是红色（图片溢出）
+ right: (255, 255, 255, 255)  ← 期望背景白
+```
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `tests/perf_regression.rs` | **9 passed / 0 ignored**（曾有 2 条基于错误前提的占位） |
+
+门禁顺带抓到一次doc 引用块语法错误（`>` 标记不完整），已修——
+这是 `[lints]` 之外的 rustdoc linter 在起作用。
+
+## P0 表收官
+
+| ID | 缺陷 | 状态 |
+|---|---|---|
+| D1 | 点击按键配对 | ✅ A1 |
+| D2 | `destroy` 不登记脏区 | ✅ A2 |
+| **D3** | **图片绕过裁剪栈** | ✅ **C3（本批）** |
+| D4 | `close_requested` 丢 Cmd | ✅ A3 |
+| D5 | 命中/渲染裁剪坐标系不一致 | ⏳ S4（与 G3 几何收敛一起做） |
+| D7 | 任务唤醒器失效 | ✅ A6 |
+| D8 | `view()` 值守 | ✅ A4 |
+| D57 | `damage_bounds` 静默放弃 | ✅ A2 |
+
+**8 项 P0 中 7 项已修复**（D5 因需重构几何求值而在 S4）。
+剩下 D5 与 D11/D12/D13（焦点互斥）、D6（Modal 内Popup）构成 S4。
+
+### 下一步建议
+
+S2 剩余 **C4（display list）** 收益大但工程量大；S3 的 **D-b（滚动脱离布局）** 风险最高。
+建议先做 **S3 的低风险部分**（D-a FlexNode 持久化 + 消文本双测、D-c MAX_ITER/snapping），
+因为 `lieui-layout` 的特征矩阵已就位（36 条），是动布局的安全网。
+---
+
+## 2026-10-07 · S3 · D-c① 冻结循环迭代上限（MAX_FLEX_ITERATIONS）—— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 D-c。
+
+### 决策
+
+1. **确认了"无上限while"的真实死循环路径**（不是理论风险）。
+   `flex_line.rs:198-207` 里：若 `total_violation != 0`，代码去冻结
+   `min_violations`（总违例>0）或 `max_violations`（总违例<0）。
+   **若两者都为空而 `total_violation != 0`**（violation 一正一负、浮点求和没抵消成精确 0）
+   ⇒ 该轮**什么都不冻结** ⇒ 下一轮输入完全相同 ⇒ **死循环**。
+   而这是 GUI 框架的**主线程** ⇒ 整个应用挂死。
+
+2. **超限时"接受当前结果"而不是"强制冻结剩余"**。
+   理由：强制冻结会让这些 item 的尺寸停在某个中间值，可能更怪；
+   而"接受当前结果"至少保证画面完整（只是违反 min/max）。**渲染略怪 ≫ 应用没反应。**
+
+3. **不是无声无息地接受**：debug 下打一行 `eprintln`，
+   让"布局不收敛"成为**可诊断**的问题，而不是"偶尔画得怪"。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `crates/lieui-layout/src/flex_node.rs` | 新增 `MAX_FLEX_ITERATIONS` | `pub const = 32`（正常收敛远少于 10 轮，足够宽松） |
+| `crates/lieui-layout/src/flex_node.rs` | 修改 | `while !resolve_flexible_lengths(..) {}` ⇒ 带计数与上限的循环 |
+| `crates/lieui-layout/tests/feature_flex.rs` | 新增测试 | `flex_negotiation_always_terminates`（min>max 冲突 + 强制 shrink，要求**必定终止且结果有限**） |
+
+### 踩坑记录：追加测试时破坏了文件结构
+
+用脚本追加测试后连续出现三种症状：
+
+1. `function ... is never used` —— 新测试被**嵌进了上一个函数体内**（局部 fn）
+2. `unexpected closing delimiter` —— 补了括号但末尾又多一个 `}`
+3. 测试数不涨 —— 以为"用了旧二进制"，其实是**局部 fn 不被 test harness 收集**
+
+**定位方法**：`cargo fmt` 会把结构规范化并暴露缩进异常（它对语法合法但结构异常的文件**不报错**，所以得自己看缩进）；
+以及 `Select-String -Pattern 'mod tests'` 确认**集成测试文件没有 `mod tests`，全是顶层函数**——
+我一开始误以为有 `mod tests {}`，于是按"追加到 mod 内"的假设去 TrimEnd + 去最后一个 `}`，结果把 `fn` 的闭合当成了 mod 的闭合。
+
+**教训**：批量追加代码到已有文件前，**必须先确认末���的结构**（有 mod tests？还是顶层函数？），
+否则"少一个/多一个大括号"会让新代码**静默地变成局部函数** —— 测试不报错、也不执行，
+比编译失败更难发现。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok**；`feature_flex` 16 → **17 passed** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告（warning 已消失） |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### D-c 剩余
+
+- **像素 snapping + 统一浮点容差**（D37）：现状是四套容差
+  （`types.rs` 1e-4 / `layout.rs` `rect_eq` 1e-3 / 滚动钳制 1e-4 / 锚点 1e-2）
+  ⇒ 1px 分隔线与文本持续半像素模糊。
+  **注意**：这条要先想清楚"snapping 在哪一层做"（布局出口？光栅化前？），
+  否则可能引入新的 1px 抖动。风险中等，建议单独一批。
+- **轴序统一**（D48）：`types.rs` 里 `[L,T,R,B]` 与 `K_AXIS_*` 用的 `[L,R,T,B]` 两套。
+  这是纯内部约定，但**索引错了很难发现**（可能编译通过、行为偏 1px）。
+  建议加编译期断言（`const _: () = assert!(...)`）而不是直接重排——重排风险高、收益低。
+---
+
+## 2026-10-07 · S3 · D-a 前置 —— D44 修复 + 消除 TextSpec 克隆 —— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 D-a / D-c。
+
+### 决策
+
+1. **先修 D44，再谈持久化**。D-a 的主体是"FlexNode 持久化复用"，而 D44
+   （`layout()` 永久改写 `flex_basis` 且不恢复）**正是持久化的地雷**：
+   节点一旦被复用，残留的 `flex_basis` 会直接变成"同一棵树两次布局结果不同"。
+   **顺序不能反** —— 先做持久化再修 D44，会把残留带进每一帧。
+2. **只修真实使用路径上的 D44a**。D44 还有一条 `tight_width` 的 `f32::MAX` 笔误，
+   但它属于 `LayoutConstraint`—— 而 `LayoutConstraint` / `IntrinsicSize` /
+   `measurable.rs` / `constraint.rs` 共 142 行**主 crate 零引用**（纯死抽象）。
+   **归入 D43/G3 的删死代码范围，本批不动**（避免范围蔓延）。
+   > 顺带印证："没人用所以没被发现" —— `tight_width` 的笔误就是死代码的典型代价。
+3. **二次测量分两步做，本批只做低风险的一半**。
+   `desired_size` 对 Text/Input 重新调 `TextEngine::measure_text`，而 flex 引擎
+   **内部已经测过一次**。完全消除需要复用 flex 的测量结果，但：
+   - `FlexNode::layout_result.dim` 是**布局后**尺寸（可能被 flex 拉伸/收缩）；
+   - 而 `desired_size` 要的是**内容测量尺寸**（它走 `paint_bounds` 的文本收缩路径，
+     若变成拉伸后尺寸，脏区就会偏大 ⇒ "精确脏区"退化）。
+   ⇒ **直接复用 `layout_result.dim` 是语义错误**。要正确复用必须给 `LayoutResult`
+   加一个"原始测量尺寸"字段并在 flex 测量点写入 —— 那是跨 crate 的 API 扩展，
+   留到下一批单独做（见「遗留」）。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `crates/lieui-layout/src/flex_node.rs` `layout` | 修改（D44） | `flex_basis` 写入前备份、布局后**还原**（与 `dim` 的 `swr`/`shr` 还原成对） |
+| `src/layout.rs` `desired_size` | 修改（D-a） | `TextSpec` 由 `clone()` 改为**按引用**传（`font_family: String` ⇒ 每次克隆 = 一次堆分配 + 字节拷贝） |
+| `crates/lieui-layout/tests/feature_flex.rs` | `KNOWN BUG` → 正断言 | `layout_leaves_flex_basis_untouched`、`repeated_layout_is_idempotent`（**D-a 持久化的前置条件**） |
+| `src/layout.rs` | 新增 2 条测试 | `text_desired_size_is_the_measured_content_size`、`input_desired_size_uses_placeholder_when_empty` |
+
+### 关键：幂等性是持久化的**硬前置**
+
+`repeated_layout_is_idempotent` 连续 `layout` 四次，断言尺寸不变。
+**修复前这条会失败**（第二次的协商输入已被残留的 `flex_basis` 改掉）。
+
+这意味着：**如果先做持久化再做 D44，缓存里的节点会带着上一帧的 `flex_basis`**，
+且因为"布局不再执行"而永远错下去 —— 一个只在特定节点尺寸下出现的诡异 bug。
+所以两者的顺序不是风格问题，是正确性问题。
+
+### 变异验证
+
+去掉 `flex_basis` 的还原后：
+
+```
+panicked at crates/lieui-layout/tests/feature_flex.rs:354:
+  D44：layout 必须还原 flex_basis（当前被写成了 100）
+test result: FAILED. 16 passed; 1 failed
+```
+
+⇒ 精确抓到，且证实**只有根节点受影响**（与 C2 日志里实测的范围一致）。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok**；`layout` 26 → **28 passed**；`feature_flex` 17 passed |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### D-a 遗留（本批未做，需单独设计）
+
+**① 完全消除二次测量**（本批只消掉了 `TextSpec` 克隆，测量本身还在跑两次）
+- 方案：给 `LayoutResult` 加`measured_content: [f32; 2]`，在 flex 的 `measure_text`
+  调用点写入**内容尺寸**（不是布局后尺寸），`desired_size` 直接读回。
+- 风险点：必须确认 flex 内部所有测量入口都覆盖到，且 wrap 场景下
+  "测量时的约束宽度"与 `desired_size` 假设的一致 —— `layout.rs:739` 那条
+  `wrapped_text_draws_with_the_same_wrap_width_as_measure` 正是这条的护栏。
+
+**② FlexNode 持久化（D-a 主体）**
+- 需要：`Node.flex_cache: FlexNode` + `build()` 只在 patch 时更新对应节点 +
+  align 的 patch 路径能失效缓存。
+- **现在可以做了**（D44 已清障），但仍是本计划里改动面最大的一项：
+  涉及 `Node` 结构、`align` 的失效传播、`layout` 的 build 逻辑三处联动。
+---
+
+## 2026-10-07 · S1 正确性 P0 —— A4 view() 值守 RAII + always-on 断言 —— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 A4。
+
+### 决策
+
+1. **`begin_view()` 改为返回 RAII 守卫，删除手写的 `end_view()`。**
+   触发原因不是风格偏好，而是**真实缺陷**：`view()` 是**用户代码**，它 panic 时
+   `end_view()` 永不执行 ⇒ `in_view` 永久停在 `Some(..)` ⇒ 此后该窗口所有
+   `Signal::set` 都被 `assert_not_in_view` 拦下，**Runtime 被永久毒化**。
+   原 `end_view()` 带着 `#[allow(dead_code)]`，但生产路径（`app.rs` 的 `frame`）在用。
+
+2. **`assert_not_in_view` 去掉 `cfg!(debug_assertions)` 门禁，改always-on。**
+   代价只是读一个 `Cell<Option<WindowId>>`；换来 release 下也能 fail-fast，
+   而不是变成"每帧 view → set → 再 view"的**永久满帧自激**（100% CPU、不报错、无日志）。
+   设计 §四本就把这条列为"违反会 panic 或死循环"的硬纪律。
+
+3. **`ViewGuard` 放在模块级而非 `impl Runtime` 内部**——第一版误放进 impl 块，
+   编译报 `structs are not allowed in struct definitions`。这是本次连续第三次
+   遇到"编辑插入位置错导致结构损坏"（前两次见 A2/A3 日志），已形成习惯：**改完必编译**。
+
+4. **已有测试 `set_inside_view_panics` 带 `#[cfg(debug_assertions)]`** ——
+   **测试本身只在 debug 下存在，这正是 D8 的证据**。所以是**升级**它（去门禁 + 改 RAII），
+   而不是新增一条重复测试。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/reactive.rs` | 新增 `ViewGuard` + `Drop` | 守卫持有 `&Cell<Option<WindowId>>`，`Drop` 时置 `None` |
+| `src/reactive.rs` `begin_view` | 改签名 | `-> ViewGuard<'_>`；**删除 `end_view()`** |
+| `src/reactive.rs` `assert_not_in_view` | 修改（D8） | 去掉 `cfg!(debug_assertions)` |
+| `src/app.rs` `frame` | 修改 | `let _view_guard = rt.begin_view(self.id);` … `drop(_view_guard);` |
+| `src/reactive.rs` | **升级**已有测试 | `set_inside_view_panics` 移除 `#[cfg(debug_assertions)]` + 改 RAII 形式 |
+| `src/reactive.rs` | 新增测试 | `view_guard_recovers_after_panic` |
+| `src/reactive.rs` | 测试迁移 | `get_inside_view_is_fine_and_no_dirty_is_marked` 改用 RAII |
+
+### 验证
+
+**A4 变异测试**（把 `ViewGuard::drop` 改成空操作，精确模拟"`end_view()` 未被调用"）：
+
+```
+panicked at src\reactive.rs:699:
+  panic 后 in_view 必须被守卫释放，否则 Runtime 被永久毒化
+test result: FAILED. 0 passed; 1 failed
+```
+
+> 变异设计说明：第一次尝试的变异（把 `let _guard = ...` 改成先 panic 再 `drop`）是**无效变异** ——
+> Rust 的 RAII 语义保证 panic 展开时仍会调用 `Drop`，测试照样通过。
+> 正确做法是直接把 `Drop` 实现清空，才能模拟原代码"手写 `end_view()` 未执行"的真实情形。
+> **这印证了本项目一直坚持的"变异测试也要验证变异本身有效"。**
+
+**完整门禁**：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **15 个测试二进制全ok**，合计 **476**（改造前 389） |
+| `cargo clippy --workspace --all-targets`（`all = "deny"`，CI 用 `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+剩余 2 条 `#[ignore]` 均为**已入档的KNOWN BUG**（`align_content: SpaceEvenly` 静默退化、
+`line_space` 死配置），是特征测试里显式记录的既有能力缺口，不是被遗忘的债。
+
+### S1 剩余
+
+- **A5（D9）**：定时器回调内 `cancel()` 无效；关窗后成孤儿。
+- **A6（D7）**：`run()` 之前 `spawn_task` 永久静默挂起（waker 快照过期 + 本地队列 GUI 模式不 drain）。
+  **建议先加诊断**，让"静默"变成"可报错"——这类"卡住且不吭声"的缺陷最难被用户报告。
+- **A7（D33/D58/D59/D61/D62）**：阴影超脏区 / `clear_layout_flags` 吞脏标 / `window_sizes` 泄漏 /
+  Wheel 绕过捕获 / spinner 用 `SystemTime`。
+---
+
+## 2026-10-07 · S3 · D-a 消除文本二次测量 —— ✅ 完成
+
+> 执行基线：[`docs/refactor-plan.md`](./refactor-plan.md) v1.1 §四·主线 D-a。
+> 本批与「D44 修复 + `TextSpec` 克隆消除」同属D-a，但**独立成批**（前一批日志已记录）。
+
+### 决策
+
+1. **加 `FlexNode::measured_content`，而不是复用 `layout_result.dim`。**
+   这是本批**最关键的一条判断**：`layout_result.dim` 是**布局后**尺寸（会被 flex 拉伸/收缩），
+   而 `Node.desired` 要的是**内容测量尺寸** —— 它走 `paint_bounds` 的文本收缩路径，
+   若误用布局后尺寸，被拉伸过的文本会让脏区偏大 ⇒ **"精确脏区"直接退化**。
+   两者**必须**分开记，这也是 `measured_wrap_width` 已经在用的模式（绘制复用同一约束）。
+
+2. **约定 `[0.0, 0.0]` = "本轮没测量"**，宿主用 `> 0.0` 守卫后回落原路径。
+   这样 Image/Custom/容器都不受影响（它们本来就不走文本测量）。
+
+3. **记录点必须在 flex 拉伸/收缩之前**（`layout_single_node` 里`content_w/h` 算完立刻记），
+   否则记下的就是被改写后的值。变异测试专门验证了这一点。
+
+4. **顺带发现并修正了一个"测试无法区分"的问题**：
+   复用与重测的**结果完全相同**，所以主 crate 现有的 `desired` 测试**无法验证是否真的复用了**。
+   解决办法是**在 `lieui-layout`侧直接钉契约**：构造"可拉伸的文本叶子"，
+   断言 `measured_content < layout_result.dim`。这样"两者必须分开"成了可执行的不变量。
+
+### 变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `crates/lieui-layout/src/flex_node.rs` | 新增字段 | `measured_content: [f32; 2]`，含"为什么不能复用 `layout_result.dim`"的文档 |
+| `crates/lieui-layout/src/flex_node.rs` `new` | 修改 | 初始化为 `[0.0, 0.0]` |
+| `crates/lieui-layout/src/flex_node.rs` `layout_single_node` | 修改 | 在 flex 拉伸/收缩**之前**记录 `content_w/h` |
+| `src/layout.rs` `desired_size` | 修改（D-a） | 文本 / Input **优先复用** `flex.measured_content`，`[0,0]` 时回落原路径 |
+| `crates/lieui-layout/tests/feature_flex.rs` | 新增 3 条测试 | 见下 |
+
+### 测试
+
+| 测试 | 钉住什么 |
+|---|---|
+| `measured_content_is_content_size_not_stretched_size` | ★ 核心：`measured_content`（内容宽）**必须小于** `layout_result.dim`（拉伸后宽） |
+| `measured_content_is_zero_for_non_text_leaves` | 非文本叶子不伪造测量值 |
+| `measured_content_is_zero_for_containers` | 容器同理（宿主走"取引擎分配尺寸"分支） |
+
+**变异验证**（移除记录语句）：
+
+```
+test measured_content_is_content_size_not_stretched_size ... FAILED
+test result: FAILED. 19 passed; 1 failed
+```
+
+### 踩坑记录：括号错位（**第四次**同一个坑）
+
+追加测试后编译报 `unclosed delimiter`。根因与前三次完全相同：
+`feature_flex.rs`是**顶层函数**文件（无 `mod tests`），而我用的是
+"TrimEnd + 去掉最后一个 `}`"这个假设—— 那个 `}` 是**最后一个函数的闭合**，不是 mod 的。
+
+**正确做法（下次务必用这个）**：保留原文件不动，把新内容**追加到文件末尾**
+（`[System.IO.File]::AppendAllText`），只在新内容内部保证括号自闭合。
+`AppendAllText` 不需要动原文件 ⇒ 不可能破坏既有结构。
+
+> 判据：脚本追加前先确认"文件末尾是 mod 的 `}` 还是函数的 `}`"。
+> `Select-String -Pattern 'mod tests'` 一下就有答案。
+
+### 门禁第四次抓到作者本人
+
+`clippy::field_reassign_with_default`：`TextSpec::default()` 之后逐字段赋值。
+改成 struct literal + `..Default::default()`。
+（此前三次分别是 `type_complexity`、无用 `mut`、`doc` 引用块语法。）
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **13 个测试二进制全 ok**；`feature_flex` 17 → **20 passed** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### D-a 剩余
+
+- **FlexNode 持久化（D-a 主体）**：`Node.flex_cache: FlexNode` + `build()` 只在 patch 时更新
+  对应节点 + `align` 的失效传播能清缓存。
+  **前置条件已全部就位**（D44 已修、幂等性有测试、特征矩阵 40 条）。
+  但它仍是全计划改动面最大的一项：`Node` 结构 + `align` 失效传播 + `layout` build 三处联动。
+- **D-c 剩余**：像素 snapping + 统一浮点容差（D37，四套容差 1e-4/1e-3/1e-4/1e-2）；
+  轴序统一（D48，建议加编译期断言而非重排）。
+- **D-b**（滚动脱离布局）风险最高，建议在 C4display list 之后。
+---
+
+## 2026-10-07 · 审计复核 —— D5 推翻 / D37 部分修正 / D-a 收益重估
+
+> 本批**没有修任何 bug**，而是**推翻了一条P0、修正了一条 P2、重估了一项改造的收益**。
+> 记录在案是因为：**误判的代价高于漏判** —— 执行者会去"修"一个不存在的缺陷，
+> 改动真实代码，反而引入新bug（这正是 refactor-plan 反复警告的"边改边退化"）。
+
+### 一、D5（裁剪坐标系不一致）—— ❌ 误判已推翻
+
+三份审计都把D5 列为 **P0**，理由是：
+
+> `hit.rs:104-108` 用逆变换后的**局部点**测 `clip`；
+> `scene.rs:471-480` 把 `clip` 当与 `rect()` 同空间取交 ⇒ **两者坐标系不一致**
+
+**代码核实结论：两侧同语义，D5 不成立。**
+
+| 侧 | 事实 |
+|---|---|
+| 渲染 | `scene.rs:462` 是 `Op::PushClip { rect: c, transform }` —— `c` 与 `rect()` 同为**节点本地空间**，且 `transform` 被**显式携带**，由光栅器映射到窗口空间 |
+| 命中 | `hit.rs:99-108` 先 `q = to_local.apply(p)` 逆变换到本地，再 `clip.contains(q)` |
+
+审计的推断错在**只看了 `hit.rs` 的局部量，没看 `scene.rs` 同时传了 `transform`**。
+
+**处理方式：不只是"删掉这条"，而是补契约测试把正确语义钉死**（`src/hit.rs` 的 `d5_clip_space` 模块，2 条）：
+
+- `clip_is_tested_in_node_local_space` —— 用 `translate(100,0)` 构造**能区分两种语义**的场景：
+  正确（clip 本地）时 `(110,10)` 可命中；错误（clip 窗口空间）时窗口 clip 落在原点，`(110,10)` 被拒。
+- `clip_cannot_widen_the_node_rect` —— 反向确认 clip 不得把可命中区扩到节点矩形之外。
+
+**变异验证**（把 `clip.contains(q)` 改成 `clip.contains(p)`，即模拟"坐标系不一致"这个缺陷本身）：
+
+```
+panicked at src\hit.rs:413:
+  clip 内的点应可命中（clip 在节点本地空间）
+test result: FAILED. 1 passed; 1 failed
+```
+
+⇒ 测试确实能守住契约。这比"审计报告说它坏了"可靠得多。
+
+> 写成**独立顶层 `mod d5_clip_space`** 而不是塞进既有 `mod tests`：
+> 既避开反复踩的括号错位坑（本项目第5 次），也让"这是复核结论"在文件结构上一眼可见。
+
+### 二、D37（四套浮点容差）—— ⚠️ 部分修正
+
+审计称"四套容差"。实测是**三种不同语义**，只有两处是真问题：
+
+| 容差 | 语义 | 判定 |
+|---|---|---|
+| `1e-6` | DPI scale 精确比较 | ⚠️ **同一表达式在 `app.rs:545` 与 `raster.rs:362` 重复实现两遍** |
+| `1e-3` | 视觉等价（`layout.rs:rect_eq` + `transform.rs:150`） | ✅ **合理**（0.001px 位移无视觉影响） |
+| `1e-4` | 滚动偏移精确钳制（`layout.rs:340`） | ✅ **合理**（滚动偏移就该精确） |
+
+⇒ **"统一四套容差"是伪需求**。真正剩下的是"**无像素 snapping**"（1px 分隔线/文本半像素模糊）。
+若日后做snapping，只需统一那两处 `1e-6`，不要动 `1e-3`/`1e-4`。
+
+### 三、D-a 主体（FlexNode 持久化）—— 收益重估，**建议推迟**
+
+我上一条消息说"前置条件已全部就位"，**这个说法过于乐观，此处更正**。
+读`build()` 的实际实现后，发现缓存失效条件有**5 条**，其中两条是真障碍：
+
+1. **per-node 的"布局输入版本"信号根本不存在**。今天只有全局 `layout_epoch`（D58 引入）
+   与 MEASURE/ARRANGE 脏标，**没有"这个节点的 style/文本/子节点列表变了没有"的廉价判据**。
+2. **父属性会改写子的 style**：`build()` 里有
+   `if n.layout.overflow_scroll { for c in children { c.style.flex_shrink = 0.0; ... } }`
+   —— 父节点切成/切出滚动容器，**必须递归作废所有子孙的缓存**。这条极易漏，
+   而漏了就是**静默的错布局**（不报错、只是像素不对），是 GUI 框架里最难查的一类bug。
+
+**更关键的是收益被高估**：D-a 的收益是"每次布局少几百次堆分配"。但
+
+- 边界重排（D-a 之前已修）**已经把重排范围限制住了**；
+- 而软渲染的真正瓶颈在**光栅化与 Scene 重建**，不在几百次分配
+  （60fps 下几百次分配 ≈ 1万次/秒，相对每帧数百万像素的光栅化可忽略）。
+
+⇒ **D-a 主体的风险（静默错布局）远大于收益（可忽略的分配开销）**。
+建议**推迟到有实测性能数据证明布局是瓶颈时再做**，且届时必须先建per-node 失效信号。
+
+### 四、门禁第五次抓到我
+
+rustdoc `doc quote line without `>` marker`：我在 `///` 注释里写了 blockquote
+（首行 `/// >`，续行 `/// ⇒` 没加 `>`）。改写为普通文本。
+`cargo doc` 不报、只有 `clippy --all-targets` 才暴露 —— **说明 `--all-targets` 不能省**。
+
+### 五、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | 13 个二进制全 ok；lib404 → **406**（新增 D5 契约测试 2 条） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+
+### 六、已同步更新 `refactor-plan.md`
+
+防止后续执行者去"修"不存在的缺陷，共 5 处：
+D5 主条目（标 ❌ 已推翻）、D37（标 ⚠️ 部分修正）、v1.1 修订 #8、G3 说明、S5 批次顺序
+（G3 移出、降到"持续"）。
+
+> **一条经验**：审计报告的缺陷条目应当**可执行、可验证**。
+> 本次 D5 之所以能推翻，是因为它的论断足够具体（点名了两个文件行号），
+> 才能被逐行核实。若审计只写"坐标系统一性可能有问题"，就无从证伪。
+---
+
+## 2026-10-07 · D6 重定性 + 层序单一权威源 —— ✅ 完成
+
+> 本批的收获是**又一次避免了一次错误修复**：D6 被三份审计列为 P1"功能缺陷"，
+> 核实后发现**现象不可达且层序本身是正确设计**。真正成立的部分已修。
+
+### 一、D6 的完整核实（与 D5 不同：**不是误判，是定性错误**）
+
+| 审计断言 | 核实结果 |
+|---|---|
+| `Root.owner`（嵌套父层）无消费点 | ✅ **属实** —— 全仓只有定义与传参，无任何读取 |
+| 设计 §3.7 的 `z = (Layer, 嵌套深度, 序号)` 未实现 | ✅ **属实** |
+| 现象"Modal 内 Popup 被盖住、点不到" | ❌ **不可达** —— 生产代码 `owner` **恒为 `None`**（唯一来源 `view.rs:227`），唯一传 `Some(modal)` 的是 `track.rs:2038` 的**测试** |
+| "Modal 盖住 Popup"是缺陷 | ❌ **是正确设计** —— 枚举序 `Popup(2) < Modal(4)`，模态框本就该盖住并阻断下层 |
+
+**我第一次写的测试还犯了个错**：假设"Popup 在 Modal 之上"，结果测试失败，
+`path=[NodeId(1)]`（只有 content）。查证后发现是我的假设反了——`Modal` 枚举序比 `Popup` 高。
+**这恰好证明"测试写不出来"和"缺陷不存在"是两回事**：如果当时为了让测试通过而
+把层序反过来，就会真的把一个正确的设计改坏。
+
+### 二、真正成立的问题：**两份手写层序数组的漂移风险**
+
+- `scene.rs: LAYER_BOTTOM_UP`（自下而上）
+- `hit.rs: LAYER_TOP_DOWN`（自上而下）
+
+两份**必须严格互逆**，否则出现"画在上面的层收不到点击"——**不报错的错**。
+但它们分散在两个文件、没有任何机制保证互逆。这正是 P1「`Layer` 增变体不报错」的成因。
+
+**修法：单一权威源 `Layer::ALL`**
+
+```rust
+// track.rs
+pub const ALL: [Layer; 6] = [Content, Overlay, Popup, Tooltip, Modal, DragPreview];
+// scene.rs
+const LAYER_BOTTOM_UP: [Layer; 6] = Layer::ALL;      // 正序
+// hit.rs
+fn layer_top_down() -> impl Iterator<Item = Layer> { Layer::ALL.into_iter().rev() }  // 逆序
+```
+
+命中侧改用**函数 + `.rev()`** 而非常量数组：逆序在运行时表达，
+**没有可漂移的第二份副本**。（第一版我试过写 `const` 编译期断言，
+但 `assert!` 在 const 上下文里只能做常量折叠，实质是恒真表达式——已放弃。）
+
+### 三、测试（5 条，`hit::layer_order`）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `modal_blocks_everything_below` | ★ 端到端层序：Modal 铺满时命中必是 Modal（含"Popup 区域内外"两向） |
+| `popup_receives_hits_when_no_modal_is_above` | 反方向：没有 Modal 遮挡时 Popup 必须可命中（防"阻断退化成阻断一切"） |
+| `later_declared_root_is_above_within_same_layer` | ★ **实际被依赖的那条规则**：`owner` 缺失 ⇒ 全靠"同层后声明在上"（子菜单正是这么做的） |
+| `overlay_is_hit_transparent_by_default` | 层**顺序**与层**语义**（`LayerOpts` 穿透性）是两件独立的事 |
+| `layer_all_matches_enum_declaration_order` | `ALL` 是全量且顺序合语义（防"为修 bug 随手调换"） |
+
+**两次无效变异（值得记）**：
+
+1. **第一次**：把 `layer_top_down` 改成手写逆序——但写的**恰好是同一个顺序**，
+   本来就没有不一致 ⇒ 5 条测试全过，**什么都没验证到**。
+2. **第二次（有效）**：真正调换 `Modal` / `Popup` 相对次序 ⇒
+   ```
+   panicked at src\hit.rs:509: Modal 应盖住并阻断 Popup：[NodeId(1)]
+   test result: FAILED. 4 passed; 1 failed
+   ```
+
+⇒ 教训同A4：**变异必须真的引入缺陷**。"把代码换成等价物"不是变异，是自我安慰。
+
+### 四、变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/track.rs` | 新增 `Layer::ALL` | 单一权威源，附"为什么不能手写两份"的说明 |
+| `src/render/scene.rs` | 修改 | `LAYER_BOTTOM_UP` 改为 `Layer::ALL` |
+| `src/hit.rs` | 修改 | 删除 `LAYER_TOP_DOWN` 常量，改为 `layer_top_down()` = `ALL.rev()` |
+| `src/hit.rs` | 新增 5 条测试 | 独立 `mod layer_order`（括号安全，见 A4 日志） |
+
+### 五、已同步更新 `refactor-plan.md`（2 处）
+
+D6 主条目改为"已重定性"、S4 批次**移除 E2-1（D6 z 序）**。
+
+### 六、**遗留决策项**（需要产品判断，不是技术判断）
+
+`Root.owner` 现在是**死字段**（有定义、有传参、无消费点），而其**生命周期功能**
+（嵌套存储 + 级联移除）已实现且有测试（`track.rs:roots_are_nested_and_removal_cascades`）。
+三条路：
+
+- **A. 补 API + 实现 z 序**：让用户能声明嵌套层。成本 3 处改动 + API 设计；
+  收益 **0 个已知场景**（子菜单已用同级方案解决）。
+- **B. 撤承诺**：删字段，从设计文档删掉 §3.7 的 z 序承诺，写入"不做"清单。
+- **C. 保持预留**：字段留着（零成本），文档化为"预留能力，当前无生产路径"。
+
+**我的倾向改为 C**（而非 v1.0 评审时的 A）：**先有真实用例再接线**。
+若将来 Modal 内确实需要弹菜单，正确做法是用 `Popup`/`Tooltip` 层而非嵌套层。
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | 13 个二进制全ok；lib 406 → **411**（新增 5 条） |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+---
+
+## 2026-10-07 · D6 / A 方案 —— 嵌套 z 序真正落地 —— ✅ 完成
+
+> 用户在D6 的三条路线（补实现 / 撤承诺 / 保持预留）中选择 **A（补实现）**。
+> 结果证明这个选择是对的，而且**比预想的更省事**：API 早就存在，只差 z 序消费。
+
+### 一、**我上一批的核实结论是错的，在此更正**
+
+上一批我断言"生产代码 `owner` 恒为 `None`，现象不可达"。**只看了 `add_root` 的调用点**
+（`align.rs:84` 的 owner 来自 `DescRef`），漏看了 `view.rs:819`：
+
+```rust
+let owner = owner.or_else(|| self.root_stack.last().copied());
+```
+
+配合 `root_stack` 在 `layer()` 里的 push/pop（`view.rs:856/860`），
+**嵌套声明能力本来就完整存在** —— 用户写 `v.modal(|v| { v.popup_at(...) })` 就会自动带上
+`owner = modal`。所以：
+
+- ❌ "现象不可达" —— 错，**可达**；
+- ✅ "`Root.owner` 无消费点" —— 对；
+- ✅ "设计 §3.7 的 z 序未实现" —— 对。
+
+⇒ **A 方案不需要新增对外 API**，只需让 z 序消费已有的 `owner`。改动比预想小得多。
+
+### 二、实现：两个方向的 z 序
+
+```rust
+Track::z_ordered_roots()        // 自下而上（渲染）
+Track::z_ordered_roots_top_down() // 自上而下（命中）
+```
+
+排序键 **`z = (顶层祖先的 Layer, 嵌套深度, 声明序号)`**，两侧共用。
+
+**★ 关键设计决策：嵌套层继承 owner 链顶层的 Layer 基准**
+
+设计 §3.7 写的是 `z = (Layer, 嵌套深度, 序号)`。**字面实现是错的** ——
+我先按字面写了，测试直接失败：
+
+```
+panicked at src\hit.rs:636: 嵌套 Popup 应能收到点击（z 序未消费 owner？）：[NodeId(1)]
+```
+
+原因：Layer 是**槽位**，`Popup`(2) 的槽位低于 `Modal`(4)，所以 Modal 内的 Popup
+即使 `depth=1` 也仍排在 Modal **之下** —— **"Modal 里弹菜单"依然不可用，
+整个嵌套功能失去意义**。
+
+正确语义：嵌套声明意味着"我属于这个槽位**内部**"，所以外层基准取顶层祖先的 Layer，
+深度只用来区分"槽内 / 槽外"。修正后：
+- Modal 内的 Popup → `(Modal=4, depth=1)` > Modal `(4, 0)` ✓
+- 独立弹窗（无 owner）→ 仍用自己的槽位 `(2, 0)` ⇒ 不被模态框盖住，也不盖住它 ✓
+
+**变异验证**（退回字面形式 `(r.layer, depth)`）：FAILED ✓
+
+### 三、**第二个坑：稳定排序 + key 降序 =顺序反了**
+
+第一版命中侧用 `out.sort_by(|a, b| key(b).cmp(&key(a)))`，想着"稳定排序能保住同 key 内的声明序"。
+**结果 5 个既有测试挂了**（含菜单子菜单）：
+
+```
+panicked at src\app.rs:5155:  left: ["tap 行 3"]  right: ["menu 行 2 @7"]
+```
+
+因为稳定排序 + key 降序 ⇒ 同 key 内保持**升序**（先声明的先来），
+正好与"后声明的在上"相反 ⇒ **子菜单跑到父菜单下面**。
+
+修法：**不依赖稳定性**，把声明序号显式排进 key，两个方向对称：
+
+```rust
+true  => idx.sort_by(|(ia,a),(ib,b)| key(a).cmp(&key(b)).then_with(|| ib.cmp(ia))),
+false => idx.sort_by(|(ia,a),(ib,b)| key(a).cmp(&key(b)).then_with(|| ia.cmp(ib))),
+```
+
+> 教训：**"稳定排序会保住相对顺序"这句话只在 key 相同的前提下成立**；
+> 一旦把key 的比较方向反过来，稳定性救不了你 —— 必须显式排第二级键。
+
+### 四、顺带消除的隐患
+
+两侧遍历改成同源后，**"渲染与命中的层序不同步"这个类别彻底消失**：
+`z_ordered_roots_top_down()` 就是 `z_ordered_roots()` 的严格逆序，
+由构造保证，不再依赖两份手写数组恰好互逆。
+
+### 五、测试（5 条 `hit::nested_z_order`）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `nested_popup_above_its_modal_parent` | ★ **A 方案的存在理由**：Modal 内 Popup 既能命中又后画。z 序未消费 owner 时**必然失败** |
+| `hit_order_is_exact_reverse_of_paint_order` | ★ 核心不变量：命中序 = 绘制序的严格逆序（6 个层的混合场景） |
+| `nested_tooltip_above_its_parent` |嵌套 Tooltip 同理 |
+| `dangling_owner_degrades_to_top_level` | 悬空 `owner` 退化为顶层，**不 panic 不死循环** |
+| `cyclic_owner_is_truncated` | `owner` 成环（A↔ B）被 `MAX_NESTING_DEPTH` 截断 |
+
+后两条是**防御性测试**：真实触发路径存在（`Cmd` 单独移除父层、对齐阶段先删父再删子），
+而环一旦出现就是**排序死循环**——整个 UI 线程挂死。
+
+### 六、变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/track.rs` | 新增 `Layer::ALL` | 层序单一权威源（枚举声明序） |
+| `src/track.rs` | 新增 `z_ordered_roots()` / `z_ordered_roots_top_down()` / `z_order_impl()` | 共用排序核心 |
+| `src/render/scene.rs` | 修改 | 改用 `z_ordered_roots()`；删除 `LAYER_BOTTOM_UP` |
+| `src/hit.rs` | 修改 | 改用 `z_ordered_roots_top_down()`；删除 `LAYER_TOP_DOWN` / `layer_top_down()`；**顺带省掉一次 `roots().iter().find()` 回查**（原代码每层都线性回查一次 Root） |
+| `src/hit.rs` | 新增 5 条测试 | `nested_z_order` |
+
+`hit_path` 现在不再需要"先收集 node 列表再反查 Root"这个两步走 —— **顺带修掉一个 O(n) 回查**。
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | 13 个二进制全ok；lib 411 → **416** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| 变异（退回 §3.7 字面形式） | **FAILED** ✓ |
+
+### 八、状态
+
+`refactor-plan.md` 的 D6 条目已改为 **✅ 已完成**。至此审计里**唯一确认可达的功能缺陷**关闭。
+EOF 之后 S3 剩余：`D-b`（滚动脱离布局，风险最高，建议在 C4 display list 之后）。
+---
+
+## 2026-10-07 · TextCache 两段式 key + 「parley 是否已缓存」的核实 —— ✅ 完成
+
+### 一、用户质疑：**部分正确，但结论不成立**
+
+> "parley 通过它贡献的 layoutcontext，已经能做好对同样文本排版的结果缓存了，
+> 应该不用我们再做一次的吧。"
+
+**核实结论：parley 确实有缓存，但缓存的是 shaping 的 _输入侧_，不是排版 _输出_。**
+
+#### 代码证据（parley 0.11.1，Cargo.lock 实际版本）
+
+```text
+// parley-0.11.1/src/mod.rs:30-32
+shape_data_cache:     LruCache<ShapeDataKey,     harfrust::ShaperData>,
+shape_instance_cache: LruCache<ShapeInstanceId,  harfrust::ShaperInstance>,
+shape_plan_cache:     LruCache<ShapePlanId,      harfrust::ShapePlan>,
+```
+
+外加 `context.rs` 里的 `fcx.source_cache.prune(128, false)`（fontique 字体源，128 项）。
+
+⇒ 命中的是：**字体数据、shaper 实例、shape plan**。省下的是"重复解析字体文件"。
+
+而 `RangedBuilder::build()` → `build_into_layout()` **每次调用都会执行**：
+
+1. `crate::analysis::analyze_text(...)` —— ICU：Bidi 级别、换行机会、脚本/词边界
+2. 逐 style_run 的 `shape_text(...)` —— harfrust shaping：字形选择 + 定位
+3. `break_all_lines(...)` —— 断行
+4. `align(...)` —— 对齐
+
+**没有任何"排版结果已算过"的检查。** 字体数据是热的，但排版每次重算。
+
+> ⚠️ 顺带一个版本事实：**`lru_cache.rs` 是 0.11.1 才有的**。
+> 我们 Cargo.lock 锁的就是 0.11.1（不是 0.11.0），所以这些缓存确实生效。
+
+#### 实测数据（release，`tests/text_cache_bench.rs`）
+
+| 指标 | 数值 |
+|---|---|
+| 文本长度 | 106 字节（中文，需真实 shaping + 断行） |
+| **miss（真排版）** | **44.948 us/次** |
+| **hit（缓存命中）** | **0.135 us/次** |
+| **比值** | **334x** |
+| 换算 50 个可见文本 / 帧 @60fps：无缓存 | **2.25 ms/帧** |
+| 换算 50 个可见文本 / 帧 @60fps：有缓存 | **0.0067 ms/帧** |
+
+⇒ 无缓存时**光排版就吃掉 2.25ms/帧**（16.7ms 预算的 13.5%），
+而软渲染还要再花大量时间在光栅化上。**这一层不是冗余，是必需的。**
+
+#### 两层缓存的分工（互补，不重复）
+
+| 层 | 缓存什么 | 命中省下什么 |
+|---|---|---|
+| parley 内部 | 字体数据 / shaper 实例 / shape plan | 不必重新解析字体文件 |
+| **我们的 `TextCache`** | **`Arc<TextLayout>`（完整排版结果）** | **第二次排版根本不用发生** |
+
+顺带说明：我们还有第三层 `MEASURE_CACHE`（`lieui-text` 内，缓存 `(w,h)` 测度），
+它缓存的是**尺寸**而非排版，与上述两层同样不重复。
+
+### 二、本批实际改动：命中路径消除堆分配
+
+核实 parley 的同时发现一个**独立于 parley**的问题：`TextCache` 原先是
+`HashMap<TextKey, _>`，而 `TextKey.text: String` ⇒ **命中路径也要分配** ——
+每次查询先 `text.to_string()` 构造 key 才能查表，外加一次字节拷贝。
+
+**这违反缓存的基本前提**（命中必须比未命中便宜得多）。改为**两段式key**：
+
+```
+hash(内容, 规格, 颜色) → 桶 → 桶内 str == str（memcmp，零分配）
+```
+
+- 命中路径**全程零堆分配**（`tests/text_cache_alloc.rs` 用线程局部
+  `#[global_allocator]` 计数断言 `allocs == 0`）
+- 桶通常 1 项（64 位hash 冲突可忽略），线性比对不比哈希查找慢
+- 冲突时**仍正确**（比对内容），只是多一次 memcmp —— 有测试钉住
+
+### 三、**自己引入并修掉的 O(n²)**
+
+第一版用 `len()` 判溢出，而 `len()` 是 `map.values().map(Vec::len).sum()`
+—— 在 miss 路径上每次插入都 O(桶数) ⇒ **2048 次插入 × 2048 次求和 = O(n²)**。
+
+改为手工维护 `count: usize`，`len()` 变 O(1)。这是"先量后优化"被自己违反的实例：
+优化 hit 路径时引入了 miss 路径的平方级开销。
+
+### 四、变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/render/scene.rs` | 修改 `TextCache` | 两段式 key（`HashMap<u64, Vec<(TextKey, TextEntry)>>`）+ `count` 计数器 + `TEXT_CACHE_MAX` / `key_hash()` |
+| `tests/text_cache_alloc.rs` | **新增**（8 条） | 零分配验收 + 冲突正确性 + 溢出清空 + 计数器冒烟 |
+| `tests/text_cache_bench.rs` | **新增**（1 条 `#[ignore]`） | hit/miss 耗时对照，`--release -- --nocapture --ignored` 手动跑 |
+
+`tests/text_cache_alloc.rs` 里的 `#[global_allocator]` 用 **thread_local** 计数，
+因此与其它并行测试互不干扰，无需 `--test-threads=1`。
+
+> 顺带：这也是 **H6（`tests/api_contract.rs` 的同类工作）** 的一个实例 ——
+> 集成测试站在**外部用户视角**（`lieui::prelude::Color` / `lieui::render::TextCache`），
+> 编译失败就是 API 回归。
+
+### 五、门禁第六次抓到我
+
+`clippy::field_reassign_with_default`（`TextSpec::default()` 后逐字段赋值）。
+此前五次：`type_complexity`、无用 `mut`、doc引用块语法、`auto-deref`、括号错位。
+
+### 六、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **15 个测试二进制全ok**（新增 2 个集成测试文件）；lib 416 未变 |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+---
+
+## 2026-10-07 · 渲染成本实测 —— C4（display list）**不值得做**，判断被推翻
+
+> 起因：准备投入 C4 之前先量。同 D-a（FlexNode 持久化）一样，
+> 已经有一次"高估微小开销"的先例，这次要求**先有数据再决定**。
+
+### 一、实验设计（`tests/render_cost_bench.rs`，`#[ignore]` 手动跑）
+
+关键是把 **Scene 遍历** 与 **光栅化/绘制提交** 分离：
+
+- 固定窗口 1280×800，用**非空**小脏区 `(0,0,64,64)`
+  （★不能用 `&[]` —— `render()` 里 `let all = damage_all || damage.is_empty();`
+  会把空脏区当成**全重绘**，第一版实验因此得出"两列相同"的假象）
+- 树里放 N 个节点，**全部重叠**在同一 64×64 裁剪区内
+- 其中只有前 `visible` 个有背景色/文本，其余是**无背景空 Box**
+  ⇒ **节点数变、绘制量不变** ⇒ 小脏区耗时的斜率就是纯 Scene 遍历成本
+
+### 二、实测数据（release，1280×800，每帧 40 次取平均）
+
+| 节点数 | 可见节点 | 全重绘 ms/帧 | 小脏区 ms/帧 | 小脏区 us/节点 |
+|---|---|---|---|---|
+| 200 | 200 | 1.877 | 1.123 | 5.617 |
+| 800 | 800 | 6.004 | 4.488 | 5.610 |
+| 3200 | 3200 | 21.553 | 19.128 | 5.978 |
+| **3200** | **8** | 1.138 | **0.246** | 0.077 |
+| **6400** | **8** | 1.481 | **0.443** | 0.069 |
+
+拟合（可见数固定 8，节点 3200 → 6400）：
+
+```
+每节点 Scene 遍历成本 a ≈ 0.061 us
+⇒ 3200 节点时 Scene 侧 ≈ 0.196 ms/帧
+```
+
+### 三、结论：**C4 不值得做**
+
+| 判据 | 数值 |
+|---|---|
+| Scene 遍历占 60fps 帧预算（16.7ms） | **0.196 / 16.7 = 1.2%** |
+| C4 要消除的正是这 1.2% | — |
+
+而真正的成本是**光栅化 / 绘制提交**，与**可见绘制量**成正比
+（表里"可见 3200 → 可见 8"省下 **18.9 ms**，就是绘制量的贡献；
+绝对值因我的构造存在 overdraw 而偏大，但**量级关系是可信的**）。
+
+⇒ **优化方向应该是"减少绘制量"（更细的 culling、降 overdraw、
+按可视区域裁剪子树），而不是"缓存 Scene 的 op 序列"。**
+
+这与我 v1.0 评审里"软渲染的结构性上限在 C4（display list）"的判断**相反**，
+现按实测数据推翻。
+
+### 四、**测量本身踩的两个坑**（比结论更值得记）
+
+1. **第一版实验得出假结论**：`damage = &[]` 被 `render()` 当成 `all = true`
+   ⇒ "全重绘"与"小脏区"两列几乎相同（1.927 / 2.007），
+   我差点据此得出"绘制量不影响成本"的荒谬结论。
+   **教训：对照组必须先确认它真的走了对照组分支。**
+2. **数据被并行负载污染**：同一份代码两次跑出 `0.932` 与 `0.061` us/节点
+   （**15 倍**）—— 差异来自我在后台同时跑 `clippy` / `test`。
+   静置后两次跑出一致（0.061 / 0.069）。
+   **教训：共享机器上的计时数据，没有复现就不算数据。**
+   这个坑与本项目此前的"变异测试必须真的引入缺陷"同源 ——
+   **验证本身也需要被验证**。
+
+### 五、门禁第七次抓到我
+
+`clippy::useless_conversion`（`String::into()` 已是String）+ 未使用的 `build_tree`。
+连同前六次：`type_complexity`、无用 `mut`、doc 引用块语法、`auto-deref`、
+括号错位、`field_reassign_with_default`。
+
+### 六、变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `tests/render_cost_bench.rs` | **新增** | 成本分解实验（`#[ignore]`，`--release -- --nocapture --ignored` 手动跑） |
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **16 个测试二进制全ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+---
+
+## 2026-10-07 · 降 overdraw —— 裁剪栈纳入 culling —— ✅ 完成（收益 9x）
+
+> 承接上一批"优化方向是减少绘制量"的结论，做**第一项**：让 culling 认识裁剪栈。
+
+### 一、根因：`Cull` 只有脏区，没有 clip 上下文
+
+`scene.rs` 的 `Cull { rects, all }` 只携带**窗口级脏区**，`walk` 递归时**不传 clip**。
+后果：一个**被祖先裁剪矩形完全裁掉**的节点（长列表里滚出可视区的行）仍通过
+`cull.hit` ⇒ 原语被提交 ⇒ **光栅器求交后才丢弃 —— 开销已经发生**。
+
+长列表是重灾区：容器 bbox 很高、必然与脏区相交，于是**全部**子节点都被遍历提交，
+而实际可见的只有十几行。
+
+### 二、改动
+
+```rust
+struct WalkCtx<'a> {
+    cull: &'a Cull,          // 全程不变
+    opts: &'a SceneOptions,   // 全程不变
+    clip: Option<Rect>,       // 随递归变化（窗口坐标）
+}
+```
+
+`walk` 签名从 7 个参数降到 5 个（`clippy::too_many_arguments` 门禁**第八次**抓到我，
+但这次是**设计信号**而非噪音 —— 参数失控说明状态没归位）。
+递归时写入 `ctx.clip = child_clip`，返回时**恢复**（与 `Op::PushClip`/`PopClip` 同构）。
+
+**★ 一个容易写错的点**（实测踩到）：`child_clip` 必须写成
+
+```rust
+let child_clip = match clip {
+    Some(c) => /* c 的窗口 bbox ∩ 祖先 clip */,
+    None => ctx.clip,   // ★ 无自身 clip 时**继承**祖先，不能置 None
+};
+```
+
+写成 `clip.and_then(...)` 会在"无 clip 的节点"处把裁剪链**整条断掉** ——
+症状：外层 100×100 裁剪区里放一个 400×400 的**无 clip** 容器，其子节点 `culled = 0`。
+
+### 三、实测收益（release，1280×800，`render_cost_bench long_list`）
+
+**修复前**（`ctx.clip = None` 变异）：
+
+| 行数 | culled | visited | ops | ms/帧 |
+|---|---|---|---|---|
+| 200 | 0 | 252 | 253 | 0.797 |
+| 1000 | 0 | 1252 | 1253 | 2.086 |
+| 5000 | 0 | 6252 | 6253 | **8.144** |
+
+**修复后**：
+
+| 行数 | culled | visited | ops | ms/帧 |
+|---|---|---|---|---|
+| 200 | 160 | 212 | **53** | 0.631 |
+| 1000 | 960 | 1012 | **53** | 0.682 |
+| 5000 | 4960 | 5012 | **53** | **0.906** |
+
+| 指标 | 收益 |
+|---|---|
+| 5000 行耗时 | **8.144 → 0.906 ms/帧= 9.0x** |
+| 提交原语数 | 6253 → **53 = 118x** |
+| 增长趋势 | 线性 → **几乎恒定**（5000 行只比 200 行慢 0.28 ms） |
+
+**这才是"减少绘制量"的兑现**：光栅化量与列表总行数**脱钩**。
+
+### 四、测试（5 条 `render::scene::clip_culling`）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `scrolled_out_rows_are_culled_by_ancestor_clip` | ★ 500 行列表，culled ≳ 488 |
+| `visible_rows_are_not_culled` | ★ **反方向**：全部可见时 `culled == 0`（防cull 过头） |
+| `nested_clip_culls_grandchildren_outside_outer_clip` | 一般化场景：任何 `clip_content`，不只滚动容器 |
+| `explicit_clip_also_culls_children` | 显式 `n.clip` 同样参与 |
+| `clip_culling_under_transform_is_consistent` | 变换（平移/缩放）下裁剪仍正确 |
+
+**★ 为什么必须用「计数」而不是「像素」验收**：被裁掉的像素**本来也不会显示**，
+所以**像素级断言对这次改动完全失明** —— 改对改错屏幕上一模一样。
+唯一能区分的是 `SceneStats::nodes_culled` / `ops`（**提交了多少**而非画出了多少）。
+
+**变异验证**（`ctx.clip = None`）：**4 条精确失败**，其中核心那条报
+`nodes_culled=0 nodes_visited=502 ops=503` —— 证明修复前每个节点都提交了原语。
+
+### 五、**测试构造陷阱**（第二次同源问题，坑更深）
+
+`nested_clip` 那条最初写完是**红的**（`culled = 0`）。第一反应是"修复没生效"，
+实际是**布局把它修好了**：
+
+```
+kid[0] rect = (0,0,400x1)     ← 我设置的是 400x4
+inner rect  = (0,0,400x100)   ← 我设置的是 400x100
+```
+
+**flex 收缩**把 100 个子节点压成 `400×1`、容器压成 `400×100`，
+于是**每一个都恰好落在 100×100 裁剪区内** ⇒ `culled = 0` 是**正确行为**。
+
+修法：给子节点显式 `flex_shrink = 0`（这也正是 `build()` 对滚动容器子节点的做法）。
+
+> 与"对照组必须确认它真的走了对照组分支"同源：
+> **期望值写错时，测试会指向错误的结论。** 打印一次 `rect` 就能避免。
+
+### 六、门禁第九次抓到我（本批 2 次）
+
+`empty line after doc comment`（删除函数后残留文档注释块）。
+连同前八次：`type_complexity`、无用 `mut`、doc 引用块语法、`auto-deref`、括号错位×2、
+`field_reassign_with_default`、`useless_conversion`、`too_many_arguments`。
+
+### 七、变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/render/scene.rs` | 新增 `WalkCtx` | 参数打包 + 裁剪栈状态 |
+| `src/render/scene.rs` | 修改 `walk` | 签名 7→5 参数；`visible = screen ∩ ctx.clip`；`child_clip` 继承 |
+| `src/render/scene.rs` `build` | 修改 | 建立 `WalkCtx`；层根的祖先裁剪 = 窗口（不是无限大） |
+| `src/render/scene.rs` | 新增 5 条测试 | `clip_culling` |
+| `tests/render_cost_bench.rs` | 修改 | 换成"长列表收益"场景（旧的对照实验已删除） |
+
+**注意**：`widgets::draw` 的签名**未变** —— 被跳过的节点根本不会调用 `draw`，
+所以逐原语 culling（`push_culled`）也自动受益，无需改 `Cull` 的对外形态。
+
+### 八、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **16 个测试二进制全ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+
+### 九、后续（同类方向，尚未做）
+
+- **逐原语 culling 也用 clip**：`push_culled` 仍只判"与脏区相交"，
+  不判"是否被祖先 clip 裁掉"。节点**部分**可见时仍会提交被裁掉的那部分原语。
+  需要把 `visible` 传进 `draw`（改签名）。
+- **按可视区域裁剪子树**：容器只在脏区内的部分才展开其子树。
+---
+
+## 2026-10-07 · S4 · E1 `handled` 语义 —— 用户优先于内置行为 —— ✅ 完成（D54）
+
+### 一、问题：`mark_handled()` 语义上等于不存在
+
+`WindowCtx::dispatch` 原来是「**内置行为先跑、用户 handler 后跑**」：
+
+- `① widgets::handle_route(...)` —— 内置行为全部跑完（CheckBox 已翻转 `checked`）
+- `② event::dispatch(...)`      —— 用户的 `cx.mark_handled()` 到这里才有机会执行
+
+于是用户的 `mark_handled()` 只能当**马后炮**：
+- 不能阻止**已经跑完**的内置行为（状态已改，撤不回）
+- 不能阻止**后续**的内置行为（`handle_route` 压根不读 `handled`）
+
+用户无法表达"这个 CheckBox 的勾选由我自己处理"。这与 WinUI / WPF 的
+`Handled` 语义不一致，也让 `on_tap_with(|cx| cx.mark_handled())` 这个 API 形同虚设。
+
+### 二、修法：调换顺序，让 `handled` 成为真正的开关
+
+```rust
+let out = crate::event::dispatch(rt, self.id, &self.track, path, ev, &mut cmds);  // ① 用户
+if !out.handled {
+    crate::widgets::handle_route(&mut self.track, path, ev, &mut cmds);          // ② 内置兜底
+}
+```
+
+**"用户先、内置兜底"是语义要求，不是性能取舍** —— 控件的默认行为
+（勾选切换、输入插入、拖拽跟踪）本就该是"用户没接手时"的兜底。
+
+**影响面实测为零**：改动后 **16 个测试二进制全过、零失败**，
+说明现有控件行为不依赖"内置先跑"的顺序（`DispatchOutcome` 本来就带 `handled`，改动极小）。
+
+### 三、测试（2 条 `app::handled_semantics`）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `marking_handled_suppresses_the_builtin_toggle` | ★ `mark_handled()` 后内置翻转被抑制；再验证用户自己改的 Signal 在下一帧生效 |
+| `without_handled_the_builtin_toggle_still_runs` | ★ 未标记时内置**立即**翻转节点（不等下一帧） |
+
+**★ 断言看 `kind.checked` 而不是绑定的 Signal** —— 这是本测试的关键设计：
+内置的 `toggle_checked` **立即**改节点字段，而 Signal 绑定要等**下一帧** `view()` 重建。
+两者时序不同，正好能区分"谁改的"。
+
+**变异验证**（把 `if !out.handled` 改成 `if true`）：
+
+```
+panicked at src\app.rs:5612:
+  ★ mark_handled() 之后内置的勾选切换必须被抑制（修复前这里会变成 true）
+test result: FAILED. 1 passed; 1 failed
+```
+
+### 四、**测试前提错误**（第二次同源，第三次形态）
+
+第一版用 `c.checkbox(false)`（**无绑定**），第二条测试红了。
+查 `widgets/mod.rs:130`：
+
+```rust
+fn checkbox_handle(track: &mut Track, id: NodeId, ev: &EventView) {
+    if ev.kind != EventKind::Tapped { return; }
+    let bound = track.get(id).map(|n| n.bindings.checked.is_some()).unwrap_or(false);
+    if !bound { return; } // 未绑定 ⇒ 交给用户处理器（模型说了算）
+    track.toggle_checked(id);
+}
+```
+
+**无绑定的 CheckBox 内置行为本就不切换** —— 这是既有的"未绑定就不改模型"规则。
+所以要观察内置行为**必须**用 `checkbox_bound(&sig)`。
+
+> 这是"期望值写错 ⇒ 测试指向错误结论"的第三次形态：
+> 前两次是**对照组没走对照组分支**、**flex 收缩让构造失效**；
+> 这一次是**被测对象的既有规则被我忽略了**。
+> 三次的共同教训：**写断言前先确认"被测系统的实际行为是什么"**。
+
+顺带修正了一处路径取法：`column` **不产生节点**，其子节点直接挂在内容根下
+（与既有测试 `children(root)[2]` 的取法一致），我最初多取了一层导致越界。
+
+### 五、门禁（第十次抓到，已连续三次同类）
+
+`empty lines after doc comment` —— 测试模块的文档注释块里嵌了
+```` ```text ```` 代码块，被 rustdoc 解析成"文档注释后的空行"。
+
+这一类连续出现三次（`doc quote line without > marker` / `empty line after doc comment` ×2），
+说明**在 `///` 注释里写代码块的写法在本项目不友好**。约定：
+**注释里描述代码用缩进块，不用围栏代码块。**
+
+### 六、变更清单
+
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `src/app.rs` `WindowCtx::dispatch` | 修改（D54） | 用户 handler 先跑；`if !out.handled` 才跑内置行为 |
+| `src/app.rs` | 新增 2 条测试 | `handled_semantics` 模块 |
+
+### 七、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | **16 个测试二进制全 ok** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
+---
+
+## 2026-10-07 · S4 · D15 Escape 关闭浮层 —— ✅ 完成
+
+### 功能
+`NamedKey::Escape` 此前无任何消费点 —— 弹层/菜单只能用鼠标点外面关掉。实现放在
+`WindowCtx::key()` 最前面（先于普通 dispatch）：浮层关闭是框架级响应，不该依赖
+"恰好有节点监听 KeyDown"。语义 = **只关z序最上面一个**（WinUI/WPF 一致），
+"可关闭"沿用既有的 `LayerOpts::dismiss_on_outside_click`，不另立开关。
+
+### ★★ 本批最严重的失误：按任意键都关弹层
+第一版只判 `ev.kind() == KeyDown` —— 因为我把Escape 写成了 `EventKind::Escape`。
+**实际它是 `KeyCode::Named(NamedKey::Escape)`**，`EventKind` 里没这个变体。
+（根源：看到 `event.rs:51` 的 `Escape,` 就以为属于 `EventKind`，实际那是 `KeyCode`。）
+
+后果：任意按键都关弹层，而"Escape 能关弹层"那条测试**照样通过**（只测正向）。
+修正靠补**反向测试**（Enter/Tab/'a'/Delete 不得关闭），变异验证FAILED。
+
+> **教训：写"某条件触发某行为"必须同时测"相邻条件不触发"。**
+> 正向测试只能证明实现没坏，证明不了实现没做过头。
+
+### ★★ 第二次事故：误用 git checkout 的风险
+修括号时我准备执行 `git checkout -- src/app.rs`。执行前查 `git log` 才发现
+**HEAD 是本轮对话之前**的提交（`70a62f7`）—— checkout 会丢掉 S0–S4 全部改动。
+用户未批准，改为手工补括号恢复（`AppendAllText` 只追加不破坏结构）。
+
+> **规则固化：`git checkout -- <file>` / `git restore` 之前，
+> 必须先 `git log --oneline -3` + `git diff --stat` 确认 HEAD 与工作区差异。
+> 未提交的工作不可再生。**
+
+### 测试的模块归属
+Escape 测试最初想复用 `mod tests` 的私有 `picker()`/`tap_node()`，但新mod 在顶层，
+`use super::*` 看不到。中间还因脚本裁剪把测试嵌进 `handled_semantics` 内部、
+并切掉其尾部导致编译失败。
+**最终方案：自带 20 行 ViewModel，完全不依赖 `mod tests`** ——
+理由写进模块文档：*跨模块私有测试 helper 是本项目反复踩坑的来源，
+多写 20 行换零耦合，划算*。
+
+### 测试（3 条 `app::escape_dismiss`，自包含）
+- `escape_closes_an_open_popup` —— ★ Escape 关闭弹层
+- `other_keys_do_not_close_the_popup` —— ★★ **反向**：Enter/Tab/'a'/Delete 不得关闭
+- `escape_without_popup_is_inert` —— 无弹层时不产生动作
+
+### 验证
+`cargo test --workspace` 16 个二进制全 ok；`clippy --all-targets` exit 0；
+`fmt --check` 0 差异；`build --examples` exit 0。
+
+### 教训汇总
+1. **正向测试必须配反向测试** —— 否则"实现做过头"完全隐形。
+2. **核实枚举归属要看全上下文** —— 注释里的类型名会污染后续实现。
+3. **`git checkout`/`restore` 前必须确认 HEAD 位置** —— 未提交工作不可再生。
+4. **测试 helper 的模块归属要一开始就想清楚** —— 跨模块私有依赖是反复踩坑的来源。
+---
+
+## 2026-10-07 · S4 · D48 align-content: SpaceEvenly —— ✅ 完成（+ Baseline 显式记录）
+
+### 一、SpaceEvenly：从"静默退化"到正确实现
+
+`align_content` 的实现（`flex_node.rs` Step 16）里**缺 `SpaceEvenly` 分支** ⇒ 落
+`_ => 0.0` ⇒ 表现为**贴顶**。
+
+**同语义两处实现、一处有一处没有**是根因：主轴的 `flex_line.rs:284`
+本来就有正确的 `SpaceEvenly`（`free / (n+1)`），只有交叉轴漏了。
+这正是本项目根因模式（"契约写在文档里、退化路径无测试"）的又一实例 ——
+而且它已经以 `#[ignore]` KNOWN BUG 的形式**被记录在案**，
+说明"显式记录退化"这个做法是有效的：它让缺陷可见、可追踪。
+
+修复（CSS `space-evenly`：项之间与两端等距）：
+
+```rust
+FlexAlign::SpaceEvenly => {
+    let s = rem / (lc + 1) as f32;
+    off += s;
+    s
+}
+```
+
+### 二、★ 顺带把 KNOWN BUG 测试换成真实断言
+
+原来那条 `#[ignore]` 测试断言的是**退化行为本身**（"全部贴顶"）。
+修复后把它改写成**验证正确行为**的断言，并顺带覆盖了三个维度：
+
+- 首行偏移 = 一个间隙（10.0）⇒ 这是 `space-evenly` 与 `space-around` 的区别
+- 相邻行间距恒定（30.0 = 行高 20 + 间隙 10）
+- **末行之后**也留一个间隙（`space-between` 不会）
+
+最后一条尤其重要：只查"首行偏移 + 行间距相等"的话，`space-between` 也能蒙对。
+
+**变异验证**（移除 `SpaceEvenly` 分支）：
+
+```
+panicked at feature_flex.rs:332:
+  space-evenly 的首行偏移应等于一个间隙 10.0，实际 0（tops=[0.0, 20.0, 40.0]）
+test result: FAILED. 20 passed; 1 failed
+```
+
+⇒ 精确抓到退化（`tops` 全贴顶）。
+
+### 三、Baseline：按既定决策"不做"，但**显式记录**
+
+`FlexAlign` 共 **9 个**变体。Step 16 的 match 覆盖 7 个，
+剩下的 `Auto` / `Baseline` 落 `_ => 0.0`（贴顶）。
+
+**为什么不实现 Baseline（与 SpaceEvenly 不同）**：
+- `Baseline` 的语义依赖**子节点的行盒基线**（文字/图片混排的��齐基准），
+  而本引擎的测量口径是 parley 的**行盒**。把"行盒顶边"冒充"基线"
+  会给出**看似合理但错误**的结果 —— 比明确退化更糟。
+- 当前无真实用例。
+- 维护成本高于收益。
+
+**但"不做"不等于"静默"**：新增了一条 `#[ignore]` 的 KNOWN BUG 测试
+把现状钉住，并在注释里写清"为什么不做"和"将来实现了怎么改"。
+这样 9 个变体的状态全部有据可查（7 个已实现 / Baseline 不做 / Auto 等价 Start）。
+
+### 四、测试状态变化
+
+`lieui-layout/feature_flex`：**20 passed / 1 ignored → 21 passed / 1 ignored**
+（SpaceEvenly 从 ignored 转正，Baseline 接过那个 ignored 位置）。
+
+全库 16 个测试二进制全 ok；`clippy --all-targets` exit 0；`fmt --check` 0 差异；
+`build --examples` exit 0。
+---
+
+## 2026-10-07 · S4 · D17 百分比 —— 决策"不做" + 钉住哨兵常量陷阱
+
+### 一、D17：`flex-basis` 百分比 —— 决定不做
+
+**核实结论**：全仓**没有任何百分比表示方式**（`grep percent|百分比|"%"` 无结果）。
+`FlexStyle` 的长度字段都是裸 `f32`，`view.rs` 的 DSL 也没有 `width("50%")` 入口。
+`flex_basis: 50` 只会是 50 像素。
+
+**为什么不实现**（与 `align-content: Baseline` 同批决策）：
+
+1. **不是补一个分支，而是加一个能力**。需要引入长度单位表示
+   （`enum Length { Px(f32), Percent(f32), Auto, Undefined }`），
+   它会贯穿 `style_eq`（`style.rs:84` 逐字段比较）、DSL、写回——
+   是一次**结构性改动**，不是 20 行。原plan 估"20 行内"是**低估**。
+2. **当前无真实用例**：仓库内 UI 都能用 `flex_grow` 表达
+   （`flex_basis: 0` + `flex_grow: 1` 即"均分"）。
+3. `FlexStyle` 已有 `content_width` / `content_height: Option<f32>`，
+   **加 `flex_basis_percent: Option<f32>` 这类并行字段**会让
+   "同一语义两种表示"，比统一改成 `Length` 枚举更难维护。
+
+将来若实现，应**统一**引入 `Length` 枚举（而非加并行百分比字段）。
+
+### 二、★ 顺带发现一个真实陷阱：`VALUE_UNDEFINED` 与 `VALUE_AUTO` 同值
+
+```rust
+pub const VALUE_UNDEFINED: f32 = f32::NAN;
+pub const VALUE_AUTO: f32 = f32::NAN;   // ← 同一个值！
+```
+
+两个常量**语义不同但无法区分**。于是：
+
+- `v == VALUE_AUTO` **恒为 `false`**（`NaN != NaN`）——
+  这样的代码**编译通过、测试也可能通过，但语义是错的**。
+- 正确判定只有 `is_undefined(v)` / `is_defined(v)`（即 `v.is_nan()`）。
+
+**当前是安全的**：全仓无任何代码试图用 `==` 区分这两个哨兵
+（`grep '== VALUE_AUTO'` 无结果），一律走 `is_nan()`。
+
+**处理**：在常量定义处加警示注释，并新增一条测试把事实钉住：
+
+```rust
+#[test]
+fn sentinels_are_distinguishable_only_by_is_nan() {
+    let a = std::hint::black_box(VALUE_AUTO);
+    let b = std::hint::black_box(VALUE_UNDEFINED);
+    assert!(a.is_nan() && b.is_nan());
+    assert!(!(a == b), "★ NaN != NaN：直接比较恒为 false。永远不要这样判定");
+    ...
+}
+```
+
+将来若引入 `Length` 枚举，本测试会失败，提示更新判定方式。
+
+> **`black_box` 不是多余的**：不加它，编译器知道 `VALUE_AUTO` 是 `NAN` 常量，
+> `is_nan()` 在编译期就是 `true` ⇒ clippy 的 `assertions_on_constants`
+> 会直接拒绝这条断言（门禁第十一次抓到我）。**测试"必须运行期求值"本身
+> 是一项需要显式声明的要求。**
+
+### 三、门禁（第十一次）
+
+`assertions_on_constants` —— 见上。
+连同前十次：`type_complexity`、无用 `mut`、doc 引用块语法 ×3、`auto-deref`、
+括号错位 ×2、`field_reassign_with_default`、`useless_conversion`、
+`too_many_arguments`、`field_reassign_with_default`(again)。
+
+### 四、验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | 16 个二进制全 ok；`feature_flex` 21 → **23 passed / 1 ignored** |
+| `cargo clippy --workspace --all-targets`（CI `-D warnings`） | exit 0，零警告 |
+| `cargo fmt --all --check` | 0 处差异 |
+| `cargo build --examples` | exit 0 |
